@@ -822,6 +822,135 @@ The plan was executed in one long working session by AI agents, with the PM away
 3. Try the app daily against `.107` with input, once input can safely go to a separate machine.
 4. Phase 4: generated schema, then the settings sections.
 
+## 21. Picture quality, input and the encoder patch (2026-10-10, evening)
+
+The PM's first real use found that the picture looked blurry and pixelated, the mouse did nothing, and the screen showed an empty desktop instead of the Mac mini's own. This section records what caused each problem, measured on the live `.107` → Mac mini path against ground truth, and what changed.
+
+### Method
+- **Ground truth:** a known 1920×1080 test image (`tools/quality-bench/make_pattern.swift`) shown full screen at 1:1 in Chrome on the Mac mini's JetKVM display.
+- **Scoring:** frames recorded through `jetkvm-engine` are decoded and compared with the image.
+  - Luma PSNR/SSIM is measured against the image's ideal luma, which isolates encoder loss from 4:2:0 chroma.
+  - Text regions are scored separately.
+  - Scrolling is scored per frame after finding its offset.
+- **Configurations:** each one ran static and at 120/480/1080 px/s (`sweep.py`).
+- **Tools:** everything is in `tools/quality-bench`.
+
+### Findings (each verified on the device)
+
+| # | Finding | Evidence | Fix |
+|---|---|---|---|
+| Q1 | **Encoder QP floor and texture AQ blur text at any bitrate.** 0.5.9 never sets Rockchip RC parameters. The frame QP floor is about 26–28, and AQ adds up to +8 on textured blocks, so text sits at QP 32–36. | Macroblock QP dump; quality factor 1 → 4 changes neither keyframe size (~47 KB) nor QP | Firmware patch: QP floor tunable live (ladder 10–26), AQ off |
+| Q2 | **Wrong color matrix.** The TC358749 bridge outputs BT.601 limited-range YCbCr (the tc358743 driver hard-codes it), but the firmware tags HD streams BT.709. | Color patches fit BT.601 within 0.5 code values and BT.709 within 8 | The app decodes BT.601 always (`JETKVM_COLOR_MATRIX=709` overrides). Firmware VUI fix is still open. |
+| Q3 | **The app rendered at half size with bilinear filtering.** One remote pixel went to one physical pixel, and enlarging used plain bilinear. | App window captures | "Actual Size" = one remote pixel per point (window auto-sizes; pans when smaller). FSR 1 EASU+RCAS for enlarging, nearest optional, widened Catmull-Rom for shrinking. Correct chroma siting, sRGB-tagged layer, rendering on its own queue. |
+| Q4 | **The absolute mouse is invisible on an extended display.** macOS maps the absolute HID pointer onto its main display. The Mac mini's main display was the Dell U4021QW; the JetKVM was extended. | Absolute moves left the captured screen unchanged; relative moves showed the cursor | JetKVM made the Mac mini's main display (PM approved). One pointer mode only, by PM decision after trying two relative variants: the remote pointer goes exactly where the local one hovers (absolute HID), and the local pointer is hidden over the picture. |
+| Q5 | **Keyframes twice a second, and requests ignored.** GOP = fps/2 resends a ~47–90 KB keyframe every 0.5 s. PLI/FIR are ignored, and in this rockit build `RequestIDR(instant)` returns NOT_SUPPORT. | Stream capture; device log | Patch: 4 s GOP, plus a keyframe on session connect, PLI/FIR and a `requestKeyframe` RPC. The path is verified by watching for the IDR; this device uses non-instant `RequestIDR`. |
+| Q6 | **"Not reachable" alert although the device answered.** The probe failed transiently (first-launch Local Network permission is the likely cause). | User report; `curl` to the device succeeded | The window opens anyway and keeps connecting. Probe errors go to `app.log`, and ATS allows plain http to user-entered hosts. |
+| Q7 | **The display profile shifts colors.** Chrome converts sRGB into the EDID-derived "JetKVM v1" profile. | No measurable effect after switching to sRGB (the shift was Q2) | The JetKVM display is set to sRGB on the Mac mini anyway |
+
+### Measurements (patched firmware unless noted; H.265 unless noted)
+
+| Configuration | Text PSNR (static) | Idle stream | Keyframe | Scrolling 1080 px/s |
+|---|---|---|---|---|
+| Stock 0.5.9, H.264, factor 3 | 32.6 dB | 1.4 Mbit/s | 88 KB every 0.5 s | — |
+| QP floor 24, factor 3, 60 fps | 41.3 dB | 0.34 Mbit/s | 123 KB every 4 s | 42.4 dB at 3.7 Mbit/s |
+| QP floor 18 | 46.4 dB | 0.46 | 167 KB | 46.0 dB at 5.8 Mbit/s |
+| QP floor 14 | 49.8 dB | 0.56 | 198 KB | 47.5 dB at 6.9 Mbit/s |
+| QP floor 10 | 53.2 dB | 0.66 | 231 KB | 48.4 dB at 8.1 Mbit/s |
+
+- **Codec:** with QP floor 18 while scrolling, H.265 reaches 44.8/45.7/46.0 dB at 4.0/5.1/5.4 Mbit/s; H.264 reaches 39.7/42.9/44.7 dB at 4.7/6.5/8.0 Mbit/s. So H.265 needs about half the bitrate, and the app now always offers it (H.264 stays in the offer as a fallback).
+- **Frame rate** (QP floor 16, 1080 px/s):
+
+  | Factor | 60 fps | 30 fps |
+  |---|---|---|
+  | 0.5 | 42.8 dB at 2.9 Mbit/s | 46.7 dB at 2.3 Mbit/s |
+  | 1 | 45.3 dB at 4.2 Mbit/s | 46.8 dB at 2.4 Mbit/s |
+  | 2 | 46.5 dB at 6.0 Mbit/s | 47.2 dB at 2.3 Mbit/s |
+
+  With enough bandwidth 60 fps is nearly free; when bandwidth is tight, lowering the frame rate helps before raising the QP floor.
+- **Rendering cost:** FSR at 1080p → 4K costs about 0.5 ms of GPU time; decode takes 1–2 ms.
+
+### Automatic quality (`pkg/session/autoquality.go`)
+
+**Ladder:**
+
+| Level | Factor | fps | QP floor |
+|---|---|---|---|
+| minimal | 0.25 | 15 | 26 |
+| low | 0.5 | 30 | 21 |
+| balanced | 1 | 60 | 18 |
+| high | 2 | 60 | 14 |
+| maximum | 3 | 60 | 10 |
+
+**Starting level:** maximum below 8 ms RTT, high below 40 ms, balanced otherwise.
+
+**Stepping down** happens at once when one of these lasts two samples:
+- loss above 2%;
+- RTT over twice the baseline plus 40 ms;
+- a new unrepaired loss (the assembler starts waiting for a keyframe).
+
+Severe loss (above 10%) drops two levels in a single sample.
+
+**Stepping up** happens one level after 20 clean seconds.
+
+**Applying a level:** on patched firmware it goes through `setVideoEncoderParams` (bitrate, QP, fps, live). Stock firmware only has the quality factor, which restarts the encoder.
+
+**Manual control:** picking a level in the menu turns automatic off and is saved per device.
+
+### Encoder patch (`firmware/`)
+
+It applies to `jetkvm/kvm` `release/0.5.9` and is built with the upstream Docker toolchain on this Mac.
+
+Tested on `.107` non-persistently (`jetkvm_app_debug`; a reboot restores the stock app):
+- RC tuning;
+- 4 s GOP;
+- keyframe requests;
+- the runtime RPCs `getVideoEncoderParams`, `setVideoEncoderParams` and `requestKeyframe`.
+
+None of these changes touch EDID or HDMI hot-plug. Restarting the app itself re-plugs HDMI once.
+
+**Not yet done:**
+- persistent install (needs the PM's OK);
+- upstreaming;
+- fixing the VUI matrix (Q2) in firmware.
+
+### Independent review (one round, all findings re-checked)
+
+**Accepted and fixed:**
+
+| Severity | Finding | Fix |
+|---|---|---|
+| High | `--view-only` changed device settings: automatic quality ran in view-only sessions | View-only now never sends a quality change |
+| High | No panning in relative mode | The local pointer stays free in relative mode and pans in both modes |
+| High | The ATS exception was ignored, because `NSAllowsLocalNetworking` disables `NSAllowsArbitraryLoads` | Key removed |
+| High | An unreachable first address was retried forever | The window now re-probes all addresses and switches to the first one that answers |
+| Medium | On stock firmware the governor caused avoidable encoder restarts: oscillation between rungs, a factor compared before it was loaded, fallback on any error | Step-up delay doubles when it flaps; the current factor is read from the device; live support is detected once per client from method-not-found |
+| Medium | Turning Automatic off left an inconsistent level | Both sides now keep the current level |
+| Medium | The governor counted a repeated stats sample as a clean second | Samples now carry `SampledAt` and repeats are skipped |
+| Medium | Firmware encoder parameters outlived the session | They reset to defaults when the last session ends and on quality-factor changes. Untested on the device |
+| Medium | The Makefile H.265 self-test pass leaked its emulator | Fixed |
+| Low | Stale docs and dead code | Fixed |
+| Low | Whole-multiple mode was not always nearest-neighbor | It now always is |
+| Low | Library edits did not reach open windows | They now do |
+| Low | No controller-level tests for quality changes | Added; each new test fails without its fix |
+
+**Not adopted, with reasons:**
+- Persisting a `--scale` CLI override is a developer flag.
+- A race between a manual level and an in-flight governor step only means the last writer wins; it causes no harm.
+
+**PM feedback in the same round:**
+- Relative mode was dropped after two tries (pointer lock, then a free pointer). There is now a single absolute mode: hovering puts the remote pointer exactly there, also while the app is in the background; the local pointer is invisible over the picture; a first click into an inactive window reaches the remote.
+- The lagging remote cursor stays visible (the PM's choice). It is drawn into the HDMI picture by the target.
+- While debugging, the test harness and the app kept taking over each other's session (the firmware allows one), which looked like dead input. Tools that drive the device must not run while the app is connected.
+
+**Firmware tagging:** streams now use the BT.601 matrix with BT.709 primaries and transfer (the content is an sRGB desktop).
+
+### Decisions
+- H.265 only in the UI. H.264 remains in the offer and behind `--h264`, which the self-tests need because the emulator's live pattern is H.264.
+- "Actual Size" is the default view. FSR is the default upscaler; nearest is opt-in ("Exact Pixels").
+- BT.601 decode for JetKVM streams.
+- Automatic quality on by default.
+- The JetKVM display is the Mac mini's main display, with color profile sRGB.
+
 ## Appendix A: Key sources
 
 - `jetkvm/kvm` (`dev` @ `8f6c300`, `release/0.5.9`): https://github.com/jetkvm/kvm. REMB revert: https://github.com/jetkvm/kvm/pull/1693

@@ -75,9 +75,26 @@ A passing self-test prints a JSON report and ends with `selftest passed: …`. A
 
 Open `~/Downloads/JetKVM Desktop.app` (or `/Applications/` after `make -C macos install`). The Devices window (⌘N) holds the device library: a name, an ordered list of addresses (LAN IP, `.local` name, VPN name; `https://…` for TLS) and per-device preferences. Addresses are probed over HTTP in parallel and the earliest that answers wins; probing never opens a WebRTC session, because that would take over an existing one.
 
-Features: Retina-sharp video (fit, 1:1, integer scaling; fit window to remote screen), keyboard capture including system shortcuts (⌃⌘ releases), Mac/PC modifier profiles, paste as keystrokes (⌥⌘V), power control (ATX/DC), virtual media (⇧⌘M), serial console (⇧⌘L), extension port switching, H.264 by default with H.265 per device, several devices as tabs.
+Features: Retina-sharp video, keyboard capture including system shortcuts (⌃⌘ releases), a pointer that goes exactly where you hover, Mac/PC modifier profiles, paste as keystrokes (⌥⌘V), stream quality presets, power control (ATX/DC), virtual media (⇧⌘M), serial console (⇧⌘L), extension port switching, H.265 (measured sharper than H.264 at every bitrate on the JetKVM encoder), several devices as tabs.
 
-Permissions: grant Accessibility to capture system shortcuts. macOS also asks for Local Network access on first use.
+View modes (View menu ⌘1–⌘4, or the menu in the status bar), saved per device:
+
+| Mode | Shows the remote screen | Notes |
+|---|---|---|
+| Actual Size (default) | One remote pixel per point: the size a monitor of that resolution would show it | 2× on Retina, upscaled with FSR. The window sizes itself to the remote screen; a smaller window pans with the pointer. |
+| Scale to Fit | As large as the window allows | FSR when enlarging, a widened Catmull-Rom when shrinking |
+| Pixel for Pixel | One remote pixel per physical pixel | Tiny on Retina; for pixel inspection |
+| Largest Whole Multiple | The largest whole multiple that fits | Always exact (nearest-neighbor) pixels |
+
+Enlarging uses AMD FSR 1 (EASU edge-adaptive upscaling + RCAS sharpening, `FSR.swift`): crisp 1× text without stair steps or blur. View › Exact Pixels at Whole-Number Scales switches to nearest-neighbor where the scale is a whole number.
+
+Mouse: hovering over the remote picture puts the remote pointer exactly there (USB absolute pointer), also while another app is active; your own pointer is hidden over the picture, so only the remote one shows. A Mac maps that absolute pointer onto its **main display only**: on a Mac target the JetKVM's display must be the main display (System Settings › Displays), or the pointer never shows on it.
+
+Stream quality (Device › Stream Quality) is **Automatic** by default: the engine watches packet loss, round-trip growth and dropped frames and walks a quality ladder (`pkg/session/autoquality.go`), down at once when the link struggles and up after 20 clean seconds. Manual presets set the device's quality factor (a JetKVM setting shared by all its clients). The encoder uses VBR, so higher factors only cost bandwidth while the screen changes. Static text sharpness on stock firmware 0.5.9 is limited by the encoder's QP floor, not the bitrate; the optional encoder patch fixes that (see the plan's §21).
+
+Colors: the JetKVM's HDMI bridge outputs BT.601 YCbCr while firmware 0.5.9 tags HD streams BT.709, so the app always decodes BT.601 (`VideoView.colorParams`; `JETKVM_COLOR_MATRIX=709` restores the declared matrix).
+
+Permissions: grant Accessibility to capture system shortcuts. macOS also asks for Local Network access on first use. If the first address probe gets no answer (device asleep, VPN still coming up, permission prompt pending), the window opens anyway and keeps connecting.
 
 Command-line options (also used by the self-tests):
 
@@ -85,8 +102,7 @@ Command-line options (also used by the self-tests):
 |---|---|
 | `--device <address>` | Connect to an address instead of showing the device library |
 | `--view-only` | Never send keyboard or mouse input |
-| `--h264` / `--h265` | Override the codec offer |
-| `--scale fit\|actualSize\|integer`, `--profile mac\|pc`, `--window-size 1280x720` | View and input overrides |
+| `--scale actualSize\|fit\|pixelExact\|integer`, `--profile mac\|pc`, `--window-size 1280x720` | View and input overrides |
 | `--selftest <seconds>` and `--crash-engine-after`, `--inject-input`, `--exercise-extras`, `--snapshot <png>` | Self-test mode (prints JSON, exits 0 on success) |
 
 Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `JETKVM_ENGINE` points at a helper binary for development. `JETKVM_DESKTOP_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.
@@ -115,7 +131,7 @@ Invariants that changes must keep:
 
 - **Input only after identity is confirmed.** The session is `connected`, the only phase that accepts input, only after the device ID matches the pinned one. That check happens before login when the device answers `GET /device` without a password, otherwise over RPC right after login. A device ID learned on first connect pins later reconnects.
 - **HTTPS trust on first use.** `pkg/protocol/tlspin` pins the device CA that the presented chain is signed up to (the firmware issues a leaf per hostname, signed by a device CA it sends along). Publicly trusted devices are pinned to public trust (`webpki`). A change stops the session before any password is sent; the app offers "Trust New Certificate". The Swift probe (`CertificatePin.swift`) mirrors these rules.
-- **Video:** the engine assembles RTP into access units (`pkg/video`) and forwards them; when the app falls behind, it drops to the next keyframe rather than queueing. New devices offer H.264 only; JetKVM picks H.265 whenever the offer contains it.
+- **Video:** the engine assembles RTP into access units (`pkg/video`) and forwards them; when the app falls behind, it drops to the next keyframe rather than queueing. The app offers H.265 (H.264 stays in the offer as a fallback); JetKVM picks H.265 whenever the offer contains it. `--h264` exists only for the self-tests, because the emulator's live test pattern is H.264. The app renders on its own queue as frames arrive: NV12 → RGB at the source size (chroma upsampled at the stream's siting), then resampled to the drawable (`VideoView.swift`); the layer is tagged sRGB because the captured desktop is sRGB-encoded.
 - **One owner per session:** `pkg/session` runs the connect/reconnect loop on one goroutine; results of slow RPCs are applied only if their client is still current.
 
 ## Rules for contributors and agents
