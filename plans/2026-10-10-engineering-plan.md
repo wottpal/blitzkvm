@@ -951,6 +951,41 @@ None of these changes touch EDID or HDMI hot-plug. Restarting the app itself re-
 - Automatic quality on by default.
 - The JetKVM display is the Mac mini's main display, with color profile sRGB.
 
+## 22. Remote display follows the window (2026-10-11)
+
+**Ask (PM):** UI and pointer sizes should match the PM's own screen (same millimetres as a local window), and the remote picture should fill the window corner to corner at any window size.
+
+**Mechanism:** a new view mode, Match Window (opt-in after the finding below). The remote stays at one remote pixel per point (as in Actual Size), and the remote display changes resolution to fit the window. The only agent-less way to change a host's resolution is the EDID, which the JetKVM lets clients set over JSON-RPC (`getEDID`/`setEDID`, stock 0.5.9). After a resize settles (0.4 s), the app reads the device's EDID. It keeps the identity bytes (vendor, product, serial, name, audio and HDMI blocks), so the target keeps its display arrangement. It replaces every mode with one detailed timing of the window's size, writes the EDID back, and the target re-detects the display within 2–5 s. Code: `RemoteDisplay.swift` (sizes, timings, EDID), `DisplayFollower.swift` (debounce, coalescing, skipping when the size already matches), `DeviceWindowController` (triggers; snaps the window when the remote is up to one size step smaller).
+
+**Measured on the device (Mac mini target, 0.5.9):**
+
+| Finding | Evidence | Consequence |
+|---|---|---|
+| With CVT reduced blanking (~100 MHz), every size broke into horizontal stripes | 1504×944, 1536×944, 1472×944 and 1600×936 were all corrupt. The TC358749 driver starts CSI output at a fixed FIFO level (300 at 60 Hz) and its CSI clock is fixed (4 × 745 Mbit/s), so a slow HDMI input lets the output overtake it | Lines are padded with blanking so that width × (1 − 16·clock / 2980 Mbit/s) ≤ 250, which gives 128–162 MHz, close to 1080p60's 148.5 MHz |
+| Lines longer than 3.75 widths never stream (the bridge sees the mode; the device reports no picture) | 640×400, 720×480, 800×500, 960×480 and 960×540 failed with 4000-pixel lines. They work with lines of ≤ 3.75 widths plus extra blank lines | Small modes pad vertically. 640×400 is the tested minimum |
+| Widths that are not multiples of 16 come out sheared | The capture loop hands the encoder a stride of `RK_ALIGN_16(width)` (`video.c`), while capture lines are `width` long. 1400, 1470 and 1512 were sheared (one case was first seen by the PM); 1392, 1504, 1536, 1600 and 1920 are clean | Width step 16, height step 4 (540, 500, 876 and 956 are clean) |
+| An odd height (1504×941) hung the device: no network until a power cycle, and the EDID was already saved | After reboot the host sent 1504×941 again; the device stayed up only while no session streamed | Heights are always multiples of 4. The default EDID was restored over SSH before any session connected. Stock firmware has the same bug for any source sending an odd height (not fixed in the patch, which was not retested) |
+| 1920×1200 at 162 MHz works; above that the 165 MHz pixel clock limit at 60 Hz applies | 1920×1200 and 1920×1080 are clean at 60 fps | Maximum 1920×1200. Larger windows (wide screens in full screen) get the largest mode of their shape, scaled to fill |
+
+The exact EDID bytes for 1504×944 and the timings of seven device-verified sizes are pinned in `RemoteDisplayTests`.
+
+**Multi-display Macs (found after shipping it as the default):** the PM's Mac mini also drives a Dell. After a few resizes, the KVM picture showed an empty desktop and the pointer did nothing there. A probe (absolute pointer moves, diffed in the stream) confirmed that the JetKVM display was no longer main:
+
+| Replug with | JetKVM main afterwards |
+|---|---|
+| The same EDID again | yes |
+| A size never shown before | no (the Dell becomes main; the JetKVM gets an empty Space) |
+| A size that had been made main earlier (exact same EDID) | yes |
+| A new size with the identity bytes (8–24, including physical size) unchanged | no |
+
+macOS keys the display arrangement to the whole display configuration, not to vendor, product and serial number, so no EDID trick keeps a new size main. Match Window is therefore opt-in, explained once when chosen, and meant for targets where the JetKVM is the only display. Actual Size is the default again. The PM's Mac mini was restored through the KVM: default EDID, relative pointer onto the KVM display, Terminal there, then `make_kvm_main_display.swift`.
+
+**Behaviour:** on connect, the window takes the remote's current size if it fits on screen, so a reconnect does not re-plug the display. View-only sessions never change the EDID. The device saves the EDID; JetKVM web UI › Settings › Video › EDID (JetKVM Default) restores the default. Actual Size keeps the earlier behaviour: the remote resolution is never changed and the window follows the remote.
+
+**Full screen:** presentation options are now `[.fullScreen, .hideDock, .autoHideMenuBar]` (were `.hideMenuBar`). The menu bar, with the window's title bar and buttons, slides in at the top edge, so full screen can be left with the mouse; the bottom edge stays with the remote.
+
+**Firmware:** with the PM's approval, the encoder-patch build (`48af72f7…`) is now installed persistently on the PM's device via `jetkvm_app.update`. The stock app is backed up on the device (`/userdata/jetkvm/jetkvm_app.stock-0.5.9`) and locally. Auto Update stays on, so an upstream release newer than 0.5.9 will replace the patched build.
+
 ## Appendix A: Key sources
 
 - `jetkvm/kvm` (`dev` @ `8f6c300`, `release/0.5.9`): https://github.com/jetkvm/kvm. REMB revert: https://github.com/jetkvm/kvm/pull/1693

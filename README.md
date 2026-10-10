@@ -77,14 +77,19 @@ Open `~/Downloads/JetKVM Desktop.app` (or `/Applications/` after `make -C macos 
 
 Features: Retina-sharp video, keyboard capture including system shortcuts (⌃⌘ releases), a pointer that goes exactly where you hover, Mac/PC modifier profiles, paste as keystrokes (⌥⌘V), stream quality presets, power control (ATX/DC), virtual media (⇧⌘M), serial console (⇧⌘L), extension port switching, H.265 (measured sharper than H.264 at every bitrate on the JetKVM encoder), several devices as tabs.
 
-View modes (View menu ⌘1–⌘4, or the menu in the status bar), saved per device:
+View modes (View menu ⌘1–⌘5, or the menu in the status bar), saved per device:
 
 | Mode | Shows the remote screen | Notes |
 |---|---|---|
-| Actual Size (default) | One remote pixel per point: the size a monitor of that resolution would show it | 2× on Retina, upscaled with FSR. The window sizes itself to the remote screen; a smaller window pans with the pointer. |
+| Actual Size (default) | One remote pixel per point: the size a monitor of that resolution would show it | 2× on Retina, upscaled with FSR. The remote resolution stays as it is; the window sizes itself to it, and a smaller window pans with the pointer. |
 | Scale to Fit | As large as the window allows | FSR when enlarging, a widened Catmull-Rom when shrinking |
 | Pixel for Pixel | One remote pixel per physical pixel | Tiny on Retina; for pixel inspection |
 | Largest Whole Multiple | The largest whole multiple that fits | Always exact (nearest-neighbor) pixels |
+| Match Window (opt-in) | The remote display takes the window's size, one remote pixel per point | Resize the window (or go full screen) and the target switches its resolution to match within a few seconds. Only for targets where the JetKVM is the only display; details below. |
+
+**Match Window** (opt-in, explained once when chosen) changes the JetKVM's EDID (the display description the target reads over HDMI). The app keeps the device's identity, name and audio, and replaces its modes with a single mode of the window's size. The target re-detects the display, and the picture pauses for 2–5 s. The device saves the EDID, so the target keeps that resolution after the app quits. JetKVM web UI › Settings › Video › EDID (JetKVM Default) restores the default. Sizes run from 640×400 to 1920×1200: larger windows (wide or Retina-sized screens in full screen) get the largest mode of their shape, scaled to fill. Widths are multiples of 16 and heights multiples of 4, so a window can be up to 15 × 3 points larger than the remote. In a window, the app closes that gap by snapping the window to the remote; in full screen it stays as a thin border. View-only sessions never change the EDID. The limits are measured on the hardware (`RemoteDisplay.swift`, plan §22); an odd height hangs the device. **On a Mac with another monitor, do not use it:** macOS treats every new size as a new display with the default arrangement. The JetKVM display is then no longer the main display, so it shows an empty desktop and the absolute pointer cannot reach it. Only sizes that were previously made main come back main.
+
+Full screen: the menu bar, and with it the window's title bar and buttons, slides in when the pointer rests at the top edge, so you can leave full screen with the mouse. The Dock stays hidden because the bottom edge belongs to the remote.
 
 Enlarging uses AMD FSR 1 (EASU edge-adaptive upscaling + RCAS sharpening, `FSR.swift`): crisp 1× text without stair steps or blur. View › Exact Pixels at Whole-Number Scales switches to nearest-neighbor where the scale is a whole number.
 
