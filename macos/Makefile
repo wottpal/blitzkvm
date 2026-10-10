@@ -19,6 +19,14 @@ SIGN_IDENTITY ?= $(if $(DEVELOPER_ID),$(DEVELOPER_ID),-)
 SIGN_FLAGS ?= $(if $(filter -,$(SIGN_IDENTITY)),,--options runtime --timestamp)
 # Keychain profile for notarytool (see `notarize`).
 NOTARY_PROFILE ?= jetkvm
+# Every signed build is also copied here (empty to skip).
+COPY_TO ?= $(HOME)/Downloads
+define copy_signed
+	@if [ "$(SIGN_IDENTITY)" != "-" ] && [ -n "$(COPY_TO)" ]; then \
+		rm -rf "$(COPY_TO)/JetKVM Desktop.app" && ditto "$(APP)" "$(COPY_TO)/JetKVM Desktop.app" && \
+		echo "copied to $(COPY_TO)/JetKVM Desktop.app"; \
+	fi
+endef
 APP := build/JetKVM Desktop.app
 BUILD_NUMBER := $(shell git -C .. rev-list --count HEAD 2>/dev/null || echo 0)
 EMULATOR_ADDR ?= 127.0.0.1:18080
@@ -41,6 +49,7 @@ app: engine swift
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.jetkvm-mac "$(APP)"
 	codesign --verify --strict --deep "$(APP)"
 	@echo "built $(APP), signed by $(SIGN_IDENTITY)"
+	$(copy_signed)
 
 test:
 	swift test
@@ -78,6 +87,7 @@ notarize: app
 	rm -f build/JetKVM-Desktop.zip
 	ditto -c -k --keepParent "$(APP)" build/JetKVM-Desktop.zip
 	spctl --assess --type execute -vv "$(APP)"
+	$(copy_signed)
 	@echo "notarized: build/JetKVM-Desktop.zip"
 
 run: app
