@@ -60,6 +60,7 @@ type USBDevices struct {
 	Keyboard      bool
 	MassStorage   bool
 	SerialConsole bool
+	Audio         bool
 	Network       bool
 }
 

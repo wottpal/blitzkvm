@@ -24,9 +24,9 @@ const (
 
 var (
 	mu     sync.RWMutex
-	level  = defaultLevel
+	level            = defaultLevel
 	output io.Writer = zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}
-	base   = zerolog.New(output).Level(level).With().Timestamp().Logger()
+	base             = zerolog.New(output).Level(level).With().Timestamp().Logger()
 )
 
 func Configure(levelText string) error {

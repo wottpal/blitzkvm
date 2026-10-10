@@ -91,7 +91,12 @@ func DecodeMessage(data []byte) (any, error) {
 		return evt, nil
 	}
 
-	if _, ok := probe["result"]; ok || probe["error"] != nil {
+	// A response carries an id and no method. JetKVM omits "result" entirely
+	// when a handler returns only an error (Result is tagged omitempty), so
+	// {"jsonrpc":"2.0","id":1} is a successful void response.
+	_, hasResult := probe["result"]
+	_, hasID := probe["id"]
+	if hasResult || probe["error"] != nil || hasID {
 		var resp Response
 		if err := json.Unmarshal(data, &resp); err != nil {
 			return nil, err

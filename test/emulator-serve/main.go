@@ -46,6 +46,11 @@ func main() {
 	serveCmd.Flags().IntVar(&cfg.Width, "width", 960, "Emulated video width")
 	serveCmd.Flags().IntVar(&cfg.Height, "height", 540, "Emulated video height")
 	serveCmd.Flags().IntVar(&cfg.FPS, "fps", 15, "Emulated video frame rate")
+	serveCmd.Flags().IntVar(&cfg.GOP, "gop", 0, "Keyframe interval in frames (default: fps/2, like the device)")
+	serveCmd.Flags().StringVar(&cfg.ReplayH264, "replay-h264", "", "Annex-B H.264 clip with AUDs to stream instead of the test pattern")
+	serveCmd.Flags().StringVar(&cfg.ReplayH265, "replay-h265", "", "Annex-B H.265 clip with AUDs, streamed when a client offers H.265")
+	serveCmd.Flags().Float64Var(&cfg.Netem.LossRate, "loss", 0, "Probability (0..1) of dropping each outgoing RTP packet")
+	serveCmd.Flags().DurationVar(&cfg.Netem.Latency, "latency", 0, "One-way delay added to outgoing RTP packets")
 
 	rootCmd := &cobra.Command{
 		Use:   "emulator-serve",

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"image"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,6 +18,7 @@ import (
 	"github.com/lkarlslund/jetkvm-desktop/pkg/input"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/auth"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/video"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
 )
 
@@ -43,9 +43,16 @@ type Config struct {
 	Password        string
 	RPCTimeout      time.Duration
 	MutationTimeout time.Duration
-	Reconnect       bool
-	ReconnectBase   time.Duration
-	ReconnectMax    time.Duration
+	// ConnectTimeout bounds each connection attempt (default 15 s).
+	ConnectTimeout time.Duration
+	Reconnect      bool
+	ReconnectBase  time.Duration
+	ReconnectMax   time.Duration
+	// OfferH265 lets the device stream H.265; only for consumers that can
+	// decode it (see client.Config.OfferH265).
+	OfferH265 bool
+	// OnAccessUnit forwards video access units instead of decoding them.
+	OnAccessUnit func(video.AccessUnit)
 }
 
 type Snapshot struct {
@@ -74,18 +81,35 @@ type Snapshot struct {
 	RTCState               webrtc.PeerConnectionState
 	SignalingMode          client.SignalingMode
 	PasteInProgress        bool
+	// VideoSignal is "ready" or the device's HDMI error ("no_signal",
+	// "no_lock", "out_of_range"); empty until the first videoInputState.
+	VideoSignal    string
+	VideoWidth     int
+	VideoHeight    int
+	VideoFPS       float64
+	KeyboardLEDs   byte
+	USBState       string
+	FailsafeActive bool
+	FailsafeReason string
 }
 
 type Controller struct {
-	cfg Config
+	cfg  Config
+	auth *auth.Client
 
-	mu        sync.RWMutex
-	snapshot  Snapshot
-	serialLog serialScrollback
-	current   *client.Client
-	runParent context.Context
-	cancelRun context.CancelFunc
-	running   bool
+	mu           sync.RWMutex
+	snapshot     Snapshot
+	serialLog    serialScrollback
+	current      *client.Client
+	runParent    context.Context
+	cancelRun    context.CancelFunc
+	running      bool
+	runGen       uint64
+	runDone      chan struct{}
+	reconnectNow bool
+
+	pasteMu     sync.Mutex
+	pasteCancel context.CancelFunc
 }
 
 const (
@@ -175,8 +199,19 @@ func New(cfg Config) *Controller {
 	if cfg.ReconnectMax == 0 {
 		cfg.ReconnectMax = 10 * time.Second
 	}
+	if cfg.ConnectTimeout == 0 {
+		cfg.ConnectTimeout = 15 * time.Second
+	}
+	// One cookie jar for the controller's lifetime: reconnects reuse the
+	// session cookie instead of logging in (each login rotates the device's
+	// token, logging out other clients, and writes to its flash).
+	authClient, err := auth.NewClient()
+	if err != nil {
+		panic(fmt.Sprintf("auth client: %v", err))
+	}
 	return &Controller{
-		cfg: cfg,
+		cfg:  cfg,
+		auth: authClient,
 		snapshot: Snapshot{
 			Phase:   PhaseIdle,
 			Status:  "idle",
@@ -185,75 +220,10 @@ func New(cfg Config) *Controller {
 	}
 }
 
-func (c *Controller) Start(parent context.Context) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.cancelRun != nil {
-		return
-	}
-	ctx, cancel := context.WithCancel(parent)
-	c.runParent = ctx
-	c.cancelRun = cancel
-	c.running = true
-	go c.run(ctx)
-}
-
-func (c *Controller) Stop() {
-	c.mu.Lock()
-	if c.cancelRun != nil {
-		c.cancelRun()
-		c.cancelRun = nil
-	}
-	c.running = false
-	c.runParent = nil
-	if c.current != nil {
-		_ = c.current.Close()
-		c.current = nil
-	}
-	c.mu.Unlock()
-}
-
 func (c *Controller) Snapshot() Snapshot {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.snapshot
-}
-
-func (c *Controller) LatestFrame() image.Image {
-	c.mu.RLock()
-	current := c.current
-	c.mu.RUnlock()
-	if current == nil {
-		return nil
-	}
-	return current.LatestFrame()
-}
-
-func (c *Controller) LatestFrameInfo() (image.Image, time.Time) {
-	c.mu.RLock()
-	current := c.current
-	c.mu.RUnlock()
-	if current == nil {
-		return nil, time.Time{}
-	}
-	return current.LatestFrameInfo()
-}
-
-func (c *Controller) ReconnectNow() {
-	c.mu.Lock()
-	current := c.current
-	parent := c.runParent
-	shouldStart := !c.running && c.cancelRun != nil && parent != nil
-	if shouldStart {
-		c.running = true
-	}
-	c.mu.Unlock()
-	if current != nil {
-		_ = current.Close()
-	}
-	if shouldStart {
-		go c.run(parent)
-	}
 }
 
 func (c *Controller) SetPassword(password string) {
@@ -398,7 +368,9 @@ func (c *Controller) SetATXPowerAction(action ATXPowerAction) error {
 	if current == nil {
 		return errors.New("client not connected")
 	}
-	return current.SetATXPowerAction(withTimeout(context.Background(), c.cfg.MutationTimeout), string(action))
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.MutationTimeout)
+	defer cancel()
+	return current.SetATXPowerAction(ctx, string(action))
 }
 
 func (c *Controller) SetActiveExtension(extensionID string) error {
@@ -429,7 +401,9 @@ func (c *Controller) SetActiveExtension(extensionID string) error {
 		return nil
 	}
 
-	settings, err := c.GetSerialSettings(withTimeout(context.Background(), c.cfg.RPCTimeout))
+	getCtx, getCancel := context.WithTimeout(context.Background(), c.cfg.RPCTimeout)
+	defer getCancel()
+	settings, err := c.GetSerialSettings(getCtx)
 	if err != nil {
 		defaults := defaultSerialSettings()
 		c.setState(func(s *Snapshot) {
@@ -449,7 +423,9 @@ func (c *Controller) SetDCPowerState(enabled bool) error {
 	if current == nil {
 		return errors.New("client not connected")
 	}
-	return current.SetDCPowerState(withTimeout(context.Background(), c.cfg.MutationTimeout), enabled)
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.MutationTimeout)
+	defer cancel()
+	return current.SetDCPowerState(ctx, enabled)
 }
 
 func (c *Controller) SetDCRestoreState(state int) error {
@@ -457,7 +433,9 @@ func (c *Controller) SetDCRestoreState(state int) error {
 	if current == nil {
 		return errors.New("client not connected")
 	}
-	return current.SetDCRestoreState(withTimeout(context.Background(), c.cfg.MutationTimeout), state)
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.MutationTimeout)
+	defer cancel()
+	return current.SetDCRestoreState(ctx, state)
 }
 
 func (c *Controller) SetSerialSettings(settings SerialSettings) error {
@@ -478,7 +456,9 @@ func (c *Controller) SetSerialSettings(settings SerialSettings) error {
 			Sort: button.Sort,
 		})
 	}
-	if err := current.SetSerialSettings(withTimeout(context.Background(), c.cfg.MutationTimeout), client.SerialSettings{
+	setCtx, setCancel := context.WithTimeout(context.Background(), c.cfg.MutationTimeout)
+	defer setCancel()
+	if err := current.SetSerialSettings(setCtx, client.SerialSettings{
 		BaudRate: settings.BaudRate,
 		DataBits: settings.DataBits,
 		Parity:   settings.Parity,
@@ -511,7 +491,9 @@ func (c *Controller) SetSerialCommandHistory(history []string) error {
 	if current == nil {
 		return errors.New("client not connected")
 	}
-	return current.SetSerialCommandHistory(withTimeout(context.Background(), c.cfg.MutationTimeout), history)
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.MutationTimeout)
+	defer cancel()
+	return current.SetSerialCommandHistory(ctx, history)
 }
 
 func (c *Controller) SendCustomCommand(command string) error {
@@ -519,7 +501,9 @@ func (c *Controller) SendCustomCommand(command string) error {
 	if current == nil {
 		return errors.New("client not connected")
 	}
-	return current.SendCustomCommand(withTimeout(context.Background(), c.cfg.MutationTimeout), command)
+	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.MutationTimeout)
+	defer cancel()
+	return current.SendCustomCommand(ctx, command)
 }
 
 func (c *Controller) SendSerialText(text string) error {
@@ -562,6 +546,7 @@ func (c *Controller) SetUSBDevices(devices USBDevices) error {
 			Keyboard:      devices.Keyboard,
 			MassStorage:   devices.MassStorage,
 			SerialConsole: devices.SerialConsole,
+			Audio:         devices.Audio,
 			Network:       devices.Network,
 		})
 	}, func(ctx context.Context) (bool, error) {
@@ -877,6 +862,7 @@ func (c *Controller) GetUSBDevices(ctx context.Context) (USBDevices, error) {
 		Keyboard:      devices.Keyboard,
 		MassStorage:   devices.MassStorage,
 		SerialConsole: devices.SerialConsole,
+		Audio:         devices.Audio,
 		Network:       devices.Network,
 	}, nil
 }
@@ -1756,19 +1742,30 @@ func (c *Controller) SendAbsPointer(x, y int32, buttons byte) error {
 	return nil
 }
 
-func (c *Controller) SendRelMouse(dx, dy int8, buttons byte) error {
+// SendRelMouse sends a relative move; large deltas are split, not clamped.
+func (c *Controller) SendRelMouse(dx, dy int, buttons byte) error {
 	log := logging.Subsystem("session")
 	current := c.clientIfConnected()
 	if current == nil {
 		err := errors.New("client not connected")
-		log.Debug().Err(err).Int8("dx", dx).Int8("dy", dy).Uint8("buttons", buttons).Msg("failed to send relative mouse")
+		log.Debug().Err(err).Int("dx", dx).Int("dy", dy).Uint8("buttons", buttons).Msg("failed to send relative mouse")
 		return err
 	}
 	if err := current.SendRelMouse(dx, dy, buttons); err != nil {
-		log.Debug().Err(err).Int8("dx", dx).Int8("dy", dy).Uint8("buttons", buttons).Msg("failed to forward relative mouse")
+		log.Debug().Err(err).Int("dx", dx).Int("dy", dy).Uint8("buttons", buttons).Msg("failed to forward relative mouse")
 		return err
 	}
 	return nil
+}
+
+// ReleaseAllInput releases every key and mouse button on the remote. Call it
+// whenever local input focus is lost mid-press (focus change, ⌘Tab, resize).
+func (c *Controller) ReleaseAllInput() error {
+	current := c.clientIfConnected()
+	if current == nil {
+		return errors.New("client not connected")
+	}
+	return errors.Join(current.ReleaseAllKeys(), current.ReleasePointerButtons())
 }
 
 func (c *Controller) SendWheel(wheelY, wheelX int8) error {
@@ -1792,10 +1789,32 @@ func (c *Controller) ExecutePaste(text string, delay uint16) ([]rune, error) {
 	if len(steps) == 0 {
 		return invalid, nil
 	}
-	return invalid, current.ExecuteKeyboardMacro(true, steps)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.pasteMu.Lock()
+	if c.pasteCancel != nil {
+		c.pasteCancel()
+	}
+	c.pasteCancel = cancel
+	c.pasteMu.Unlock()
+	defer func() {
+		cancel()
+		c.pasteMu.Lock()
+		c.pasteCancel = nil
+		c.pasteMu.Unlock()
+	}()
+	// Chunked (≤128 steps per message), each chunk waits for the device to
+	// finish: long texts no longer exceed the data channel message limit.
+	return invalid, current.TypeMacro(ctx, steps)
 }
 
 func (c *Controller) CancelPaste() error {
+	c.pasteMu.Lock()
+	cancel := c.pasteCancel
+	c.pasteMu.Unlock()
+	if cancel != nil {
+		cancel()
+		return nil
+	}
 	current := c.clientIfConnected()
 	if current == nil {
 		return errors.New("client not connected")
@@ -1844,345 +1863,6 @@ func (c *Controller) Stats() client.StatsSnapshot {
 	return stats
 }
 
-func (c *Controller) run(ctx context.Context) {
-	defer func() {
-		c.mu.Lock()
-		c.running = false
-		c.mu.Unlock()
-	}()
-	var attempt int
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		c.setState(func(s *Snapshot) {
-			if attempt == 0 {
-				s.Phase = PhaseConnecting
-				s.Status = "connecting"
-			} else {
-				s.Phase = PhaseReconnecting
-				s.Status = fmt.Sprintf("reconnecting (attempt %d)", attempt)
-			}
-			s.HIDReady = false
-			s.VideoReady = false
-			s.SerialConsoleReady = false
-			s.SerialConsoleError = ""
-			s.SerialConsoleBuffer = ""
-			s.SerialConsoleTruncated = false
-			s.SerialSettings = nil
-		})
-		c.serialLog.Reset()
-
-		cl := c.newClient()
-		c.setClient(cl)
-
-		err := cl.Connect(ctx)
-		if err != nil {
-			c.setConnectError(err)
-			if !c.cfg.Reconnect || ctx.Err() != nil || isAuthError(err) {
-				return
-			}
-			if !sleepWithContext(ctx, backoff(attempt, c.cfg.ReconnectBase, c.cfg.ReconnectMax)) {
-				return
-			}
-			attempt++
-			continue
-		}
-
-		waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err = cl.WaitForHID(waitCtx)
-		cancel()
-		if err != nil {
-			c.setConnectError(err)
-			if !c.cfg.Reconnect || ctx.Err() != nil {
-				return
-			}
-			if !sleepWithContext(ctx, backoff(attempt, c.cfg.ReconnectBase, c.cfg.ReconnectMax)) {
-				return
-			}
-			attempt++
-			continue
-		}
-
-		_ = c.bootstrap(ctx, cl)
-		reason, stop := c.watch(ctx, cl)
-		if stop {
-			return
-		}
-
-		switch reason {
-		case "other_session":
-			c.setState(func(s *Snapshot) {
-				s.Phase = PhaseOtherSession
-				s.Status = "another session took over"
-				s.HIDReady = false
-			})
-			return
-		case "rebooting":
-			c.setState(func(s *Snapshot) {
-				s.Phase = PhaseRebooting
-				s.Status = "device rebooting"
-			})
-		default:
-			c.setState(func(s *Snapshot) {
-				s.Phase = PhaseReconnecting
-				s.Status = "connection lost, retrying"
-				s.HIDReady = false
-			})
-		}
-
-		_ = cl.Close()
-		if !c.cfg.Reconnect || !sleepWithContext(ctx, backoff(attempt, c.cfg.ReconnectBase, c.cfg.ReconnectMax)) {
-			return
-		}
-		attempt++
-	}
-}
-
-func (c *Controller) bootstrap(ctx context.Context, cl *client.Client) error {
-	if deviceID, err := cl.GetDeviceID(ctx); err == nil {
-		c.setState(func(s *Snapshot) { s.DeviceID = deviceID })
-	}
-	if activeExtension, err := cl.GetActiveExtension(ctx); err == nil {
-		c.setState(func(s *Snapshot) { s.ActiveExtension = activeExtension })
-		if activeExtension == "atx-power" {
-			if atxState, stateErr := cl.GetATXState(ctx); stateErr == nil {
-				c.setState(func(s *Snapshot) {
-					s.ATXState = &ATXState{
-						Power: atxState.Power,
-						HDD:   atxState.HDD,
-					}
-				})
-			}
-		}
-		if activeExtension == "serial-console" {
-			settings, stateErr := cl.GetSerialSettings(ctx)
-			if stateErr != nil {
-				defaults := defaultSerialSettings()
-				c.setState(func(s *Snapshot) {
-					s.SerialSettings = &defaults
-					s.SerialConsoleError = stateErr.Error()
-				})
-			} else {
-				buttons := make([]QuickButton, 0, len(settings.Buttons))
-				for _, button := range settings.Buttons {
-					buttons = append(buttons, QuickButton{
-						ID:      button.ID,
-						Label:   button.Label,
-						Command: button.Command,
-						Terminator: Terminator{
-							Label: button.Terminator.Label,
-							Value: button.Terminator.Value,
-						},
-						Sort: button.Sort,
-					})
-				}
-				c.setState(func(s *Snapshot) {
-					s.SerialSettings = &SerialSettings{
-						BaudRate: settings.BaudRate,
-						DataBits: settings.DataBits,
-						Parity:   settings.Parity,
-						StopBits: settings.StopBits,
-						Terminator: Terminator{
-							Label: settings.Terminator.Label,
-							Value: settings.Terminator.Value,
-						},
-						HideSerialSettings: settings.HideSerialSettings,
-						EnableEcho:         settings.EnableEcho,
-						NormalizeMode:      settings.NormalizeMode,
-						NormalizeLineEnd:   settings.NormalizeLineEnd,
-						TabRender:          settings.TabRender,
-						PreserveANSI:       settings.PreserveANSI,
-						ShowNLTag:          settings.ShowNLTag,
-						Buttons:            buttons,
-					}
-				})
-			}
-		}
-	}
-	if quality, err := cl.GetStreamQualityFactor(ctx); err == nil {
-		c.setState(func(s *Snapshot) { s.Quality = quality })
-	}
-	if keyboardLayout, err := cl.GetKeyboardLayout(ctx); err == nil {
-		c.setState(func(s *Snapshot) { s.KeyboardLayout = normalizeKeyboardLayoutCode(keyboardLayout) })
-	}
-	if edid, err := cl.GetEDID(ctx); err == nil {
-		c.setState(func(s *Snapshot) { s.EDID = edid })
-	}
-	if version, err := cl.GetLocalVersion(ctx); err == nil {
-		c.setState(func(s *Snapshot) {
-			s.AppVersion = version.AppVersion
-			s.SystemVersion = version.SystemVersion
-		})
-	}
-	if updateStatus, err := cl.GetUpdateStatus(ctx); err == nil {
-		c.setState(func(s *Snapshot) {
-			s.AppUpdateAvailable = updateStatus.AppUpdateAvailable
-			s.SystemUpdateAvailable = updateStatus.SystemUpdateAvailable
-		})
-	}
-	if network, err := cl.GetNetworkSettings(ctx); err == nil {
-		c.setState(func(s *Snapshot) { s.Hostname = network.Hostname })
-	}
-	c.setState(func(s *Snapshot) {
-		s.Phase = PhaseConnected
-		s.Status = "connected"
-		s.HIDReady = true
-	})
-	return nil
-}
-
-func (c *Controller) watch(ctx context.Context, cl *client.Client) (reason string, stop bool) {
-	for {
-		select {
-		case <-ctx.Done():
-			return "", true
-		case evt, ok := <-cl.Events():
-			if !ok {
-				return "disconnected", false
-			}
-			switch evt.Method {
-			case "otherSessionConnected":
-				return "other_session", false
-			case "willReboot":
-				return "rebooting", false
-			case "networkState":
-				host := extractString(evt.Params, "hostname")
-				c.setState(func(s *Snapshot) { s.Hostname = host })
-			case "videoInputState":
-				state := ""
-				switch v := evt.Params.(type) {
-				case string:
-					state = v
-				case map[string]any:
-					state = extractString(v, "state")
-				}
-				if state != "" {
-					c.setState(func(s *Snapshot) { s.Status = "video: " + state })
-				}
-			case "atxState":
-				c.setState(func(s *Snapshot) {
-					s.ATXState = &ATXState{
-						Power: extractBool(evt.Params, "power"),
-						HDD:   extractBool(evt.Params, "hdd"),
-					}
-				})
-			}
-		case serial, ok := <-cl.SerialEvents():
-			if !ok {
-				return "disconnected", false
-			}
-			c.mu.RLock()
-			activeExtension := c.snapshot.ActiveExtension
-			c.mu.RUnlock()
-			if activeExtension != "serial-console" {
-				continue
-			}
-			buffer, truncated := c.serialLog.Append(serial.Text)
-			c.setState(func(s *Snapshot) {
-				s.SerialConsoleBuffer = buffer
-				s.SerialConsoleTruncated = truncated
-			})
-		case life, ok := <-cl.Lifecycle():
-			if !ok {
-				return "disconnected", false
-			}
-			switch life.Type {
-			case "signaling_mode":
-				c.setState(func(s *Snapshot) { s.SignalingMode = life.Signaling })
-			case "hid_ready":
-				c.setState(func(s *Snapshot) { s.HIDReady = true })
-			case "video_ready":
-				c.setState(func(s *Snapshot) { s.VideoReady = true })
-			case "serial_ready":
-				c.setState(func(s *Snapshot) {
-					s.SerialConsoleReady = true
-					s.SerialConsoleError = ""
-				})
-			case "paste_state":
-				c.setState(func(s *Snapshot) { s.PasteInProgress = life.PasteState })
-			case "peer_state":
-				c.setState(func(s *Snapshot) { s.RTCState = life.Connection })
-				if life.Connection == webrtc.PeerConnectionStateDisconnected ||
-					life.Connection == webrtc.PeerConnectionStateFailed ||
-					life.Connection == webrtc.PeerConnectionStateClosed {
-					return "disconnected", false
-				}
-				if life.Connection == webrtc.PeerConnectionStateConnected {
-					c.setState(func(s *Snapshot) {
-						s.Phase = PhaseConnected
-						s.Status = "connected"
-					})
-				}
-			case "connect_error", "video_error":
-				c.setState(func(s *Snapshot) { s.LastError = life.Err })
-			case "serial_error":
-				c.setState(func(s *Snapshot) { s.SerialConsoleError = life.Err })
-			}
-		}
-	}
-}
-
-func (c *Controller) newClient() *client.Client {
-	cl, _ := client.New(client.Config{
-		BaseURL:    c.cfg.BaseURL,
-		Password:   c.cfg.Password,
-		RPCTimeout: c.cfg.RPCTimeout,
-	})
-	return cl
-}
-
-func (c *Controller) setConnectError(err error) {
-	c.setState(func(s *Snapshot) {
-		s.LastError = err.Error()
-		s.HIDReady = false
-		s.VideoReady = false
-		s.SerialConsoleReady = false
-		if isAuthError(err) {
-			s.Phase = PhaseAuthFailed
-			s.Status = "authentication failed"
-		} else {
-			s.Phase = PhaseDisconnected
-			s.Status = "connection failed"
-		}
-	})
-}
-
-func (c *Controller) setState(update func(*Snapshot)) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	update(&c.snapshot)
-}
-
-func (c *Controller) setClient(cl *client.Client) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.current != nil {
-		_ = c.current.Close()
-	}
-	c.current = cl
-}
-
-func (c *Controller) clientIfConnected() *client.Client {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.current == nil || c.snapshot.Phase != PhaseConnected {
-		return nil
-	}
-	return c.current
-}
-
-func (c *Controller) forceDisconnect(ctx context.Context) error {
-	current := c.clientIfConnected()
-	if current == nil {
-		return errors.New("client not connected")
-	}
-	return current.ForceDisconnect(ctx)
-}
-
 func (c *Controller) mutateAndConfirm(mutate func(context.Context) error, confirm func(context.Context) (bool, error)) error {
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.MutationTimeout)
 	defer cancel()
@@ -2227,34 +1907,6 @@ func (c *Controller) mutateAndConfirm(mutate func(context.Context) error, confir
 	}
 }
 
-func backoff(attempt int, base, max time.Duration) time.Duration {
-	d := base << attempt
-	if d > max {
-		return max
-	}
-	return d
-}
-
-func sleepWithContext(ctx context.Context, d time.Duration) bool {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
-
-func withTimeout(ctx context.Context, d time.Duration) context.Context {
-	timeoutCtx, cancel := context.WithTimeout(ctx, d)
-	go func() {
-		<-timeoutCtx.Done()
-		cancel()
-	}()
-	return timeoutCtx
-}
-
 func sessionLocalAuthMode(mode auth.LocalAuthMode) LocalAuthMode {
 	switch mode {
 	case auth.LocalAuthModeNoPassword:
@@ -2264,19 +1916,6 @@ func sessionLocalAuthMode(mode auth.LocalAuthMode) LocalAuthMode {
 	default:
 		return LocalAuthModeUnknown
 	}
-}
-
-func isAuthError(err error) bool {
-	var authErr *auth.Error
-	if errors.As(err, &authErr) {
-		switch authErr.StatusCode {
-		case 401, 403, 429:
-			return true
-		}
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unauthorized") ||
-		strings.Contains(msg, "authentication failed")
 }
 
 func normalizeKeyboardLayoutCode(layout string) string {

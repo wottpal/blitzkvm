@@ -3,37 +3,171 @@ package video
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
-	"image/color"
-	"runtime"
+	"io"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	openh264 "github.com/Azunyan1111/openh264-go"
-	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
-	"github.com/pion/webrtc/v4/pkg/media/samplebuilder"
 )
+
+// CodecFromMime maps a WebRTC MIME type to a Codec.
+func CodecFromMime(mime string) (Codec, error) {
+	switch mime {
+	case webrtc.MimeTypeH264:
+		return CodecH264, nil
+	case webrtc.MimeTypeH265:
+		return CodecH265, nil
+	default:
+		return 0, fmt.Errorf("unsupported codec %s", mime)
+	}
+}
+
+// Receive reads RTP from track into an Assembler until ctx ends or the track
+// closes for good. Transient read errors (malformed packets) are skipped
+// instead of ending the stream. rtt, if non-nil, is polled for the current
+// round-trip estimate.
+func Receive(ctx context.Context, track *webrtc.TrackRemote, asm *Assembler, rtt func() time.Duration) error {
+	tickCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		var lastRTTPoll time.Time
+		for {
+			select {
+			case <-tickCtx.Done():
+				return
+			case now := <-ticker.C:
+				if rtt != nil && now.Sub(lastRTTPoll) > 2*time.Second {
+					lastRTTPoll = now
+					asm.SetRTT(rtt())
+				}
+				asm.Tick(now)
+			}
+		}
+	}()
+
+	consecutiveErrors := 0
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		pkt, _, err := track.ReadRTP()
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrDeadlineExceeded) || ctx.Err() != nil {
+				return err
+			}
+			consecutiveErrors++
+			if consecutiveErrors > 100 {
+				return fmt.Errorf("video track: %w", err)
+			}
+			continue
+		}
+		consecutiveErrors = 0
+		asm.Push(pkt, time.Now())
+	}
+}
 
 type Frame struct {
 	Image image.Image
 	At    time.Time
 }
 
-type Stream struct {
-	mu         sync.RWMutex
-	latest     *Frame
-	lastErr    error
-	frameCh    chan Frame
-	closeOnce  sync.Once
-	cancelFunc context.CancelFunc
-	onClose    func() error
+// DecodeStats describes the OpenH264 decoding sink.
+type DecodeStats struct {
+	Decoded      uint64
+	DecodeErrors uint64
+	Skipped      uint64
+	LastError    string
 }
 
-func NewStream() *Stream {
-	return &Stream{frameCh: make(chan Frame, 4)}
+// Stream decodes H.264 access units with OpenH264 on its own goroutine and
+// keeps the latest picture. It is the sink used by the Ebiten test client; the
+// native app decodes with VideoToolbox instead.
+type Stream struct {
+	mu      sync.RWMutex
+	latest  *Frame
+	lastErr error
+
+	units     chan AccessUnit
+	needKey   atomic.Bool
+	decoded   atomic.Uint64
+	errors    atomic.Uint64
+	skipped   atomic.Uint64
+	closeOnce sync.Once
+	done      chan struct{}
+	cancel    context.CancelFunc
+}
+
+// NewDecodingStream starts an OpenH264 decoder goroutine. Feed it with Push.
+func NewDecodingStream(parent context.Context) (*Stream, error) {
+	decoder, err := openh264.NewDecoder(bytes.NewReader(nil))
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s := &Stream{units: make(chan AccessUnit, 8), done: make(chan struct{}), cancel: cancel}
+	go func() {
+		defer close(s.done)
+		defer decoder.Close()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case au := <-s.units:
+				s.decode(decoder, au)
+			}
+		}
+	}()
+	return s, nil
+}
+
+func (s *Stream) decode(decoder *openh264.Decoder, au AccessUnit) {
+	if s.needKey.Load() {
+		if !au.Keyframe {
+			s.skipped.Add(1)
+			return
+		}
+		s.needKey.Store(false)
+	}
+	img, err := decoder.Decode(au.Data)
+	if err == nil && img == nil {
+		// OpenH264 holds Main/High-profile pictures for one call; the device
+		// sends no B-frames, so flushing returns the picture immediately.
+		img, err = decoder.Flush()
+	}
+	if err != nil {
+		s.errors.Add(1)
+		s.setError(err)
+		return
+	}
+	if img == nil {
+		return
+	}
+	s.decoded.Add(1)
+	s.mu.Lock()
+	s.latest = &Frame{Image: img, At: time.Now()}
+	s.mu.Unlock()
+}
+
+// Push queues an access unit for decoding. If the decoder falls behind, the
+// unit is dropped and decoding resumes at the next keyframe.
+func (s *Stream) Push(au AccessUnit) {
+	if au.Codec != CodecH264 {
+		return
+	}
+	select {
+	case s.units <- au:
+	default:
+		s.skipped.Add(1)
+		s.needKey.Store(true)
+	}
 }
 
 func (s *Stream) Latest() *Frame {
@@ -48,15 +182,12 @@ func (s *Stream) Err() error {
 	return s.lastErr
 }
 
-func (s *Stream) publish(frame Frame) {
-	s.mu.Lock()
-	s.latest = &frame
-	s.mu.Unlock()
-
-	select {
-	case s.frameCh <- frame:
-	default:
+func (s *Stream) Stats() DecodeStats {
+	st := DecodeStats{Decoded: s.decoded.Load(), DecodeErrors: s.errors.Load(), Skipped: s.skipped.Load()}
+	if err := s.Err(); err != nil {
+		st.LastError = err.Error()
 	}
+	return st
 }
 
 func (s *Stream) setError(err error) {
@@ -65,199 +196,10 @@ func (s *Stream) setError(err error) {
 	s.mu.Unlock()
 }
 
-func (s *Stream) Frames() <-chan Frame {
-	return s.frameCh
-}
-
+// Close stops the decoder and waits for it to finish.
 func (s *Stream) Close() {
 	s.closeOnce.Do(func() {
-		if s.cancelFunc != nil {
-			s.cancelFunc()
-		}
-		if s.onClose != nil {
-			_ = s.onClose()
-		}
+		s.cancel()
+		<-s.done
 	})
-}
-
-func AttachRemoteTrack(parent context.Context, track *webrtc.TrackRemote) (*Stream, error) {
-	if track.Codec().MimeType != webrtc.MimeTypeH264 {
-		return nil, fmt.Errorf("unsupported codec %s", track.Codec().MimeType)
-	}
-
-	ctx, cancel := context.WithCancel(parent)
-	stream := NewStream()
-	stream.cancelFunc = cancel
-
-	decoder, err := openh264.NewDecoder(bytes.NewReader(nil))
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	stream.onClose = decoder.Close
-
-	go func() {
-		defer stream.Close()
-
-		// Screen-content H.264 keyframes can span well over hundreds of RTP packets,
-		// especially on real 1080p devices. A too-small samplebuilder buffer drops
-		// fragmented access units before the decoder ever sees a complete frame.
-		sb := samplebuilder.New(
-			4096,
-			&codecs.H264Packet{},
-			track.Codec().ClockRate,
-			samplebuilder.WithMaxTimeDelay(33*time.Millisecond),
-		)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			pkt, _, readErr := track.ReadRTP()
-			if readErr != nil {
-				return
-			}
-			sb.Push(pkt)
-			for {
-				sample := sb.Pop()
-				if sample == nil {
-					break
-				}
-				payload := ensureAnnexB(sample.Data)
-				if len(payload) == 0 {
-					continue
-				}
-				img, err := decoder.Decode(payload)
-				if err != nil {
-					stream.setError(err)
-					continue
-				}
-				if img != nil {
-					stream.publish(Frame{Image: img, At: time.Now()})
-				}
-			}
-		}
-	}()
-
-	return stream, nil
-}
-
-func StartTestPattern(ctx context.Context, width, height, fps int, track *webrtc.TrackLocalStaticSample) error {
-	params := openh264.NewEncoderParams()
-	params.Width = width
-	params.Height = height
-	params.BitRate = width * height * 4
-	params.MaxFrameRate = float32(fps)
-	params.UsageType = openh264.ScreenContentRealTime
-	params.EnableFrameSkip = false
-	params.IntraPeriod = uint(fps * 2)
-
-	encoder, err := openh264.NewEncoder(params)
-	if err != nil {
-		return err
-	}
-
-	ticker := time.NewTicker(time.Second / time.Duration(fps))
-	go func() {
-		defer ticker.Stop()
-		defer closeEncoder(encoder)
-
-		frameIndex := 0
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if frameIndex%(fps*2) == 0 {
-					_ = encoder.ForceKeyFrame()
-				}
-				img := newPatternFrame(width, height, frameIndex)
-				payload, err := encoder.Encode(img)
-				if err != nil {
-					return
-				}
-				if len(payload) == 0 {
-					frameIndex++
-					continue
-				}
-				if err := track.WriteSample(media.Sample{
-					Data:     payload,
-					Duration: time.Second / time.Duration(fps),
-				}); err != nil {
-					return
-				}
-				frameIndex++
-			}
-		}
-	}()
-
-	return nil
-}
-
-func closeEncoder(encoder *openh264.Encoder) {
-	// openh264-go encoder teardown can block indefinitely on Windows in CI.
-	// The process is short-lived in tests and the OS will reclaim resources.
-	if runtime.GOOS == "windows" {
-		return
-	}
-	_ = encoder.Close()
-}
-
-func newPatternFrame(width, height, frameIndex int) *image.YCbCr {
-	img := image.NewYCbCr(image.Rect(0, 0, width, height), image.YCbCrSubsampleRatio420)
-	phase := frameIndex % 255
-
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			yy := uint8((x + y + phase) % 256)
-			img.Y[y*img.YStride+x] = yy
-		}
-	}
-
-	for y := 0; y < height/2; y++ {
-		for x := 0; x < width/2; x++ {
-			img.Cb[y*img.CStride+x] = uint8((x*2 + phase*3) % 256)
-			img.Cr[y*img.CStride+x] = uint8((y*2 + phase*5) % 256)
-		}
-	}
-
-	drawBox(img, 20+(frameIndex*7)%(max(1, width-120)), 20+(frameIndex*5)%(max(1, height-80)), 100, 60, color.RGBA{R: 255, G: 255, B: 255, A: 255})
-	return img
-}
-
-func drawBox(img *image.YCbCr, x0, y0, w, h int, c color.Color) {
-	ycbcr := color.YCbCrModel.Convert(c).(color.YCbCr)
-	for y := max(0, y0); y < minInt(img.Rect.Dy(), y0+h); y++ {
-		for x := max(0, x0); x < minInt(img.Rect.Dx(), x0+w); x++ {
-			img.Y[y*img.YStride+x] = ycbcr.Y
-			img.Cb[(y/2)*img.CStride+(x/2)] = ycbcr.Cb
-			img.Cr[(y/2)*img.CStride+(x/2)] = ycbcr.Cr
-		}
-	}
-}
-
-func ensureAnnexB(data []byte) []byte {
-	if len(data) == 0 {
-		return nil
-	}
-	if bytes.HasPrefix(data, []byte{0x00, 0x00, 0x00, 0x01}) || bytes.HasPrefix(data, []byte{0x00, 0x00, 0x01}) {
-		return data
-	}
-	return append([]byte{0x00, 0x00, 0x00, 0x01}, data...)
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

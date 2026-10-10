@@ -733,6 +733,11 @@ func (a *App) syncMouse() {
 		return
 	}
 	if !a.focused {
+		if a.lastButtons != 0 {
+			// Focus left mid-press (⌘Tab during a drag): release on the remote
+			// too, or the button stays stuck there.
+			_ = a.ctrl.ReleaseAllInput()
+		}
 		a.lastX = x
 		a.lastY = y
 		a.lastButtons = buttons
@@ -775,7 +780,7 @@ func (a *App) syncMouse() {
 					Uint8("last_buttons", a.lastButtons).
 					Msg("sending relative mouse report")
 			}
-			if err := a.ctrl.SendRelMouse(dx, dy, buttons); err != nil {
+			if err := a.ctrl.SendRelMouse(int(dx), int(dy), buttons); err != nil {
 				log.Debug().
 					Err(err).
 					Int8("dx", dx).
@@ -917,11 +922,11 @@ wheel:
 		reportY := normalizeWheelDeltaY(wheelY, a.invertScroll)
 		reportX := normalizeWheelDeltaX(wheelX, a.invertScroll)
 		if reportY != 0 || reportX != 0 {
-			a.runAsync(func() {
-				if err := a.ctrl.SendWheel(reportY, reportX); err != nil {
-					log.Debug().Err(err).Int8("wheel_y", reportY).Int8("wheel_x", reportX).Msg("failed to send mouse wheel report")
-				}
-			})
+			// SendWheel is non-blocking; calling it inline keeps wheel
+			// reports ordered with button reports.
+			if err := a.ctrl.SendWheel(reportY, reportX); err != nil {
+				log.Debug().Err(err).Int8("wheel_y", reportY).Int8("wheel_x", reportX).Msg("failed to send mouse wheel report")
+			}
 		}
 		a.lastWheelAt = now
 	}

@@ -178,13 +178,19 @@ type USBConfig struct {
 	Product      string `json:"product"`
 }
 
+// USBDevices mirrors upstream usbgadget.Devices. Every field the device
+// returns must round-trip: setUsbDevices replaces the whole set, so a missing
+// field (as "audio" once was) silently switches that function off.
 type USBDevices struct {
 	AbsoluteMouse bool `json:"absolute_mouse"`
 	RelativeMouse bool `json:"relative_mouse"`
 	Keyboard      bool `json:"keyboard"`
 	MassStorage   bool `json:"mass_storage"`
 	SerialConsole bool `json:"serial_console"`
-	Network       bool `json:"network"`
+	Audio         bool `json:"audio"`
+	// Network is only understood by firmware with the (unreleased) USB
+	// network gadget; omitted unless set.
+	Network bool `json:"network,omitempty"`
 }
 
 type DisplayRotationState struct {

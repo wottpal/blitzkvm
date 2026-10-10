@@ -66,6 +66,7 @@ func NewClient() (*Client, error) {
 				MaxIdleConnsPerHost:   -1,
 				IdleConnTimeout:       0,
 				TLSHandshakeTimeout:   5 * time.Second,
+				ResponseHeaderTimeout: 10 * time.Second,
 				ExpectContinueTimeout: time.Second,
 				DisableKeepAlives:     true,
 			},

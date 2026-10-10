@@ -1,4 +1,4 @@
-.PHONY: build engine emulator test test-race vet vulncheck generate check app
+.PHONY: build engine emulator test test-race vet vulncheck generate layouts check app
 
 GO ?= go
 
@@ -28,6 +28,11 @@ vulncheck:
 
 generate:
 	$(GO) generate ./...
+
+# Regenerate keyboard layout tables from a jetkvm/kvm checkout:
+#   make layouts UPSTREAM=../kvm
+layouts:
+	$(GO) run ./scripts/genlayouts -upstream $(UPSTREAM) -ref "$$(git -C $(UPSTREAM) describe --always --tags)" > pkg/input/layouts_gen.go
 
 check: vet test-race vulncheck
 	$(MAKE) -C macos test

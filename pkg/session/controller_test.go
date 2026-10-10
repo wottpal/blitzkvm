@@ -58,8 +58,14 @@ func TestControllerReconnectsAfterDisconnect(t *testing.T) {
 	defer controller.Stop()
 
 	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
-	if err := controller.forceDisconnect(context.Background()); err != nil {
-		t.Fatal(err)
+	sessions := srv.SessionCount()
+	srv.DisconnectSession()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && (srv.SessionCount() <= sessions || controller.Snapshot().Phase != PhaseConnected) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if srv.SessionCount() <= sessions {
+		t.Fatalf("controller did not reconnect after the device dropped the session: %+v", controller.Snapshot())
 	}
 	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
 }
@@ -662,4 +668,113 @@ func waitForFrame(t *testing.T, controller *Controller, timeout time.Duration) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting for first video frame")
+}
+
+func TestBackoffNeverOverflowsAndStaysBounded(t *testing.T) {
+	base, maxDelay := 500*time.Millisecond, 10*time.Second
+	for attempt := 0; attempt < 200; attempt++ {
+		d := backoff(attempt, base, maxDelay)
+		if d < 0 || d > maxDelay {
+			t.Fatalf("attempt %d: backoff %s outside [0, %s]", attempt, d, maxDelay)
+		}
+		if attempt >= 5 && d < maxDelay/2 {
+			t.Fatalf("attempt %d: backoff %s collapsed below max/2", attempt, d)
+		}
+	}
+	if d := backoff(0, base, maxDelay); d < base/2 || d > base {
+		t.Fatalf("first backoff %s not within jitter range of %s", d, base)
+	}
+}
+
+func TestControllerReportsNoSignal(t *testing.T) {
+	srv, ctx, cancel := startEmulator(t)
+	defer cancel()
+	controller := New(Config{BaseURL: srv.BaseURL(), Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+
+	srv.SetVideoState("no_signal")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && controller.Snapshot().VideoSignal != "no_signal" {
+		time.Sleep(20 * time.Millisecond)
+	}
+	snap := controller.Snapshot()
+	if snap.VideoSignal != "no_signal" || !strings.Contains(snap.Status, "no signal") {
+		t.Fatalf("no-signal state not surfaced: signal=%q status=%q", snap.VideoSignal, snap.Status)
+	}
+}
+
+func TestControllerFollowsRebootRedirect(t *testing.T) {
+	srv, ctx, cancel := startEmulator(t)
+	defer cancel()
+	controller := New(Config{
+		BaseURL: srv.BaseURL(), Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true,
+		ReconnectBase: time.Second, ReconnectMax: 2 * time.Second,
+	})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+
+	srv.SendWillReboot("//192.0.2.60")
+	waitForPhase(t, controller, PhaseRebooting, 3*time.Second)
+	if got := controller.Snapshot().BaseURL; got != "http://192.0.2.60" {
+		t.Fatalf("base URL after redirect = %q", got)
+	}
+}
+
+func TestConnectedBeforeSlowBootstrapFinishes(t *testing.T) {
+	srv, ctx, cancel := startFaultedEmulator(t, emulator.FaultConfig{DropRPCMethod: "getEDID"})
+	defer cancel()
+	controller := New(Config{BaseURL: srv.BaseURL(), Password: "secret", RPCTimeout: 3 * time.Second, Reconnect: true})
+	controller.Start(ctx)
+	defer controller.Stop()
+	// getEDID never answers (as on a device without HDMI signal); input must
+	// still be available long before its RPC timeout.
+	start := time.Now()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("connected only after %s; a stalled bootstrap RPC blocked input", elapsed)
+	}
+	if err := controller.SendKeypress(4, true); err != nil {
+		t.Fatalf("input not accepted while bootstrap is pending: %v", err)
+	}
+	_ = controller.SendKeypress(4, false)
+}
+
+func TestReleaseAllInputClearsRemoteState(t *testing.T) {
+	srv, ctx, cancel := startEmulator(t)
+	defer cancel()
+	controller := New(Config{BaseURL: srv.BaseURL(), Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+
+	_ = controller.SendKeypress(225, true)
+	_ = controller.SendKeypress(4, true)
+	_ = controller.SendAbsPointer(100, 100, 1)
+	time.Sleep(50 * time.Millisecond)
+	if err := controller.ReleaseAllInput(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		st := srv.State()
+		if st.KeyboardModifiers == 0 && st.KeysDown[0] == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := srv.State(); st.KeyboardModifiers != 0 || st.KeysDown[0] != 0 {
+		t.Fatalf("keys still held after ReleaseAllInput: %+v %v", st.KeyboardModifiers, st.KeysDown)
+	}
+	released := false
+	for _, in := range srv.Inputs() {
+		if in.Type == "hidrpc.Pointer" && strings.Contains(in.Data, "Buttons:0") && in.Channel == "hidrpc" {
+			released = true
+		}
+	}
+	if !released {
+		t.Fatal("pointer button release was not sent reliably")
+	}
 }

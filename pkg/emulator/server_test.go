@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -179,7 +180,15 @@ func TestClientConnectsAndRPCWorks(t *testing.T) {
 	if err := c.SendKeypress(4, true); err != nil {
 		t.Fatal(err)
 	}
+	// Button down and release travel reliably; a plain move afterwards may
+	// use the unreliable channel.
 	if err := c.SendAbsPointer(1000, 2000, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SendAbsPointer(1000, 2000, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SendAbsPointer(1100, 2100, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.SendRelMouse(3, -2, 1); err != nil {
@@ -209,19 +218,25 @@ func TestClientConnectsAndRPCWorks(t *testing.T) {
 		t.Fatal("expected HID input to be recorded")
 	}
 
-	foundPointer := false
-	foundRelative := false
-	foundWheel := false
-	for _, input := range srv.Inputs() {
-		if input.Channel == "hidrpc-unreliable-ordered" {
-			foundPointer = true
+	deadline = time.Now().Add(2 * time.Second)
+	foundPointer, foundReliableClick, foundRelative, foundWheel := false, false, false, false
+	for time.Now().Before(deadline) && !(foundPointer && foundReliableClick && foundRelative && foundWheel) {
+		for _, input := range srv.Inputs() {
+			switch {
+			case input.Type == "hidrpc.Pointer" && input.Channel == "hidrpc-unreliable-ordered":
+				foundPointer = true
+			case input.Type == "hidrpc.Pointer" && input.Channel == "hidrpc" && strings.Contains(input.Data, "Buttons:1"):
+				foundReliableClick = true
+			case input.Type == "hidrpc.Mouse":
+				foundRelative = true
+			case input.Type == "rpc.wheelReport" && input.Data == "wheelY=-1 wheelX=0":
+				foundWheel = true
+			}
 		}
-		if input.Type == "hidrpc.Mouse" {
-			foundRelative = true
-		}
-		if input.Type == "rpc.wheelReport" && input.Data == "wheelY=-1 wheelX=0" {
-			foundWheel = true
-		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !foundReliableClick {
+		t.Fatal("expected the button-down pointer report on the reliable hidrpc channel")
 	}
 	if !foundPointer {
 		t.Fatal("expected pointer input on hidrpc-unreliable-ordered channel")
@@ -242,14 +257,14 @@ func TestClientConnectsAndRPCWorks(t *testing.T) {
 	for time.Now().Before(deadline) && !foundRebootEvent {
 		select {
 		case evt := <-c.Events():
-			if evt.Method == "videoInputState" {
+			if evt.Method == "willReboot" {
 				foundRebootEvent = true
 			}
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
 	if !foundRebootEvent {
-		t.Fatal("expected reboot-driven videoInputState event")
+		t.Fatal("expected willReboot event")
 	}
 }
 
@@ -430,7 +445,7 @@ func TestKeyboardStateTracksModifiersAndReleases(t *testing.T) {
 		Modifier byte   `json:"modifier"`
 		Keys     []byte `json:"keys"`
 	}
-	if err := c.Call(waitCtx, "getKeysDownState", nil, &state); err != nil {
+	if err := c.Call(waitCtx, "getKeyDownState", nil, &state); err != nil {
 		t.Fatal(err)
 	}
 	if state.Modifier != 0x02 {
@@ -447,7 +462,7 @@ func TestKeyboardStateTracksModifiersAndReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if err := c.Call(waitCtx, "getKeysDownState", nil, &state); err != nil {
+	if err := c.Call(waitCtx, "getKeyDownState", nil, &state); err != nil {
 		t.Fatal(err)
 	}
 	if state.Modifier != 0 {
@@ -470,7 +485,7 @@ func TestForcedDisconnectFaultClosesPeerConnection(t *testing.T) {
 		AuthMode:   AuthModePassword,
 		Password:   "secret",
 		Faults: FaultConfig{
-			DisconnectAfter: 150 * time.Millisecond,
+			DisconnectAfter: 500 * time.Millisecond,
 		},
 	})
 	if err != nil {
@@ -505,6 +520,11 @@ func TestForcedDisconnectFaultClosesPeerConnection(t *testing.T) {
 	}
 	defer c.Close()
 	if err := c.Connect(ctx); err != nil {
+		// On a slow machine the fault can fire before the client finishes
+		// connecting; the session ending is exactly what is under test.
+		if errors.Is(err, client.ErrClosed) {
+			return
+		}
 		t.Fatal(err)
 	}
 

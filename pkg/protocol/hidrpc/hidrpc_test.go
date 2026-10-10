@@ -1,6 +1,9 @@
 package hidrpc
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestRoundTrip(t *testing.T) {
 	tests := []Message{
@@ -28,4 +31,36 @@ func TestRoundTrip(t *testing.T) {
 			t.Fatalf("message type mismatch for %T", tt)
 		}
 	}
+}
+
+func FuzzDecode(f *testing.F) {
+	for _, seed := range [][]byte{
+		{0x01, 0x01},
+		{0x05, 0x04, 0x01},
+		{0x03, 0, 0, 0, 1, 0, 0, 0, 2, 1},
+		{0x07, 1, 0, 0, 0, 1, 2, 4, 0, 0, 0, 0, 0, 0, 20},
+		{0x34, 1, 1},
+		{0x09},
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		msg, err := Decode(data)
+		if err != nil {
+			return
+		}
+		// Every decodable message must survive an encode/decode round trip
+		// (booleans decode leniently, so compare decoded values, not bytes).
+		out, err := msg.MarshalBinary()
+		if err != nil {
+			t.Fatalf("marshal %T: %v", msg, err)
+		}
+		again, err := Decode(out)
+		if err != nil {
+			t.Fatalf("re-decode %T %x: %v", msg, out, err)
+		}
+		if !reflect.DeepEqual(again, msg) {
+			t.Fatalf("round trip %T: %+v != %+v", msg, again, msg)
+		}
+	})
 }

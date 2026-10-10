@@ -16,10 +16,6 @@ func (c *Client) Ping(ctx context.Context) (string, error) {
 	return pong, err
 }
 
-func (c *Client) ForceDisconnect(ctx context.Context) error {
-	return c.Call(ctx, "forceDisconnect", nil, nil)
-}
-
 func (c *Client) Reboot(ctx context.Context) error {
 	return c.Call(ctx, "reboot", RebootRequest{Force: false}, nil)
 }
@@ -368,12 +364,8 @@ func (c *Client) SetJigglerConfig(ctx context.Context, cfg JigglerConfig) error 
 	return c.Call(ctx, "setJigglerConfig", JigglerConfigRequest{JigglerConfig: cfg}, nil)
 }
 
-func (c *Client) GetKeysDownState(ctx context.Context) (KeysDownState, error) {
+func (c *Client) GetKeyDownState(ctx context.Context) (KeysDownState, error) {
 	var state KeysDownState
-	err := c.Call(ctx, "getKeysDownState", nil, &state)
+	err := c.Call(ctx, "getKeyDownState", nil, &state)
 	return state, err
-}
-
-func (c *Client) sendWheelReport(ctx context.Context, wheelY, wheelX int8) error {
-	return c.Call(ctx, "wheelReport", WheelReportRequest{WheelY: int(wheelY), WheelX: int(wheelX)}, nil)
 }

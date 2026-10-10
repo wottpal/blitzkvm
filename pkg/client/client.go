@@ -3,15 +3,18 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/nack"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
@@ -22,10 +25,43 @@ import (
 	"github.com/lkarlslund/jetkvm-desktop/pkg/video"
 )
 
+// ErrClosed is returned by calls on a client that has been closed.
+var ErrClosed = errors.New("client closed")
+
+// ErrOfferRejected means the device answered the offer with an error message.
+var ErrOfferRejected = errors.New("device rejected the WebRTC offer")
+
+const (
+	defaultRPCTimeout     = 5 * time.Second
+	defaultConnectTimeout = 15 * time.Second
+	// keepAliveInterval matches the device's expected HID keepalive rate.
+	keepAliveInterval = 50 * time.Millisecond
+	// macroChunkSteps / macroChunkGrace mirror the upstream web UI: macros go
+	// out in chunks of at most 128 wire steps, and a chunk may take its step
+	// delays plus this grace before the paste is aborted.
+	macroChunkSteps = 128
+	macroChunkGrace = 2 * time.Second
+)
+
 type Config struct {
 	BaseURL    string
 	Password   string
 	RPCTimeout time.Duration
+	// ConnectTimeout bounds one Connect attempt: auth, signaling, offer/answer
+	// and ICE. It does not bound the session afterwards.
+	ConnectTimeout time.Duration
+	// Auth, when set, is reused across clients so a reconnect presents the
+	// existing cookie and only logs in again when the device rejects it.
+	// (Each login mints a new device-wide token, logging out browser tabs and
+	// writing to the device's flash.)
+	Auth *auth.Client
+	// OfferH265 also offers H.265. JetKVM streams H.265 whenever the offer
+	// contains it (codec preference "auto"), so only enable this when the
+	// consumer can decode H.265.
+	OfferH265 bool
+	// OnAccessUnit receives complete video access units. When nil the client
+	// decodes H.264 with OpenH264 into VideoStream().
+	OnAccessUnit func(video.AccessUnit)
 }
 
 //go:generate go tool github.com/dmarkham/enumer -type=SignalingMode -linecomment -text -output client_enums.go
@@ -44,6 +80,8 @@ type LifecycleEvent struct {
 	Err        string
 	Signaling  SignalingMode
 	PasteState bool
+	// LEDMask is set for Type "keyboard_leds" (HID-RPC 0x32).
+	LEDMask byte
 }
 
 type SerialConsoleEvent struct {
@@ -55,46 +93,89 @@ type StatsSnapshot struct {
 	RTCState        webrtc.PeerConnectionState
 	HIDReady        bool
 	VideoReady      bool
+	VideoCodec      string
 	FrameWidth      int
 	FrameHeight     int
 	BytesReceived   uint64
 	BitrateKbps     float64
 	PacketsLost     int32
+	NACKsSent       uint32
 	JitterMs        float64
 	FramesDecoded   uint32
 	FramesRendered  uint32
 	FramesPerSecond float64
+	FramesDropped   uint64
+	KeyframeWaits   uint64
 	RoundTripMs     float64
 	LastError       string
 	TransportDebug  string
 }
 
+type channels struct {
+	rpc           *webrtc.DataChannel
+	hid           *webrtc.DataChannel
+	hidUnreliable *webrtc.DataChannel
+	hidNonOrdered *webrtc.DataChannel
+	serial        *webrtc.DataChannel
+}
+
 type Client struct {
 	cfg        Config
 	authClient *auth.Client
-	pc         *webrtc.PeerConnection
+	ctx        context.Context
+	cancel     context.CancelFunc
 
-	rpcDC          *webrtc.DataChannel
-	hidDC          *webrtc.DataChannel
-	hidUnreliable  *webrtc.DataChannel
-	hidNonOrdered  *webrtc.DataChannel
-	serialDC       *webrtc.DataChannel
-	eventCh        chan jsonrpc.Event
-	serialCh       chan SerialConsoleEvent
-	pending        sync.Map
+	pcMu sync.RWMutex
+	pc   *webrtc.PeerConnection
+	ch   atomic.Pointer[channels]
+
+	events    *mailbox[jsonrpc.Event]
+	lifecycle *mailbox[LifecycleEvent]
+	serialCh  chan SerialConsoleEvent
+
+	pendingMu      sync.Mutex
+	pending        map[string]chan jsonrpc.Response
 	requestCounter atomic.Uint64
-	hidReady       chan struct{}
-	hidReadyOnce   sync.Once
-	videoStream    *video.Stream
-	lifecycleCh    chan LifecycleEvent
+
+	hidReady     chan struct{}
+	hidReadyOnce sync.Once
+
+	videoMu     sync.RWMutex
+	videoStream *video.Stream
+	assembler   *video.Assembler
+	videoCodec  string
+
+	signalMu   sync.Mutex
+	signalConn *websocket.Conn
+	signalMode atomic.Uint32
+
+	remoteMu         sync.Mutex
+	remoteApplied    bool
+	queuedCandidates []webrtc.ICECandidateInit
+
+	// Pointer routing: reliable while any button is down or changed, and for
+	// the first report after the HID handshake.
+	pointerMu         sync.Mutex
+	lastButtons       byte
+	lastX, lastY      int32
+	lastRelButtons    byte
+	pointerReliableOK bool
+
+	// Held non-modifier keys drive the 50 ms keepalive ticker.
+	keysMu       sync.Mutex
+	heldKeys     map[byte]bool
+	keepAliveRun bool
+
+	macroMu    sync.Mutex
+	macroState chan bool
+
+	statsMu      sync.Mutex
+	stats        StatsSnapshot
+	statsHistory []statsSample
+	rttNanos     atomic.Int64
+
 	closeCh        chan struct{}
-	signalConn     *websocket.Conn
-	signalMu       sync.Mutex
-	signalMode     SignalingMode
-	statsMu        sync.Mutex
-	videoMu        sync.RWMutex
-	closeMu        sync.Mutex
-	statsHistory   []statsSample
+	closeOnce      sync.Once
 	disconnectOnce sync.Once
 	lastError      atomic.Value
 	transportDebug atomic.Value
@@ -125,40 +206,50 @@ func computeSmoothedRates(history []statsSample) (bitrateKbps, framesPerSecond f
 	return bitrateKbps, framesPerSecond
 }
 
-type pendingCall struct {
-	ch chan jsonrpc.Response
-}
-
 func New(cfg Config) (*Client, error) {
-	authClient, err := auth.NewClient()
-	if err != nil {
-		return nil, err
+	authClient := cfg.Auth
+	if authClient == nil {
+		var err error
+		authClient, err = auth.NewClient()
+		if err != nil {
+			return nil, err
+		}
 	}
 	if cfg.RPCTimeout == 0 {
-		cfg.RPCTimeout = 5 * time.Second
+		cfg.RPCTimeout = defaultRPCTimeout
 	}
-	return &Client{
-		cfg:         cfg,
-		authClient:  authClient,
-		eventCh:     make(chan jsonrpc.Event, 32),
-		serialCh:    make(chan SerialConsoleEvent, 128),
-		hidReady:    make(chan struct{}),
-		lifecycleCh: make(chan LifecycleEvent, 32),
-		closeCh:     make(chan struct{}),
-	}, nil
+	if cfg.ConnectTimeout == 0 {
+		cfg.ConnectTimeout = defaultConnectTimeout
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &Client{
+		cfg:        cfg,
+		authClient: authClient,
+		ctx:        ctx,
+		cancel:     cancel,
+		events:     newMailbox[jsonrpc.Event](),
+		lifecycle:  newMailbox[LifecycleEvent](),
+		serialCh:   make(chan SerialConsoleEvent, 128),
+		pending:    map[string]chan jsonrpc.Response{},
+		hidReady:   make(chan struct{}),
+		heldKeys:   map[byte]bool{},
+		closeCh:    make(chan struct{}),
+	}
+	c.ch.Store(&channels{})
+	return c, nil
 }
 
-func (c *Client) Events() <-chan jsonrpc.Event {
-	return c.eventCh
-}
+// Events delivers JSON-RPC events from the device. The channel is closed
+// after the client is closed and remaining events are drained.
+func (c *Client) Events() <-chan jsonrpc.Event { return c.events.out }
 
-func (c *Client) SerialEvents() <-chan SerialConsoleEvent {
-	return c.serialCh
-}
+func (c *Client) SerialEvents() <-chan SerialConsoleEvent { return c.serialCh }
 
-func (c *Client) Lifecycle() <-chan LifecycleEvent {
-	return c.lifecycleCh
-}
+// Lifecycle delivers connection lifecycle events; never drops while open.
+func (c *Client) Lifecycle() <-chan LifecycleEvent { return c.lifecycle.out }
+
+// Done is closed when the client is closed.
+func (c *Client) Done() <-chan struct{} { return c.closeCh }
 
 func (c *Client) DeviceInfo(ctx context.Context) (auth.DeviceInfo, error) {
 	return c.authClient.GetDeviceInfo(ctx, c.cfg.BaseURL)
@@ -176,72 +267,140 @@ func (c *Client) DeleteLocalPassword(ctx context.Context, password string) error
 	return c.authClient.DeleteLocalPassword(ctx, c.cfg.BaseURL, password)
 }
 
-func (c *Client) SignalingMode() SignalingMode {
-	return c.signalMode
+func (c *Client) SignalingMode() SignalingMode { return SignalingMode(c.signalMode.Load()) }
+
+func (c *Client) peer() *webrtc.PeerConnection {
+	c.pcMu.RLock()
+	defer c.pcMu.RUnlock()
+	return c.pc
 }
 
-func (c *Client) Connect(ctx context.Context) error {
-	if err := c.authClient.Login(ctx, c.cfg.BaseURL, c.cfg.Password); err != nil {
-		c.emitLifecycle(LifecycleEvent{Type: "connect_error", Err: err.Error()})
-		return err
+// newAPI builds a pion API with explicit codecs carrying RTCP feedback (NACK,
+// PLI, FIR) and the default interceptors (NACK generator, RTCP reports, TWCC).
+// Offering only what we can decode matters: JetKVM picks H.265 whenever the
+// offer mentions it.
+func (c *Client) newAPI() (*webrtc.API, error) {
+	feedback := []webrtc.RTCPFeedback{
+		{Type: "goog-remb"},
+		{Type: "ccm", Parameter: "fir"},
+		{Type: "nack"},
+		{Type: "nack", Parameter: "pli"},
+		{Type: "transport-cc"},
+	}
+	m := &webrtc.MediaEngine{}
+	codecs := []webrtc.RTPCodecParameters{
+		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f", RTCPFeedback: feedback}, PayloadType: 102},
+		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f", RTCPFeedback: feedback}, PayloadType: 112},
+		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264, ClockRate: 90000, SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f", RTCPFeedback: feedback}, PayloadType: 127},
+	}
+	if c.cfg.OfferH265 {
+		codecs = append([]webrtc.RTPCodecParameters{
+			{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH265, ClockRate: 90000, RTCPFeedback: feedback}, PayloadType: 116},
+		}, codecs...)
+	}
+	for _, codec := range codecs {
+		if err := m.RegisterCodec(codec, webrtc.RTPCodecTypeVideo); err != nil {
+			return nil, err
+		}
+	}
+	registry := &interceptor.Registry{}
+	// NACK every 20 ms instead of pion's default 100 ms: the assembler holds
+	// a frame while its missing packets are retransmitted.
+	if err := webrtc.RegisterDefaultInterceptorsWithOptions(m, registry,
+		webrtc.WithNackGeneratorOptions(nack.GeneratorInterval(20*time.Millisecond)),
+	); err != nil {
+		return nil, err
 	}
 
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	se := webrtc.SettingEngine{}
+	// Detect dead paths quickly; the device itself gives up after ~5 s.
+	se.SetICETimeouts(4*time.Second, 8*time.Second, time.Second)
+	return webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(se)), nil
+}
+
+// Connect establishes the session. Everything up to an established peer
+// connection is bounded by ConnectTimeout; the video stream and data channels
+// live until Close.
+func (c *Client) Connect(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, c.cfg.ConnectTimeout)
+	defer cancel()
+	err := c.connect(ctx)
+	if err != nil {
+		if ctx.Err() != nil && parent.Err() == nil {
+			err = fmt.Errorf("connect timed out after %s: %w", c.cfg.ConnectTimeout, err)
+		}
+		c.emitLifecycle(LifecycleEvent{Type: "connect_error", Err: err.Error()})
+	}
+	return err
+}
+
+func (c *Client) connect(ctx context.Context) error {
+	conn, err := c.openSignaling(ctx)
 	if err != nil {
 		return err
 	}
-	c.pc = pc
+	c.signalMu.Lock()
+	c.signalConn = conn
+	c.signalMu.Unlock()
+	c.signalMode.Store(uint32(SignalingModeWebSocket))
+	c.emitLifecycle(LifecycleEvent{Type: "signaling_mode", Signaling: SignalingModeWebSocket})
 
+	api, err := c.newAPI()
+	if err != nil {
+		return err
+	}
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		return err
+	}
+	c.pcMu.Lock()
+	c.pc = pc
+	c.pcMu.Unlock()
+	select {
+	case <-c.closeCh:
+		_ = pc.Close()
+		return ErrClosed
+	default:
+	}
+
+	connected := make(chan struct{})
+	var connectedOnce sync.Once
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		c.noteTransportDebug(fmt.Sprintf("pc_state=%s", state))
 		c.emitLifecycle(LifecycleEvent{Type: "peer_state", Connection: state})
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
+			connectedOnce.Do(func() { close(connected) })
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateDisconnected:
+			// The device closes its side on ICE disconnect (no ICE restart),
+			// so any of these ends the session.
+			c.handleTransportDisconnect(state, "pc_state")
+		}
 	})
-	if sctp := pc.SCTP(); sctp != nil {
-		sctp.OnClose(func(err error) {
-			c.handleTransportDisconnect(webrtc.PeerConnectionStateDisconnected, "sctp_close")
-		})
-	}
-
-	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		stream, err := video.AttachRemoteTrack(ctx, track)
-		if err != nil {
-			c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: err.Error()})
+	pc.OnTrack(c.onTrack)
+	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate == nil {
 			return
 		}
-		c.videoMu.Lock()
-		c.videoStream = stream
-		c.videoMu.Unlock()
-		c.emitLifecycle(LifecycleEvent{Type: "video_ready"})
+		init := candidate.ToJSON()
+		if init.Candidate == "" {
+			return
+		}
+		_ = c.writeSignal(signalingMessage{Type: "new-ice-candidate", Data: init})
 	})
-	videoTransceiver, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
-		Direction: webrtc.RTPTransceiverDirectionRecvonly,
-	})
-	if err != nil {
-		return err
-	}
-	if err := restrictVideoTransceiverToH264(videoTransceiver); err != nil {
-		return err
-	}
 
-	if err := c.openDataChannels(); err != nil {
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionRecvonly,
+	}); err != nil {
+		return err
+	}
+	if err := c.openDataChannels(pc); err != nil {
 		return err
 	}
 
 	answerCh := make(chan webrtc.SessionDescription, 1)
-	wsErrCh := make(chan error, 1)
-	signalConn, useLegacySignaling, err := c.openSignaling(ctx, pc, answerCh, wsErrCh)
-	if err != nil {
-		return err
-	}
-	if signalConn != nil {
-		c.signalConn = signalConn
-	}
-	if useLegacySignaling {
-		c.signalMode = SignalingModeLegacyHTTP
-	} else {
-		c.signalMode = SignalingModeWebSocket
-	}
-	c.emitLifecycle(LifecycleEvent{Type: "signaling_mode", Signaling: c.signalMode})
+	errCh := make(chan error, 1)
+	go c.readSignaling(conn, pc, answerCh, errCh)
 
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
@@ -250,68 +409,217 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err := pc.SetLocalDescription(offer); err != nil {
 		return err
 	}
-
-	if useLegacySignaling {
-		<-webrtc.GatheringCompletePromise(pc)
-
-		rawOffer, err := json.Marshal(pc.LocalDescription())
-		if err != nil {
-			return err
-		}
-		resp, err := signaling.Exchange(ctx, c.authClient.HTTPClient(), c.cfg.BaseURL, signaling.ExchangeRequest{
-			SD: signaling.EncodeSDP(rawOffer),
-		})
-		if err != nil {
-			return err
-		}
-
-		answer, err := decodeAnswer(resp.SD)
-		if err != nil {
-			return err
-		}
-		if err := pc.SetRemoteDescription(answer); err != nil {
-			c.emitLifecycle(LifecycleEvent{Type: "connect_error", Err: err.Error()})
-			return err
-		}
-	} else {
-		rawOffer, err := json.Marshal(pc.LocalDescription())
-		if err != nil {
-			return err
-		}
-		if err := c.writeSignal(signalingMessage{
-			Type: "offer",
-			Data: offerSignalData{SD: signaling.EncodeSDP(rawOffer)},
-		}); err != nil {
-			return err
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case err := <-wsErrCh:
-			return err
-		case answer := <-answerCh:
-			if err := pc.SetRemoteDescription(answer); err != nil {
-				c.emitLifecycle(LifecycleEvent{Type: "connect_error", Err: err.Error()})
-				return err
-			}
-		}
+	rawOffer, err := json.Marshal(pc.LocalDescription())
+	if err != nil {
+		return err
 	}
+	if err := c.writeSignal(signalingMessage{Type: "offer", Data: offerSignalData{SD: signaling.EncodeSDP(rawOffer)}}); err != nil {
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for answer: %w", ctx.Err())
+	case <-c.closeCh:
+		return ErrClosed
+	case err := <-errCh:
+		return err
+	case answer := <-answerCh:
+		if err := pc.SetRemoteDescription(answer); err != nil {
+			return err
+		}
+		c.flushQueuedCandidates(pc)
+	}
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for ICE: %w", ctx.Err())
+	case <-c.closeCh:
+		return ErrClosed
+	case err := <-errCh:
+		return err
+	case <-connected:
+	}
+	go c.monitorStats()
 	c.emitLifecycle(LifecycleEvent{Type: "connected"})
 	return nil
 }
 
-func restrictVideoTransceiverToH264(transceiver *webrtc.RTPTransceiver) error {
-	return transceiver.SetCodecPreferences([]webrtc.RTPCodecParameters{{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType:  webrtc.MimeTypeH264,
-			ClockRate: 90000,
-		},
-	}})
+// openSignaling dials the signaling socket, logging in first only if the
+// device rejects the current cookie, and reads the device metadata.
+func (c *Client) openSignaling(ctx context.Context) (*websocket.Conn, error) {
+	conn, resp, err := signaling.DialWebsocket(ctx, c.authClient.HTTPClient(), c.cfg.BaseURL)
+	if err != nil && resp != nil && resp.StatusCode == http.StatusUnauthorized {
+		if c.cfg.Password == "" {
+			return nil, &auth.Error{StatusCode: http.StatusUnauthorized, Message: "device requires a password"}
+		}
+		if loginErr := c.authClient.Login(ctx, c.cfg.BaseURL, c.cfg.Password); loginErr != nil {
+			return nil, loginErr
+		}
+		conn, resp, err = signaling.DialWebsocket(ctx, c.authClient.HTTPClient(), c.cfg.BaseURL)
+		if err != nil && resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			return nil, &auth.Error{StatusCode: http.StatusUnauthorized, Message: "device rejected the session after login"}
+		}
+	}
+	if err != nil {
+		if resp != nil {
+			return nil, fmt.Errorf("signaling: %s: %w", resp.Status, err)
+		}
+		return nil, fmt.Errorf("signaling: %w", err)
+	}
+
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetReadDeadline(deadline)
+	}
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("signaling metadata: %w", err)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	var msg signaling.WSMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if msg.Type != "device-metadata" {
+		_ = conn.Close()
+		return nil, fmt.Errorf("unexpected signaling message type %q", msg.Type)
+	}
+	return conn, nil
 }
 
-func offerAdvertisesH265(offer webrtc.SessionDescription) bool {
-	return strings.Contains(strings.ToUpper(offer.SDP), "H265")
+func (c *Client) readSignaling(conn *websocket.Conn, pc *webrtc.PeerConnection, answerCh chan<- webrtc.SessionDescription, errCh chan<- error) {
+	fail := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			select {
+			case <-c.closeCh:
+			default:
+				c.noteTransportDebug("signaling_read_error")
+				fail(fmt.Errorf("signaling closed: %w", err))
+			}
+			return
+		}
+		var msg struct {
+			Type  string          `json:"type"`
+			Data  json.RawMessage `json:"data"`
+			Error json.RawMessage `json:"error"`
+		}
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+		if msg.Type == "" && len(msg.Error) > 0 {
+			fail(fmt.Errorf("%w: %s", ErrOfferRejected, string(msg.Error)))
+			continue
+		}
+		switch msg.Type {
+		case "answer":
+			var encoded string
+			if err := json.Unmarshal(msg.Data, &encoded); err != nil {
+				fail(err)
+				continue
+			}
+			answer, err := decodeAnswer(encoded)
+			if err != nil {
+				fail(err)
+				continue
+			}
+			select {
+			case answerCh <- answer:
+			default:
+			}
+		case "new-ice-candidate":
+			var candidate webrtc.ICECandidateInit
+			if err := json.Unmarshal(msg.Data, &candidate); err != nil {
+				continue
+			}
+			c.addRemoteCandidate(pc, candidate)
+		case "other-session-connected":
+			// JetKVM Mini signals takeover on the signaling socket.
+			c.events.put(jsonrpc.NewEvent("otherSessionConnected", nil))
+		}
+	}
+}
+
+// addRemoteCandidate applies a trickled candidate, queueing it until the
+// remote description is set: the device may trickle before its answer.
+func (c *Client) addRemoteCandidate(pc *webrtc.PeerConnection, candidate webrtc.ICECandidateInit) {
+	c.remoteMu.Lock()
+	if !c.remoteApplied {
+		c.queuedCandidates = append(c.queuedCandidates, candidate)
+		c.remoteMu.Unlock()
+		return
+	}
+	c.remoteMu.Unlock()
+	if err := pc.AddICECandidate(candidate); err != nil {
+		c.noteTransportDebug("add_candidate: " + err.Error())
+	}
+}
+
+func (c *Client) flushQueuedCandidates(pc *webrtc.PeerConnection) {
+	c.remoteMu.Lock()
+	queued := c.queuedCandidates
+	c.queuedCandidates = nil
+	c.remoteApplied = true
+	c.remoteMu.Unlock()
+	for _, candidate := range queued {
+		if err := pc.AddICECandidate(candidate); err != nil {
+			c.noteTransportDebug("add_candidate: " + err.Error())
+		}
+	}
+}
+
+func (c *Client) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+	codec, err := video.CodecFromMime(track.Codec().MimeType)
+	if err != nil {
+		c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: err.Error()})
+		return
+	}
+	deliver := c.cfg.OnAccessUnit
+	var stream *video.Stream
+	if deliver == nil {
+		if codec != video.CodecH264 {
+			c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: "the built-in decoder only supports H.264"})
+			return
+		}
+		stream, err = video.NewDecodingStream(c.ctx)
+		if err != nil {
+			c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: err.Error()})
+			return
+		}
+		deliver = stream.Push
+	}
+	ssrc := uint32(track.SSRC())
+	asm := video.NewAssembler(codec, deliver, func() {
+		// JetKVM 0.5.9 ignores PLI/FIR (it sends an IDR every 0.5 s anyway),
+		// but asking is harmless and future-proof.
+		if pc := c.peer(); pc != nil {
+			_ = pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: ssrc}})
+		}
+	})
+	c.videoMu.Lock()
+	c.videoStream = stream
+	c.assembler = asm
+	c.videoCodec = codec.String()
+	c.videoMu.Unlock()
+	c.emitLifecycle(LifecycleEvent{Type: "video_ready"})
+
+	go func() {
+		err := video.Receive(c.ctx, track, asm, func() time.Duration { return time.Duration(c.rttNanos.Load()) })
+		if stream != nil {
+			stream.Close()
+		}
+		if err != nil && c.ctx.Err() == nil {
+			c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: err.Error()})
+		}
+	}()
 }
 
 func (c *Client) handleTransportDisconnect(state webrtc.PeerConnectionState, source string) {
@@ -323,37 +631,38 @@ func (c *Client) handleTransportDisconnect(state webrtc.PeerConnectionState, sou
 	c.noteTransportDebug(fmt.Sprintf("disconnect source=%s state=%s", source, state))
 	c.disconnectOnce.Do(func() {
 		c.emitLifecycle(LifecycleEvent{Type: "peer_state", Connection: state})
-		go func() {
-			_ = c.Close()
-		}()
+		go func() { _ = c.Close() }()
 	})
 }
 
+// Close tears the session down. Pending calls fail with ErrClosed.
 func (c *Client) Close() error {
-	c.closeMu.Lock()
-	defer c.closeMu.Unlock()
-
 	var err error
-	select {
-	case <-c.closeCh:
-	default:
+	c.closeOnce.Do(func() {
 		close(c.closeCh)
-	}
-	c.noteTransportDebug("client_close")
-	c.videoMu.Lock()
-	if c.videoStream != nil {
-		c.videoStream.Close()
-		c.videoStream = nil
-	}
-	c.videoMu.Unlock()
-	if c.signalConn != nil {
-		_ = c.signalConn.Close()
-		c.signalConn = nil
-	}
-	if c.pc != nil {
-		err = c.pc.Close()
-		c.pc = nil
-	}
+		c.cancel()
+		c.noteTransportDebug("client_close")
+		c.signalMu.Lock()
+		if c.signalConn != nil {
+			_ = c.signalConn.Close()
+			c.signalConn = nil
+		}
+		c.signalMu.Unlock()
+		c.pcMu.Lock()
+		pc := c.pc
+		c.pcMu.Unlock()
+		if pc != nil {
+			err = pc.Close()
+		}
+		c.videoMu.Lock()
+		stream := c.videoStream
+		c.videoMu.Unlock()
+		if stream != nil {
+			stream.Close()
+		}
+		c.events.close()
+		c.lifecycle.close()
+	})
 	return err
 }
 
@@ -361,14 +670,50 @@ func (c *Client) WaitForHID(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-c.closeCh:
+		return ErrClosed
 	case <-c.hidReady:
 		return nil
 	}
 }
 
+// HIDReady reports whether the HID-RPC handshake completed.
+func (c *Client) HIDReady() bool {
+	select {
+	case <-c.hidReady:
+		return true
+	default:
+		return false
+	}
+}
+
+// RPCError is a JSON-RPC error response from the device. Data usually holds
+// the device's real error text (upstream wraps handler errors as -32603).
+type RPCError struct {
+	Method  string
+	Code    int
+	Message string
+	Data    string
+}
+
+func (e *RPCError) Error() string {
+	if e.Data != "" {
+		return fmt.Sprintf("%s: %s", e.Method, e.Data)
+	}
+	return fmt.Sprintf("%s: %s", e.Method, e.Message)
+}
+
+// Call performs a JSON-RPC call. A response without "result" (JetKVM's shape
+// for handlers that only return an error) is success and leaves out alone.
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
-	if c.rpcDC == nil {
+	rpc := c.ch.Load().rpc
+	if rpc == nil {
 		return fmt.Errorf("rpc data channel not ready")
+	}
+	select {
+	case <-c.closeCh:
+		return ErrClosed
+	default:
 	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -377,28 +722,38 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 	}
 
 	id := fmt.Sprintf("rpc-%d", c.requestCounter.Add(1))
-	req := jsonrpc.NewRequest(method, params, id)
-	data, err := jsonrpc.Marshal(req)
+	data, err := jsonrpc.Marshal(jsonrpc.NewRequest(method, params, id))
 	if err != nil {
 		return err
 	}
-
 	respCh := make(chan jsonrpc.Response, 1)
-	c.pending.Store(id, pendingCall{ch: respCh})
-	defer c.pending.Delete(id)
+	c.pendingMu.Lock()
+	c.pending[id] = respCh
+	c.pendingMu.Unlock()
+	defer func() {
+		c.pendingMu.Lock()
+		delete(c.pending, id)
+		c.pendingMu.Unlock()
+	}()
 
-	if err := c.rpcDC.SendText(string(data)); err != nil {
+	if err := rpc.SendText(string(data)); err != nil {
 		return err
 	}
 
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("%s: %w", method, ctx.Err())
+	case <-c.closeCh:
+		return fmt.Errorf("%s: %w", method, ErrClosed)
 	case resp := <-respCh:
 		if resp.Error != nil {
-			return fmt.Errorf("%s: %s", method, resp.Error.Message)
+			rpcErr := &RPCError{Method: method, Code: resp.Error.Code, Message: resp.Error.Message}
+			if s, ok := resp.Error.Data.(string); ok {
+				rpcErr.Data = s
+			}
+			return rpcErr
 		}
-		if out == nil {
+		if out == nil || resp.Result == nil {
 			return nil
 		}
 		raw, err := json.Marshal(resp.Result)
@@ -409,132 +764,261 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 	}
 }
 
+func (c *Client) sendHID(dc *webrtc.DataChannel, msg hidrpc.Message) error {
+	if dc == nil {
+		return fmt.Errorf("hid channel not ready")
+	}
+	data, err := msg.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	return dc.Send(data)
+}
+
+// SendKeypress sends a 0x05 key press/release. While any non-modifier key is
+// held the client sends 0x09 keepalives every 50 ms on its own timer, so the
+// device's 100 ms auto-release only fires if the link really stalls.
 func (c *Client) SendKeypress(key byte, press bool) error {
-	if c.hidDC == nil {
-		return fmt.Errorf("hid channel not ready")
-	}
-	msg := hidrpc.Keypress{Key: key, Press: press}
-	data, err := msg.MarshalBinary()
-	if err != nil {
+	if err := c.sendHID(c.ch.Load().hid, hidrpc.Keypress{Key: key, Press: press}); err != nil {
 		return err
 	}
-	return c.hidDC.Send(data)
+	if key >= 0xe0 && key <= 0xe7 {
+		return nil
+	}
+	c.keysMu.Lock()
+	if press {
+		c.heldKeys[key] = true
+	} else {
+		delete(c.heldKeys, key)
+	}
+	start := len(c.heldKeys) > 0 && !c.keepAliveRun
+	if start {
+		c.keepAliveRun = true
+	}
+	c.keysMu.Unlock()
+	if start {
+		go c.keepAliveLoop()
+	}
+	return nil
 }
 
+func (c *Client) keepAliveLoop() {
+	ticker := time.NewTicker(keepAliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.closeCh:
+			return
+		case <-ticker.C:
+		}
+		c.keysMu.Lock()
+		if len(c.heldKeys) == 0 {
+			c.keepAliveRun = false
+			c.keysMu.Unlock()
+			return
+		}
+		c.keysMu.Unlock()
+		_ = c.sendHID(c.ch.Load().hid, hidrpc.KeypressKeepAlive{})
+	}
+}
+
+// SendKeypressKeepAlive is kept for callers that drive their own keepalive;
+// the client already sends keepalives while keys are held.
 func (c *Client) SendKeypressKeepAlive() error {
-	if c.hidDC == nil {
-		return fmt.Errorf("hid channel not ready")
-	}
-	msg := hidrpc.KeypressKeepAlive{}
-	data, err := msg.MarshalBinary()
-	if err != nil {
-		return err
-	}
-	return c.hidDC.Send(data)
+	return c.sendHID(c.ch.Load().hid, hidrpc.KeypressKeepAlive{})
 }
 
+// ReleaseAllKeys releases every key the client believes is held, plus all
+// modifiers, with a single empty keyboard report.
+func (c *Client) ReleaseAllKeys() error {
+	c.keysMu.Lock()
+	clear(c.heldKeys)
+	c.keysMu.Unlock()
+	return c.sendHID(c.ch.Load().hid, hidrpc.KeyboardReport{Modifier: 0, Keys: make([]byte, hidrpc.HidKeyBufferSize)})
+}
+
+// SendAbsPointer sends an absolute pointer report. Moves with no buttons go on
+// the unreliable channel (a stale move is worthless); reports while a button
+// is held or changing go reliable, as in the upstream web UI, so clicks and
+// drags are never lost or reordered against a release.
 func (c *Client) SendAbsPointer(x, y int32, buttons byte) error {
-	log := logging.Subsystem("client")
-	if c.hidUnreliable == nil {
-		err := fmt.Errorf("pointer channel not ready")
-		log.Debug().Err(err).Int32("x", x).Int32("y", y).Uint8("buttons", buttons).Msg("failed to send absolute pointer")
-		return err
+	ch := c.ch.Load()
+	c.pointerMu.Lock()
+	reliable := buttons != 0 || buttons != c.lastButtons || !c.pointerReliableOK
+	c.lastButtons = buttons
+	c.lastX, c.lastY = x, y
+	c.pointerReliableOK = true
+	c.pointerMu.Unlock()
+	dc := ch.hidUnreliable
+	if reliable || dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
+		dc = ch.hid
 	}
-	msg := hidrpc.Pointer{X: x, Y: y, Buttons: buttons}
-	data, err := msg.MarshalBinary()
-	if err != nil {
-		log.Debug().Err(err).Int32("x", x).Int32("y", y).Uint8("buttons", buttons).Msg("failed to marshal absolute pointer")
-		return err
-	}
-	if buttons != 0 {
-		log.Trace().Int32("x", x).Int32("y", y).Uint8("buttons", buttons).Msg("sending absolute pointer")
-	}
-	if err := c.hidUnreliable.Send(data); err != nil {
+	if err := c.sendHID(dc, hidrpc.Pointer{X: x, Y: y, Buttons: buttons}); err != nil {
+		log := logging.Subsystem("client")
 		log.Debug().Err(err).Int32("x", x).Int32("y", y).Uint8("buttons", buttons).Msg("failed to send absolute pointer")
 		return err
 	}
 	return nil
 }
 
-func (c *Client) SendRelMouse(dx, dy int8, buttons byte) error {
-	log := logging.Subsystem("client")
-	if c.hidDC == nil {
-		err := fmt.Errorf("hid channel not ready")
-		log.Debug().Err(err).Int8("dx", dx).Int8("dy", dy).Uint8("buttons", buttons).Msg("failed to send relative mouse")
-		return err
+// SendRelMouse sends a relative mouse report on the reliable channel. Moves
+// larger than ±127 are split into several reports instead of being clamped.
+func (c *Client) SendRelMouse(dx, dy int, buttons byte) error {
+	hid := c.ch.Load().hid
+	c.pointerMu.Lock()
+	c.lastRelButtons = buttons
+	c.pointerMu.Unlock()
+	for {
+		stepX := max(-127, min(127, dx))
+		stepY := max(-127, min(127, dy))
+		if err := c.sendHID(hid, hidrpc.Mouse{DX: int8(stepX), DY: int8(stepY), Buttons: buttons}); err != nil {
+			return err
+		}
+		dx -= stepX
+		dy -= stepY
+		if dx == 0 && dy == 0 {
+			return nil
+		}
 	}
-	msg := hidrpc.Mouse{DX: dx, DY: dy, Buttons: buttons}
-	data, err := msg.MarshalBinary()
-	if err != nil {
-		log.Debug().Err(err).Int8("dx", dx).Int8("dy", dy).Uint8("buttons", buttons).Msg("failed to marshal relative mouse")
-		return err
-	}
-	if buttons != 0 || (dx == 0 && dy == 0) {
-		log.Trace().Int8("dx", dx).Int8("dy", dy).Uint8("buttons", buttons).Msg("sending relative mouse")
-	}
-	if err := c.hidDC.Send(data); err != nil {
-		log.Debug().Err(err).Int8("dx", dx).Int8("dy", dy).Uint8("buttons", buttons).Msg("failed to send relative mouse")
-		return err
-	}
-	return nil
 }
 
+// ReleasePointerButtons releases any mouse button the client last reported
+// as held, for both the absolute and the relative mouse.
+func (c *Client) ReleasePointerButtons() error {
+	c.pointerMu.Lock()
+	absHeld, relHeld := c.lastButtons != 0, c.lastRelButtons != 0
+	x, y := c.lastX, c.lastY
+	c.pointerMu.Unlock()
+	var errs []error
+	if absHeld {
+		errs = append(errs, c.SendAbsPointer(x, y, 0))
+	}
+	if relHeld {
+		errs = append(errs, c.SendRelMouse(0, 0, 0))
+	}
+	return errors.Join(errs...)
+}
+
+// SendWheel sends a wheel report. JetKVM has no HID-RPC wheel path, so this is
+// a JSON-RPC call; it is fire-and-forget to keep scrolling responsive, and
+// reports are sent in order from the caller's goroutine.
 func (c *Client) SendWheel(wheelY, wheelX int8) error {
-	return c.sendWheelReport(context.Background(), wheelY, wheelX)
-}
-
-func (c *Client) ExecuteKeyboardMacro(isPaste bool, steps []hidrpc.KeyboardMacroStep) error {
-	if c.hidDC == nil {
-		return fmt.Errorf("hid channel not ready")
+	rpc := c.ch.Load().rpc
+	if rpc == nil {
+		return fmt.Errorf("rpc data channel not ready")
 	}
-	msg := hidrpc.KeyboardMacroReport{IsPaste: isPaste, Steps: steps}
-	data, err := msg.MarshalBinary()
+	id := fmt.Sprintf("rpc-%d", c.requestCounter.Add(1))
+	data, err := jsonrpc.Marshal(jsonrpc.NewRequest("wheelReport", WheelReportRequest{WheelY: int(wheelY), WheelX: int(wheelX)}, id))
 	if err != nil {
 		return err
 	}
-	return c.hidDC.Send(data)
+	return rpc.SendText(string(data))
+}
+
+// ExecuteKeyboardMacro sends one macro message (at most macroChunkSteps steps
+// to stay below the 64 KiB data channel message limit).
+func (c *Client) ExecuteKeyboardMacro(isPaste bool, steps []hidrpc.KeyboardMacroStep) error {
+	return c.sendHID(c.ch.Load().hid, hidrpc.KeyboardMacroReport{IsPaste: isPaste, Steps: steps})
+}
+
+func (c *Client) CancelKeyboardMacro() error {
+	return c.sendHID(c.ch.Load().hid, hidrpc.CancelKeyboardMacro{})
+}
+
+// TypeMacro sends steps in chunks of at most 128, waiting for the device to
+// report each chunk finished before sending the next (a new macro cancels a
+// running one on the device). Cancelling ctx stops the device-side macro.
+func (c *Client) TypeMacro(ctx context.Context, steps []hidrpc.KeyboardMacroStep) error {
+	c.macroMu.Lock()
+	defer c.macroMu.Unlock()
+	for start := 0; start < len(steps); start += macroChunkSteps {
+		chunk := steps[start:min(len(steps), start+macroChunkSteps)]
+		var total time.Duration
+		for _, s := range chunk {
+			total += time.Duration(s.Delay) * time.Millisecond
+		}
+		if err := c.runMacroChunk(ctx, chunk, total+macroChunkGrace); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) runMacroChunk(ctx context.Context, chunk []hidrpc.KeyboardMacroStep, timeout time.Duration) error {
+	state := make(chan bool, 4)
+	c.keysMu.Lock()
+	c.macroState = state
+	c.keysMu.Unlock()
+	defer func() {
+		c.keysMu.Lock()
+		c.macroState = nil
+		c.keysMu.Unlock()
+	}()
+
+	if err := c.ExecuteKeyboardMacro(true, chunk); err != nil {
+		return err
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	started := false
+	for {
+		select {
+		case <-ctx.Done():
+			_ = c.CancelKeyboardMacro()
+			return ctx.Err()
+		case <-c.closeCh:
+			return ErrClosed
+		case <-timer.C:
+			return fmt.Errorf("keyboard macro did not finish within %s", timeout)
+		case running := <-state:
+			if running {
+				started = true
+			} else if started {
+				return nil
+			}
+		}
+	}
+}
+
+func (c *Client) noteMacroState(running bool) {
+	c.keysMu.Lock()
+	ch := c.macroState
+	c.keysMu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- running:
+		default:
+		}
+	}
 }
 
 func (c *Client) SendSerialText(text string) error {
 	if text == "" {
 		return nil
 	}
-	if c.serialDC == nil {
+	serial := c.ch.Load().serial
+	if serial == nil {
 		return fmt.Errorf("serial channel not ready")
 	}
 	data, err := json.Marshal(struct {
 		Type string `json:"type"`
 		Data string `json:"data"`
-	}{
-		Type: "serial",
-		Data: text,
-	})
+	}{Type: "serial", Data: text})
 	if err != nil {
 		return err
 	}
-	return c.serialDC.SendText(string(data))
+	return serial.SendText(string(data))
 }
 
 func (c *Client) SendSerialRaw(text string) error {
 	if text == "" {
 		return nil
 	}
-	if c.serialDC == nil {
+	serial := c.ch.Load().serial
+	if serial == nil {
 		return fmt.Errorf("serial channel not ready")
 	}
-	return c.serialDC.SendText(text)
-}
-
-func (c *Client) CancelKeyboardMacro() error {
-	if c.hidDC == nil {
-		return fmt.Errorf("hid channel not ready")
-	}
-	msg := hidrpc.CancelKeyboardMacro{}
-	data, err := msg.MarshalBinary()
-	if err != nil {
-		return err
-	}
-	return c.hidDC.Send(data)
+	return serial.SendText(text)
 }
 
 func (c *Client) VideoStream() *video.Stream {
@@ -543,14 +1027,16 @@ func (c *Client) VideoStream() *video.Stream {
 	return c.videoStream
 }
 
-func (c *Client) openDataChannels() error {
+func (c *Client) openDataChannels(pc *webrtc.PeerConnection) error {
+	set := &channels{}
 	var err error
-	c.rpcDC, err = c.pc.CreateDataChannel("rpc", nil)
+
+	set.rpc, err = pc.CreateDataChannel("rpc", nil)
 	if err != nil {
 		return err
 	}
-	c.watchControlChannel(c.rpcDC)
-	c.rpcDC.OnMessage(func(msg webrtc.DataChannelMessage) {
+	c.watchEssentialChannel(set.rpc)
+	set.rpc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		if !msg.IsString {
 			return
 		}
@@ -560,26 +1046,28 @@ func (c *Client) openDataChannels() error {
 		}
 		switch v := decoded.(type) {
 		case jsonrpc.Response:
-			if call, ok := c.pending.Load(fmt.Sprint(v.ID)); ok {
-				call.(pendingCall).ch <- v
+			c.pendingMu.Lock()
+			ch := c.pending[fmt.Sprint(v.ID)]
+			c.pendingMu.Unlock()
+			if ch != nil {
+				select {
+				case ch <- v:
+				default:
+				}
 			}
 		case jsonrpc.Event:
-			select {
-			case c.eventCh <- v:
-			default:
-			}
+			c.events.put(v)
 		}
 	})
 
-	c.hidDC, err = c.pc.CreateDataChannel("hidrpc", nil)
+	set.hid, err = pc.CreateDataChannel("hidrpc", nil)
 	if err != nil {
 		return err
 	}
-	c.watchControlChannel(c.hidDC)
-	c.hidDC.OnOpen(func() {
-		go c.runHIDHandshake(c.hidDC)
-	})
-	c.hidDC.OnMessage(func(msg webrtc.DataChannelMessage) {
+	c.watchEssentialChannel(set.hid)
+	hid := set.hid
+	hid.OnOpen(func() { go c.runHIDHandshake(hid) })
+	hid.OnMessage(func(msg webrtc.DataChannelMessage) {
 		decoded, err := hidrpc.Decode(msg.Data)
 		if err != nil {
 			return
@@ -588,48 +1076,49 @@ func (c *Client) openDataChannels() error {
 		case hidrpc.Handshake:
 			if v.Version <= hidrpc.Version {
 				c.hidReadyOnce.Do(func() {
+					c.pointerMu.Lock()
+					c.pointerReliableOK = false
+					c.pointerMu.Unlock()
 					close(c.hidReady)
 					c.emitLifecycle(LifecycleEvent{Type: "hid_ready"})
 				})
 			}
 		case hidrpc.KeyboardMacroState:
+			c.noteMacroState(v.State)
 			c.emitLifecycle(LifecycleEvent{Type: "paste_state", PasteState: v.State && v.IsPaste})
+		case hidrpc.KeyboardLEDState:
+			c.emitLifecycle(LifecycleEvent{Type: "keyboard_leds", LEDMask: v.Mask})
 		}
 	})
 
-	c.hidUnreliable, err = c.pc.CreateDataChannel("hidrpc-unreliable-ordered", &webrtc.DataChannelInit{
+	set.hidUnreliable, err = pc.CreateDataChannel("hidrpc-unreliable-ordered", &webrtc.DataChannelInit{
 		Ordered:        &[]bool{true}[0],
 		MaxRetransmits: &[]uint16{0}[0],
 	})
 	if err != nil {
 		return err
 	}
-	c.watchControlChannel(c.hidUnreliable)
-	c.hidNonOrdered, err = c.pc.CreateDataChannel("hidrpc-unreliable-nonordered", &webrtc.DataChannelInit{
+	set.hidNonOrdered, err = pc.CreateDataChannel("hidrpc-unreliable-nonordered", &webrtc.DataChannelInit{
 		Ordered:        &[]bool{false}[0],
 		MaxRetransmits: &[]uint16{0}[0],
 	})
-	if err == nil {
-		c.watchControlChannel(c.hidNonOrdered)
-	}
 	if err != nil {
 		return err
 	}
 
-	c.serialDC, err = c.pc.CreateDataChannel("serial", nil)
+	set.serial, err = pc.CreateDataChannel("serial", nil)
 	if err != nil {
 		return err
 	}
-	c.watchControlChannel(c.serialDC)
-	c.serialDC.OnOpen(func() {
+	set.serial.OnOpen(func() {
 		c.emitLifecycle(LifecycleEvent{Type: "serial_ready"})
 	})
-	c.serialDC.OnError(func(err error) {
+	set.serial.OnError(func(err error) {
 		if err != nil {
 			c.emitLifecycle(LifecycleEvent{Type: "serial_error", Err: err.Error()})
 		}
 	})
-	c.serialDC.OnMessage(func(msg webrtc.DataChannelMessage) {
+	set.serial.OnMessage(func(msg webrtc.DataChannelMessage) {
 		text := string(msg.Data)
 		if text == "" {
 			return
@@ -639,13 +1128,14 @@ func (c *Client) openDataChannels() error {
 		default:
 		}
 	})
+	c.ch.Store(set)
 	return nil
 }
 
-func (c *Client) watchControlChannel(dc *webrtc.DataChannel) {
-	if dc == nil {
-		return
-	}
+// watchEssentialChannel ends the session when the RPC or HID channel closes:
+// without them the session is useless. Other channels (serial, unreliable
+// pointer) closing only degrades features.
+func (c *Client) watchEssentialChannel(dc *webrtc.DataChannel) {
 	dc.OnClose(func() {
 		c.handleTransportDisconnect(webrtc.PeerConnectionStateDisconnected, "datachannel:"+dc.Label()+":close")
 	})
@@ -665,14 +1155,6 @@ func (c *Client) HTTPClient() *http.Client {
 	return c.authClient.HTTPClient()
 }
 
-func (c *Client) LatestFrame() image.Image {
-	stream := c.VideoStream()
-	if stream == nil || stream.Latest() == nil {
-		return nil
-	}
-	return stream.Latest().Image
-}
-
 func (c *Client) LatestFrameInfo() (image.Image, time.Time) {
 	stream := c.VideoStream()
 	if stream == nil {
@@ -689,90 +1171,40 @@ func (c *Client) emitLifecycle(evt LifecycleEvent) {
 	if evt.Err != "" {
 		c.lastError.Store(evt.Err)
 	}
-	select {
-	case c.lifecycleCh <- evt:
-	default:
-	}
+	c.lifecycle.put(evt)
 }
 
+// Stats returns the most recent statistics snapshot. The expensive part
+// (pion GetStats) runs on the client's own monitor goroutine once a second,
+// never on the caller's (UI) thread.
 func (c *Client) Stats() StatsSnapshot {
-	stats := StatsSnapshot{
-		SignalingMode: c.signalMode,
-	}
-	select {
-	case <-c.closeCh:
-		if err, ok := c.lastError.Load().(string); ok {
-			stats.LastError = err
-		}
-		if debug, ok := c.transportDebug.Load().(string); ok {
-			stats.TransportDebug = debug
-		}
-		return stats
-	default:
-	}
+	c.statsMu.Lock()
+	stats := c.stats
+	c.statsMu.Unlock()
+	stats.SignalingMode = c.SignalingMode()
+	stats.HIDReady = c.HIDReady()
 	if frame, _ := c.LatestFrameInfo(); frame != nil {
 		b := frame.Bounds()
-		stats.FrameWidth = b.Dx()
-		stats.FrameHeight = b.Dy()
+		stats.FrameWidth, stats.FrameHeight = b.Dx(), b.Dy()
+		stats.VideoReady = true
 	}
-	if c.pc != nil {
-		stats.RTCState = c.pc.ConnectionState()
-		if stats.RTCState == webrtc.PeerConnectionStateClosed {
-			if err, ok := c.lastError.Load().(string); ok {
-				stats.LastError = err
-			}
-			if debug, ok := c.transportDebug.Load().(string); ok {
-				stats.TransportDebug = debug
-			}
-			return stats
-		}
-		report := c.pc.GetStats()
-		now := time.Now()
-		for _, raw := range report {
-			switch v := raw.(type) {
-			case webrtc.InboundRTPStreamStats:
-				if v.Kind != "video" {
-					continue
-				}
-				if stats.FrameWidth == 0 && stats.FrameHeight == 0 {
-					stats.FrameWidth = int(v.FrameWidth)
-					stats.FrameHeight = int(v.FrameHeight)
-				}
-				stats.BytesReceived = v.BytesReceived
-				stats.PacketsLost = v.PacketsLost
-				stats.JitterMs = v.Jitter * 1000
-				stats.FramesDecoded = v.FramesDecoded
-				stats.FramesRendered = v.FramesRendered
-				c.statsMu.Lock()
-				c.statsHistory = append(c.statsHistory, statsSample{
-					at:            now,
-					bytesReceived: v.BytesReceived,
-					framesDecoded: v.FramesDecoded,
-				})
-				cutoff := now.Add(-3 * time.Second)
-				trimmed := c.statsHistory[:0]
-				for _, sample := range c.statsHistory {
-					if sample.at.Before(cutoff) && len(c.statsHistory) > 2 {
-						continue
-					}
-					trimmed = append(trimmed, sample)
-				}
-				c.statsHistory = trimmed
-				stats.BitrateKbps, stats.FramesPerSecond = computeSmoothedRates(c.statsHistory)
-				c.statsMu.Unlock()
-			case webrtc.ICECandidatePairStats:
-				if v.State == webrtc.StatsICECandidatePairStateSucceeded || v.Nominated {
-					stats.RoundTripMs = v.CurrentRoundTripTime * 1000
-				}
-			}
+	c.videoMu.RLock()
+	if c.assembler != nil {
+		as := c.assembler.Stats()
+		stats.FramesDropped = as.DroppedFrames
+		stats.KeyframeWaits = as.KeyframeWaits
+		if c.videoStream == nil {
+			stats.VideoReady = as.Frames > 0
 		}
 	}
-	select {
-	case <-c.hidReady:
-		stats.HIDReady = true
-	default:
+	if c.videoStream != nil {
+		stats.FramesDecoded = uint32(c.videoStream.Stats().Decoded)
 	}
-	stats.VideoReady = c.VideoStream() != nil && c.VideoStream().Latest() != nil
+	stats.VideoCodec = c.videoCodec
+	c.videoMu.RUnlock()
+	if pc := c.peer(); pc != nil {
+		stats.RTCState = pc.ConnectionState()
+	}
 	if err, ok := c.lastError.Load().(string); ok {
 		stats.LastError = err
 	}
@@ -782,24 +1214,81 @@ func (c *Client) Stats() StatsSnapshot {
 	return stats
 }
 
+func (c *Client) monitorStats() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		c.collectStats(time.Now())
+		select {
+		case <-c.closeCh:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (c *Client) collectStats(now time.Time) {
+	pc := c.peer()
+	if pc == nil || pc.ConnectionState() == webrtc.PeerConnectionStateClosed {
+		return
+	}
+	report := pc.GetStats()
+	var snap StatsSnapshot
+	var framesDecoded uint32
+	c.videoMu.RLock()
+	if c.videoStream != nil {
+		framesDecoded = uint32(c.videoStream.Stats().Decoded)
+	} else if c.assembler != nil {
+		framesDecoded = uint32(c.assembler.Stats().Frames)
+	}
+	c.videoMu.RUnlock()
+	for _, raw := range report {
+		switch v := raw.(type) {
+		case webrtc.InboundRTPStreamStats:
+			if v.Kind != "video" {
+				continue
+			}
+			snap.BytesReceived = v.BytesReceived
+			snap.PacketsLost = v.PacketsLost
+			snap.NACKsSent = v.NACKCount
+			snap.JitterMs = v.Jitter * 1000
+			snap.FramesRendered = v.FramesRendered
+		case webrtc.ICECandidatePairStats:
+			if v.Nominated || v.State == webrtc.StatsICECandidatePairStateSucceeded {
+				if v.CurrentRoundTripTime > 0 {
+					snap.RoundTripMs = v.CurrentRoundTripTime * 1000
+				}
+			}
+		}
+	}
+	if snap.RoundTripMs > 0 {
+		c.rttNanos.Store(int64(snap.RoundTripMs * float64(time.Millisecond)))
+	}
+	c.statsMu.Lock()
+	c.statsHistory = append(c.statsHistory, statsSample{at: now, bytesReceived: snap.BytesReceived, framesDecoded: framesDecoded})
+	cutoff := now.Add(-3 * time.Second)
+	trimmed := c.statsHistory[:0]
+	for _, sample := range c.statsHistory {
+		if sample.at.Before(cutoff) && len(c.statsHistory) > 2 {
+			continue
+		}
+		trimmed = append(trimmed, sample)
+	}
+	c.statsHistory = trimmed
+	snap.BitrateKbps, snap.FramesPerSecond = computeSmoothedRates(c.statsHistory)
+	c.stats = snap
+	c.statsMu.Unlock()
+}
+
 func (c *Client) runHIDHandshake(dc *webrtc.DataChannel) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-
-	send := func() bool {
-		hello := hidrpc.Handshake{Version: hidrpc.Version}
-		data, err := hello.MarshalBinary()
-		if err != nil {
-			return false
+	send := func() {
+		if dc.ReadyState() == webrtc.DataChannelStateOpen {
+			_ = c.sendHID(dc, hidrpc.Handshake{Version: hidrpc.Version})
 		}
-		if dc.ReadyState() != webrtc.DataChannelStateOpen {
-			return false
-		}
-		return dc.Send(data) == nil
 	}
-
-	_ = send()
-
+	send()
 	for {
 		select {
 		case <-c.closeCh:
@@ -810,114 +1299,7 @@ func (c *Client) runHIDHandshake(dc *webrtc.DataChannel) {
 			if dc.ReadyState() != webrtc.DataChannelStateOpen {
 				return
 			}
-			_ = send()
-		}
-	}
-}
-
-func (c *Client) openSignaling(ctx context.Context, pc *webrtc.PeerConnection, answerCh chan<- webrtc.SessionDescription, wsErrCh chan<- error) (*websocket.Conn, bool, error) {
-	conn, _, err := signaling.DialWebsocket(ctx, c.authClient.HTTPClient(), c.cfg.BaseURL)
-	if err != nil {
-		return nil, true, nil
-	}
-
-	_, data, err := conn.ReadMessage()
-	if err != nil {
-		_ = conn.Close()
-		return nil, true, nil
-	}
-
-	var msg signaling.WSMessage
-	if err := json.Unmarshal(data, &msg); err != nil {
-		_ = conn.Close()
-		return nil, false, err
-	}
-	if msg.Type != "device-metadata" {
-		_ = conn.Close()
-		return nil, false, fmt.Errorf("unexpected signaling message type %q", msg.Type)
-	}
-
-	var meta signaling.DeviceMetadata
-	if err := json.Unmarshal(msg.Data, &meta); err != nil {
-		_ = conn.Close()
-		return nil, false, err
-	}
-	if meta.DeviceVersion == "" {
-		_ = conn.Close()
-		return nil, true, nil
-	}
-
-	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		if candidate == nil {
-			return
-		}
-		init := candidate.ToJSON()
-		if init.Candidate == "" {
-			return
-		}
-		_ = c.writeSignal(signalingMessage{
-			Type: "new-ice-candidate",
-			Data: init,
-		})
-	})
-
-	go c.readSignaling(conn, pc, answerCh, wsErrCh)
-	return conn, false, nil
-}
-
-func (c *Client) readSignaling(conn *websocket.Conn, pc *webrtc.PeerConnection, answerCh chan<- webrtc.SessionDescription, wsErrCh chan<- error) {
-	defer conn.Close()
-
-	for {
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			c.noteTransportDebug("signaling_read_error")
-			select {
-			case <-c.closeCh:
-			default:
-				select {
-				case wsErrCh <- err:
-				default:
-				}
-			}
-			return
-		}
-
-		var msg signaling.WSMessage
-		if err := json.Unmarshal(data, &msg); err != nil {
-			continue
-		}
-
-		switch msg.Type {
-		case "answer":
-			var encoded string
-			if err := json.Unmarshal(msg.Data, &encoded); err != nil {
-				continue
-			}
-			answer, err := decodeAnswer(encoded)
-			if err != nil {
-				select {
-				case wsErrCh <- err:
-				default:
-				}
-				return
-			}
-			select {
-			case answerCh <- answer:
-			default:
-			}
-		case "new-ice-candidate":
-			var candidate webrtc.ICECandidateInit
-			if err := json.Unmarshal(msg.Data, &candidate); err != nil {
-				continue
-			}
-			if pc.RemoteDescription() == nil {
-				time.AfterFunc(100*time.Millisecond, func() {
-					_ = pc.AddICECandidate(candidate)
-				})
-				continue
-			}
-			_ = pc.AddICECandidate(candidate)
+			send()
 		}
 	}
 }
@@ -927,7 +1309,6 @@ func decodeAnswer(encoded string) (webrtc.SessionDescription, error) {
 	if err != nil {
 		return webrtc.SessionDescription{}, err
 	}
-
 	var answer webrtc.SessionDescription
 	if err := json.Unmarshal(rawAnswer, &answer); err != nil {
 		return webrtc.SessionDescription{}, err
@@ -936,10 +1317,11 @@ func decodeAnswer(encoded string) (webrtc.SessionDescription, error) {
 }
 
 func (c *Client) writeSignal(msg any) error {
+	c.signalMu.Lock()
+	defer c.signalMu.Unlock()
 	if c.signalConn == nil {
 		return fmt.Errorf("signaling connection not ready")
 	}
-	c.signalMu.Lock()
-	defer c.signalMu.Unlock()
+	_ = c.signalConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	return c.signalConn.WriteJSON(msg)
 }

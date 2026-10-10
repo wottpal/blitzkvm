@@ -3,85 +3,102 @@ package input
 import (
 	"strings"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/hidrpc"
 )
 
+// HID modifier bits used by layout tables.
 const (
-	modCtrlLeft  = 0x01
 	modShiftLeft = 0x02
 	modAltRight  = 0x40
 )
 
-type textKey struct {
+// hidSpace is the HID usage of the space bar, sent after a dead key to emit
+// the bare accent character.
+const hidSpace = 0x2c
+
+// keyStroke is one key with modifiers.
+type keyStroke struct {
 	hid      byte
-	modifier byte
+	shift    bool
+	altRight bool
 }
 
-var textKeyMap = map[rune]textKey{
-	'a': {hid: 4}, 'b': {hid: 5}, 'c': {hid: 6}, 'd': {hid: 7}, 'e': {hid: 8},
-	'f': {hid: 9}, 'g': {hid: 10}, 'h': {hid: 11}, 'i': {hid: 12}, 'j': {hid: 13},
-	'k': {hid: 14}, 'l': {hid: 15}, 'm': {hid: 16}, 'n': {hid: 17}, 'o': {hid: 18},
-	'p': {hid: 19}, 'q': {hid: 20}, 'r': {hid: 21}, 's': {hid: 22}, 't': {hid: 23},
-	'u': {hid: 24}, 'v': {hid: 25}, 'w': {hid: 26}, 'x': {hid: 27}, 'y': {hid: 28},
-	'z': {hid: 29},
-	'A': {hid: 4, modifier: modShiftLeft}, 'B': {hid: 5, modifier: modShiftLeft},
-	'C': {hid: 6, modifier: modShiftLeft}, 'D': {hid: 7, modifier: modShiftLeft},
-	'E': {hid: 8, modifier: modShiftLeft}, 'F': {hid: 9, modifier: modShiftLeft},
-	'G': {hid: 10, modifier: modShiftLeft}, 'H': {hid: 11, modifier: modShiftLeft},
-	'I': {hid: 12, modifier: modShiftLeft}, 'J': {hid: 13, modifier: modShiftLeft},
-	'K': {hid: 14, modifier: modShiftLeft}, 'L': {hid: 15, modifier: modShiftLeft},
-	'M': {hid: 16, modifier: modShiftLeft}, 'N': {hid: 17, modifier: modShiftLeft},
-	'O': {hid: 18, modifier: modShiftLeft}, 'P': {hid: 19, modifier: modShiftLeft},
-	'Q': {hid: 20, modifier: modShiftLeft}, 'R': {hid: 21, modifier: modShiftLeft},
-	'S': {hid: 22, modifier: modShiftLeft}, 'T': {hid: 23, modifier: modShiftLeft},
-	'U': {hid: 24, modifier: modShiftLeft}, 'V': {hid: 25, modifier: modShiftLeft},
-	'W': {hid: 26, modifier: modShiftLeft}, 'X': {hid: 27, modifier: modShiftLeft},
-	'Y': {hid: 28, modifier: modShiftLeft}, 'Z': {hid: 29, modifier: modShiftLeft},
-	'1': {hid: 30}, '2': {hid: 31}, '3': {hid: 32}, '4': {hid: 33}, '5': {hid: 34},
-	'6': {hid: 35}, '7': {hid: 36}, '8': {hid: 37}, '9': {hid: 38}, '0': {hid: 39},
-	'!': {hid: 30, modifier: modShiftLeft}, '@': {hid: 31, modifier: modShiftLeft},
-	'#': {hid: 32, modifier: modShiftLeft}, '$': {hid: 33, modifier: modShiftLeft},
-	'%': {hid: 34, modifier: modShiftLeft}, '^': {hid: 35, modifier: modShiftLeft},
-	'&': {hid: 36, modifier: modShiftLeft}, '*': {hid: 37, modifier: modShiftLeft},
-	'(': {hid: 38, modifier: modShiftLeft}, ')': {hid: 39, modifier: modShiftLeft},
-	'\n': {hid: 40}, '\r': {hid: 40}, '\t': {hid: 43}, ' ': {hid: 44},
-	'-': {hid: 45}, '_': {hid: 45, modifier: modShiftLeft},
-	'=': {hid: 46}, '+': {hid: 46, modifier: modShiftLeft},
-	'[': {hid: 47}, '{': {hid: 47, modifier: modShiftLeft},
-	']': {hid: 48}, '}': {hid: 48, modifier: modShiftLeft},
-	'\\': {hid: 49}, '|': {hid: 49, modifier: modShiftLeft},
-	';': {hid: 51}, ':': {hid: 51, modifier: modShiftLeft},
-	'\'': {hid: 52}, '"': {hid: 52, modifier: modShiftLeft},
-	'`': {hid: 53}, '~': {hid: 53, modifier: modShiftLeft},
-	',': {hid: 54}, '<': {hid: 54, modifier: modShiftLeft},
-	'.': {hid: 55}, '>': {hid: 55, modifier: modShiftLeft},
-	'/': {hid: 56}, '?': {hid: 56, modifier: modShiftLeft},
+// charCombo describes how a character is typed on a layout: optionally an
+// accent (dead) key first, then the key itself, then — for dead-key
+// characters — a space to emit the accent on its own.
+type charCombo struct {
+	hid      byte
+	shift    bool
+	altRight bool
+	deadKey  bool
+	accent   *keyStroke
 }
 
+func modifierMask(shift, altRight bool) byte {
+	var m byte
+	if shift {
+		m |= modShiftLeft
+	}
+	if altRight {
+		m |= modAltRight
+	}
+	return m
+}
+
+// PasteStepPressDelay is how long each key is held, matching the upstream web
+// UI's executeMacro (20 ms press, then a release step carrying the delay).
+const PasteStepPressDelay = 20
+
+// BuildPasteMacro converts text into HID macro steps for the given keyboard
+// layout (the layout configured on the target machine). Each keystroke
+// becomes a press step (held PasteStepPressDelay ms) and a release step held
+// for delay ms, exactly like the upstream web UI. Characters the layout cannot
+// type are skipped and returned in invalid (deduplicated, in order).
 func BuildPasteMacro(layout, text string, delay uint16) ([]hidrpc.KeyboardMacroStep, []rune) {
-	_ = NormalizeKeyboardLayoutCode(layout)
+	table := generatedLayouts[NormalizeKeyboardLayoutCode(layout)]
+	if table == nil {
+		table = generatedLayouts["en-US"]
+	}
+	text = norm.NFC.String(text)
 	steps := make([]hidrpc.KeyboardMacroStep, 0, len(text)*2)
-	invalidMap := map[rune]bool{}
-	invalid := make([]rune, 0)
+	seenInvalid := map[rune]bool{}
+	var invalid []rune
+
+	stroke := func(hid, modifier byte) {
+		var press hidrpc.KeyboardMacroStep
+		press.Modifier = modifier
+		press.Keys[0] = hid
+		press.Delay = PasteStepPressDelay
+		steps = append(steps, press, hidrpc.KeyboardMacroStep{Delay: delay})
+	}
 
 	for _, r := range text {
-		mapping, ok := textKeyMap[r]
+		combo, ok := table[r]
 		if !ok {
-			if !invalidMap[r] {
-				invalidMap[r] = true
+			if !seenInvalid[r] {
+				seenInvalid[r] = true
 				invalid = append(invalid, r)
 			}
 			continue
 		}
-		var press hidrpc.KeyboardMacroStep
-		press.Modifier = mapping.modifier
-		press.Keys[0] = mapping.hid
-		press.Delay = 20
-		steps = append(steps, press)
-		steps = append(steps, hidrpc.KeyboardMacroStep{Delay: delay})
+		if combo.accent != nil {
+			stroke(combo.accent.hid, modifierMask(combo.accent.shift, combo.accent.altRight))
+		}
+		stroke(combo.hid, modifierMask(combo.shift, combo.altRight))
+		if combo.deadKey {
+			stroke(hidSpace, 0)
+		}
 	}
-
 	return steps, invalid
+}
+
+// LayoutSupportsRune reports whether r can be typed on layout.
+func LayoutSupportsRune(layout string, r rune) bool {
+	table := generatedLayouts[NormalizeKeyboardLayoutCode(layout)]
+	_, ok := table[r]
+	return ok
 }
 
 func InvalidRunesString(invalid []rune) string {

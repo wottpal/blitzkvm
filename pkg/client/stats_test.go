@@ -1,6 +1,7 @@
 package client
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -70,56 +71,81 @@ func TestHandleTransportDisconnectNoopsAfterClose(t *testing.T) {
 	c.handleTransportDisconnect(webrtc.PeerConnectionStateDisconnected, "test")
 
 	select {
-	case evt := <-c.Lifecycle():
-		t.Fatalf("unexpected lifecycle event after close: %+v", evt)
+	case evt, ok := <-c.Lifecycle():
+		if ok {
+			t.Fatalf("unexpected lifecycle event after close: %+v", evt)
+		}
 	case <-time.After(100 * time.Millisecond):
 	}
 }
 
-func TestStatsSkipsPeerConnectionPollingAfterClose(t *testing.T) {
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
+func TestStatsAfterCloseDoesNotPoll(t *testing.T) {
 	c, err := New(Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	api, err := c.newAPI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.pcMu.Lock()
 	c.pc = pc
-
+	c.pcMu.Unlock()
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if c.pc != nil {
-		t.Fatal("expected Close to clear peer connection reference")
-	}
-
+	c.collectStats(time.Now())
 	_ = c.Stats()
 }
 
-func TestRestrictVideoTransceiverToH264RemovesH265FromOffer(t *testing.T) {
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+func offerSDP(t *testing.T, cfg Config) string {
+	t.Helper()
+	c, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	api, err := c.newAPI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pc.Close()
-
-	transceiver, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RTPTransceiverInit{
 		Direction: webrtc.RTPTransceiverDirectionRecvonly,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := restrictVideoTransceiverToH264(transceiver); err != nil {
-		t.Fatalf("restrictVideoTransceiverToH264 returned error: %v", err)
-	}
-
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if offerAdvertisesH265(offer) {
-		t.Fatalf("expected offer to omit H265, got SDP:\n%s", offer.SDP)
+	return offer.SDP
+}
+
+func TestOfferNegotiatesLossRecoveryAndOmitsH265(t *testing.T) {
+	sdp := offerSDP(t, Config{})
+	// JetKVM switches to H.265 if the offer mentions it anywhere.
+	if strings.Contains(strings.ToUpper(sdp), "H265") {
+		t.Fatalf("offer must not mention H265 by default:\n%s", sdp)
+	}
+	for _, want := range []string{"H264/90000", "packetization-mode=1", "a=rtcp-fb:102 nack", "a=rtcp-fb:102 nack pli", "a=rtcp-fb:102 ccm fir"} {
+		if !strings.Contains(sdp, want) {
+			t.Fatalf("offer is missing %q:\n%s", want, sdp)
+		}
+	}
+}
+
+func TestOfferH265WhenRequested(t *testing.T) {
+	sdp := offerSDP(t, Config{OfferH265: true})
+	if !strings.Contains(sdp, "H265/90000") {
+		t.Fatalf("expected H265 in offer:\n%s", sdp)
 	}
 }

@@ -13,10 +13,11 @@ func TestKeyboardUpdatePressAndRelease(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("expected 2 press events, got %d", len(events))
 	}
-	if events[0] != (KeyEvent{HID: 4, Press: true}) {
+	// Modifiers are pressed before the keys they modify.
+	if events[0] != (KeyEvent{HID: 225, Press: true}) {
 		t.Fatalf("unexpected first event: %+v", events[0])
 	}
-	if events[1] != (KeyEvent{HID: 225, Press: true}) {
+	if events[1] != (KeyEvent{HID: 4, Press: true}) {
 		t.Fatalf("unexpected second event: %+v", events[1])
 	}
 
@@ -26,6 +27,24 @@ func TestKeyboardUpdatePressAndRelease(t *testing.T) {
 	}
 	if events[0] != (KeyEvent{HID: 4, Press: false}) {
 		t.Fatalf("unexpected release event: %+v", events[0])
+	}
+}
+
+func TestKeyboardReleasesBeforePresses(t *testing.T) {
+	k := NewKeyboard()
+	now := time.Unix(0, 0)
+	_ = k.Update([]Key{KeyShiftLeft}, now)
+
+	// Shift released and "a" pressed in the same sample must not type "A".
+	events := k.Update([]Key{KeyA}, now.Add(10*time.Millisecond))
+	want := []KeyEvent{{HID: 225, Press: false}, {HID: 4, Press: true}}
+	if len(events) != len(want) {
+		t.Fatalf("events = %+v, want %+v", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Fatalf("event %d = %+v, want %+v", i, events[i], want[i])
+		}
 	}
 }
 
@@ -64,9 +83,9 @@ func TestKeyboardSortsPressesDeterministically(t *testing.T) {
 		t.Fatalf("expected 3 press events, got %d", len(events))
 	}
 	expected := []KeyEvent{
-		{HID: 4, Press: true},
 		{HID: 224, Press: true},
 		{HID: 229, Press: true},
+		{HID: 4, Press: true},
 	}
 	for i := range expected {
 		if events[i] != expected[i] {

@@ -25,29 +25,40 @@ const (
 	keyKeepAliveInterval = 50 * time.Millisecond
 )
 
+// Update diffs the currently pressed keys against the previous call and
+// returns the HID events to send. Releases come before presses, so a key
+// released and another pressed within one sample cannot combine (e.g. Shift
+// released + "a" pressed must type "a", not "A"). Within presses, modifiers
+// go first; within releases, modifiers go last.
 func (k *Keyboard) Update(keys []Key, now time.Time) []KeyEvent {
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	current := make(map[Key]bool, len(keys))
-	events := make([]KeyEvent, 0, len(keys)+len(k.pressed))
-	newPress := false
-
 	for _, key := range keys {
 		current[key] = true
-		if k.pressed[key] {
-			continue
-		}
-		newPress = true
-		if hid, ok := KeyToHID(key); ok {
-			events = append(events, KeyEvent{HID: hid, Press: true})
-		}
 	}
 
+	var released, pressed []Key
 	for key := range k.pressed {
-		if current[key] {
-			continue
+		if !current[key] {
+			released = append(released, key)
 		}
+	}
+	for key := range current {
+		if !k.pressed[key] {
+			pressed = append(pressed, key)
+		}
+	}
+	sortKeys(released, false)
+	sortKeys(pressed, true)
+
+	events := make([]KeyEvent, 0, len(released)+len(pressed))
+	for _, key := range released {
 		if hid, ok := KeyToHID(key); ok {
 			events = append(events, KeyEvent{HID: hid, Press: false})
+		}
+	}
+	for _, key := range pressed {
+		if hid, ok := KeyToHID(key); ok {
+			events = append(events, KeyEvent{HID: hid, Press: true})
 		}
 	}
 
@@ -55,10 +66,26 @@ func (k *Keyboard) Update(keys []Key, now time.Time) []KeyEvent {
 	switch {
 	case len(current) == 0:
 		k.nextKeepAlive = time.Time{}
-	case newPress || k.nextKeepAlive.IsZero():
+	case len(pressed) > 0 || k.nextKeepAlive.IsZero():
 		k.nextKeepAlive = now.Add(keyKeepAliveInterval)
 	}
 	return events
+}
+
+// sortKeys orders keys deterministically, with modifiers first or last.
+func sortKeys(keys []Key, modifiersFirst bool) {
+	sort.Slice(keys, func(i, j int) bool {
+		mi, mj := isModifierKey(keys[i]), isModifierKey(keys[j])
+		if mi != mj {
+			return mi == modifiersFirst
+		}
+		return keys[i] < keys[j]
+	})
+}
+
+func isModifierKey(key Key) bool {
+	hid, ok := KeyToHID(key)
+	return ok && hid >= 0xe0 && hid <= 0xe7
 }
 
 func (k *Keyboard) ReleaseAll() []KeyEvent {
