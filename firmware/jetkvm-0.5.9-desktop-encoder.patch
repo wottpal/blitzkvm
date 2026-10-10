@@ -1,0 +1,2358 @@
+diff --git a/go.mod b/go.mod
+index f4388a4..c453ecc 100644
+--- a/go.mod
++++ b/go.mod
+@@ -23,6 +23,7 @@ require (
+ 	github.com/pion/ice/v4 v4.1.0
+ 	github.com/pion/logging v0.2.4
+ 	github.com/pion/mdns/v2 v2.1.0
++	github.com/pion/rtcp v1.2.16
+ 	github.com/pion/webrtc/v4 v4.2.1
+ 	github.com/pojntfx/go-nbd v0.3.2
+ 	github.com/prometheus/client_golang v1.23.2
+@@ -82,7 +83,6 @@ require (
+ 	github.com/pion/dtls/v3 v3.0.9 // indirect
+ 	github.com/pion/interceptor v0.1.42 // indirect
+ 	github.com/pion/randutil v0.1.0 // indirect
+-	github.com/pion/rtcp v1.2.16 // indirect
+ 	github.com/pion/rtp v1.8.27 // indirect
+ 	github.com/pion/sctp v1.9.0 // indirect
+ 	github.com/pion/sdp/v3 v3.0.17 // indirect
+diff --git a/internal/native/cgo/ctrl.c b/internal/native/cgo/ctrl.c
+index 7d64ab8..0d96de1 100644
+--- a/internal/native/cgo/ctrl.c
++++ b/internal/native/cgo/ctrl.c
+@@ -379,6 +379,22 @@ uint8_t jetkvm_video_get_streaming_status() {
+     return video_get_streaming_status();
+ }
+ 
++int jetkvm_video_request_keyframe() {
++    return video_request_keyframe();
++}
++
++int jetkvm_video_set_encoder_params(const jetkvm_venc_params_t *params) {
++    return video_set_encoder_params(params);
++}
++
++void jetkvm_video_get_encoder_status(jetkvm_venc_status_t *status) {
++    video_get_encoder_status(status);
++}
++
++void jetkvm_video_reset_encoder_params(void) {
++    video_reset_encoder_params();
++}
++
+ int jetkvm_video_set_quality_factor(float quality_factor) {
+     if (quality_factor <= 0) {
+         return -1;
+diff --git a/internal/native/cgo/ctrl.h b/internal/native/cgo/ctrl.h
+index ab0a088..9366f5d 100644
+--- a/internal/native/cgo/ctrl.h
++++ b/internal/native/cgo/ctrl.h
+@@ -15,6 +15,30 @@ typedef struct
+     double frame_per_second;
+ } jetkvm_video_state_t;
+ 
++// Runtime encoder tunables (see video_set_encoder_params in video.c).
++typedef struct
++{
++    int min_qp;           // 8-40
++    int max_qp;           // min_qp-51
++    double gop_seconds;   // 0.5-60
++    bool aq;              // keep Rockchip texture-adaptive QP
++    int max_fps;          // 1-120, 0 = source fps
++    int bitrate_kbps;     // 100-50000, 0 = derived from the quality factor
++    int max_bitrate_kbps; // 100-50000 (>= bitrate_kbps), 0 = 1.5x target
++} jetkvm_venc_params_t;
++
++typedef struct
++{
++    jetkvm_venc_params_t params;
++    int source_fps;
++    int encode_fps;
++    int gop_frames;
++    int effective_bitrate_kbps;
++    int effective_max_bitrate_kbps;
++    int codec; // 0 = H.264, 1 = H.265
++    bool streaming;
++} jetkvm_venc_status_t;
++
+ typedef void (jetkvm_video_state_handler_t)(jetkvm_video_state_t *state);
+ typedef void (jetkvm_log_handler_t)(int level, const char *filename, const char *funcname, int line, const char *message);
+ typedef void (jetkvm_rpc_handler_t)(const char *method, const char *params);
+@@ -58,6 +82,10 @@ void jetkvm_video_shutdown();
+ void jetkvm_video_start();
+ void jetkvm_video_stop();
+ uint8_t jetkvm_video_get_streaming_status();
++int jetkvm_video_request_keyframe();
++int jetkvm_video_set_encoder_params(const jetkvm_venc_params_t *params);
++void jetkvm_video_get_encoder_status(jetkvm_venc_status_t *status);
++void jetkvm_video_reset_encoder_params(void);
+ int jetkvm_video_set_quality_factor(float quality_factor);
+ float jetkvm_video_get_quality_factor();
+ int jetkvm_video_set_codec_type(int codec_type);
+@@ -70,6 +98,9 @@ jetkvm_video_state_t *jetkvm_video_get_status();
+ void video_report_format(bool ready, const char *error, u_int16_t width, u_int16_t height, double frame_per_second);
+ void video_send_format_report();
+ int video_send_frame(const uint8_t *frame, ssize_t len);
++int video_set_encoder_params(const jetkvm_venc_params_t *params);
++void video_get_encoder_status(jetkvm_venc_status_t *status);
++void video_reset_encoder_params(void);
+ 
+ 
+ 
+diff --git a/internal/native/cgo/log.h b/internal/native/cgo/log.h
+index 31b2ee7..cda0e36 100644
+--- a/internal/native/cgo/log.h
++++ b/internal/native/cgo/log.h
+@@ -31,6 +31,8 @@ void jetkvm_log(const char *message);
+ #define LEVEL_INFO    1
+ #define LEVEL_DEBUG   0
+ #define LEVEL_TRACE   -1
++/* zerolog.NoLevel: emitted at any configured log level (rendered as info) */
++#define LEVEL_NOTICE  6
+ 
+ /* TRACE LOG */
+ #define log_trace(...) do {                                                        \
+@@ -59,13 +61,12 @@ void jetkvm_log(const char *message);
+     }                                                                              \
+ } while (0)
+ 
+-/* NOTICE LOG */
++/* NOTICE LOG: rare, important state (e.g. encoder config); always emitted.
++ * The native process logs at ERROR unless JETKVM_LOG_* env says otherwise. */
+ #define log_notice(...) do {                                                       \
+-    if (LOG_LEVEL <= LEVEL_INFO) {                                                 \
+-        emit_log(                                                                  \
+-            LEVEL_INFO, __FILENAME__, __func__, __LINE__, __VA_ARGS__              \
+-        );                                                                         \
+-    }                                                                              \
++    emit_log(                                                                      \
++        LEVEL_NOTICE, __FILENAME__, __func__, __LINE__, __VA_ARGS__                \
++    );                                                                             \
+ } while (0)
+ 
+ /* WARN LOG */
+diff --git a/internal/native/cgo/video.c b/internal/native/cgo/video.c
+index 3ede30a..8629cf1 100644
+--- a/internal/native/cgo/video.c
++++ b/internal/native/cgo/video.c
+@@ -5,6 +5,7 @@
+ #include <rk_mpi_venc.h>
+ #include <rk_mpi_sys.h>
+ #include <string.h>
++#include <stdlib.h>
+ #include <rk_debug.h>
+ #include <malloc.h>
+ #include <stdbool.h>
+@@ -116,69 +117,160 @@ double calculate_bitrate(float bitrate_factor, int width, int height)
+     return bitrate;
+ }
+ 
+-static bool is_hd_video(RK_U32 height)
++// The TC358749 bridge always converts to BT.601 limited-range YCbCr for the
++// YUV 4:2:2 bus format (tc35874x.c tc35874x_set_csi_color_space():
++// MASK_VOUT_COLOR_601_YCBCR_LIMITED), whatever the resolution. Measured
++// against a test image: decoded colors match the BT.601 matrix within 0.5
++// code values, the BT.709 matrix is off by ~8. The content is an sRGB desktop,
++// so only the matrix is 601: tag BT.709 (~sRGB) primaries/transfer with the
++// BT.601 matrix, limited range. Tagging only; the conversion is the bridge's.
++static void set_v4l2_yuv_colorimetry(struct v4l2_pix_format_mplane *pix)
+ {
+-    return height > 576;
++    pix->colorspace = V4L2_COLORSPACE_REC709;
++    pix->ycbcr_enc = V4L2_YCBCR_ENC_601;
++    pix->quantization = V4L2_QUANTIZATION_LIM_RANGE;
++    pix->xfer_func = V4L2_XFER_FUNC_709;
+ }
+ 
+-static COLOR_GAMUT_E color_gamut_for_height(RK_U32 height)
++static void configure_vui_video_signal(VENC_VUI_VIDEO_SIGNAL_S *video_signal)
+ {
+-    return is_hd_video(height) ? COLOR_GAMUT_BT709 : COLOR_GAMUT_BT601;
++    memset(video_signal, 0, sizeof(VENC_VUI_VIDEO_SIGNAL_S));
++    video_signal->video_signal_type_present_flag = 1;
++    video_signal->video_format = 5; // unspecified
++    video_signal->video_full_range_flag = 0; // YUV video levels: black=16, white=235
++    video_signal->colour_description_present_flag = 1;
++    video_signal->colour_primaries = 1; // BT.709 (sRGB desktop)
++    video_signal->transfer_characteristics = 1; // BT.709
++    video_signal->matrix_coefficients = 6; // BT.601 (SMPTE 170M), as converted by the bridge
+ }
+ 
+-static void set_v4l2_yuv_colorimetry(struct v4l2_pix_format_mplane *pix, RK_U32 height)
++// Encoder tunables. Defaults are compiled in, overridable via env (read once in
++// video_init; inherited by the native subprocess); video_set_encoder_params()
++// replaces them at runtime (in memory only), live where rockit allows it.
++// video_reset_encoder_params() returns to the defaults when the last session
++// ends and on quality-factor changes, so overrides never outlive a client.
++//
++// A static desktop at a low QP makes every IDR large (~150-350 KiB at 1080p),
++// so a short GOP resends it several times a second. Default to a long GOP and
++// rely on on-demand IDRs (video_request_keyframe) for new sessions and
++// receiver PLI/FIR.
++#define VENC_PARAMS_COMPILED_DEFAULTS \
++    {                                 \
++        .min_qp = 18,                 \
++        .max_qp = 42,                 \
++        .gop_seconds = 4.0,           \
++        .aq = false,                  \
++        .max_fps = 0,                 \
++        .bitrate_kbps = 0,            \
++        .max_bitrate_kbps = 0,        \
++    }
++static jetkvm_venc_params_t venc_params = VENC_PARAMS_COMPILED_DEFAULTS;
++// Compiled defaults with env overrides applied (venc_params_load_env).
++static jetkvm_venc_params_t venc_params_defaults = VENC_PARAMS_COMPILED_DEFAULTS;
++static pthread_mutex_t venc_params_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++static RK_U32 env_u32(const char *name, RK_U32 def, RK_U32 lo, RK_U32 hi)
+ {
+-    if (is_hd_video(height))
++    const char *s = getenv(name);
++    if (s == NULL || *s == '\0')
+     {
+-        pix->colorspace = V4L2_COLORSPACE_REC709;
+-        pix->ycbcr_enc = V4L2_YCBCR_ENC_709;
++        return def;
+     }
+-    else
++    char *end = NULL;
++    unsigned long v = strtoul(s, &end, 10);
++    if (*end != '\0' || v < lo || v > hi)
+     {
+-        pix->colorspace = V4L2_COLORSPACE_SMPTE170M;
+-        pix->ycbcr_enc = V4L2_YCBCR_ENC_601;
++        log_notice("ignoring invalid %s=%.32s", name, s);
++        return def;
+     }
++    return (RK_U32)v;
++}
+ 
+-    pix->quantization = V4L2_QUANTIZATION_LIM_RANGE;
+-    pix->xfer_func = V4L2_XFER_FUNC_709;
++// An invalid JETKVM_VENC_GOP_SECONDS falls back to the upstream 0.5 s cadence.
++static double env_gop_seconds(double def)
++{
++    const char *s = getenv("JETKVM_VENC_GOP_SECONDS");
++    if (s == NULL || *s == '\0')
++    {
++        return def;
++    }
++    char *end = NULL;
++    double seconds = strtod(s, &end);
++    if (*end != '\0' || !(seconds >= 0.5 && seconds <= 60.0))
++    {
++        log_notice("ignoring invalid JETKVM_VENC_GOP_SECONDS=%.32s, using 0.5", s);
++        return 0.5;
++    }
++    return seconds;
+ }
+ 
+-static void configure_vui_video_signal(VENC_VUI_VIDEO_SIGNAL_S *video_signal, RK_U32 height)
++static void venc_params_load_env(void)
+ {
+-    memset(video_signal, 0, sizeof(VENC_VUI_VIDEO_SIGNAL_S));
+-    video_signal->video_signal_type_present_flag = 1;
+-    video_signal->video_format = 5; // unspecified
+-    video_signal->video_full_range_flag = 0; // YUV video levels: black=16, white=235
+-    video_signal->colour_description_present_flag = 1;
++    jetkvm_venc_params_t *p = &venc_params;
++    p->min_qp = env_u32("JETKVM_VENC_MIN_QP", p->min_qp, 8, 40);
++    p->max_qp = env_u32("JETKVM_VENC_MAX_QP", p->max_qp > p->min_qp ? p->max_qp : p->min_qp, p->min_qp, 51);
++    p->gop_seconds = env_gop_seconds(p->gop_seconds);
++    p->aq = env_u32("JETKVM_VENC_AQ", p->aq, 0, 1) == 1;
++    p->max_fps = env_u32("JETKVM_VENC_MAX_FPS", p->max_fps, 0, 120);
++    venc_params_defaults = *p;
++}
+ 
+-    if (is_hd_video(height))
++static jetkvm_venc_params_t venc_get_params(void)
++{
++    pthread_mutex_lock(&venc_params_mutex);
++    jetkvm_venc_params_t p = venc_params;
++    pthread_mutex_unlock(&venc_params_mutex);
++    return p;
++}
++
++static bool venc_params_valid(const jetkvm_venc_params_t *p)
++{
++    return p->min_qp >= 8 && p->min_qp <= 40 &&
++           p->max_qp >= p->min_qp && p->max_qp <= 51 &&
++           p->gop_seconds >= 0.5 && p->gop_seconds <= 60.0 &&
++           p->max_fps >= 0 && p->max_fps <= 120 &&
++           (p->bitrate_kbps == 0 || (p->bitrate_kbps >= 100 && p->bitrate_kbps <= 50000)) &&
++           (p->max_bitrate_kbps == 0 || (p->max_bitrate_kbps >= 100 && p->max_bitrate_kbps <= 50000)) &&
++           (p->bitrate_kbps == 0 || p->max_bitrate_kbps == 0 || p->max_bitrate_kbps >= p->bitrate_kbps);
++}
++
++// Frames per second actually encoded: the source rate, capped by max_fps.
++static RK_U32 venc_encode_fps(RK_U32 source_fps, int max_fps)
++{
++    return max_fps > 0 && (RK_U32)max_fps < source_fps ? (RK_U32)max_fps : source_fps;
++}
++
++static RK_U32 venc_gop_frames(RK_U32 fps, double seconds)
++{
++    if (fps == 0)
+     {
+-        video_signal->colour_primaries = 1; // BT.709
+-        video_signal->transfer_characteristics = 1; // BT.709
+-        video_signal->matrix_coefficients = 1; // BT.709
++        return 30;
+     }
+-    else
++    // Truncation keeps 0.5 s identical to the upstream fps / 2.
++    RK_U32 gop = (RK_U32)(fps * seconds);
++    return gop < 1 ? 1 : gop;
++}
++
++// Target/max in kbps: explicit overrides, else derived from the quality
++// factor (overrides are cleared by video_set_quality_factor).
++static void venc_bitrates(const jetkvm_venc_params_t *p, RK_U32 width, RK_U32 height,
++                          RK_U32 *bitrate, RK_U32 *max_bitrate)
++{
++    *bitrate = p->bitrate_kbps > 0 ? (RK_U32)p->bitrate_kbps
++                                   : (RK_U32)calculate_bitrate(quality_factor, width, height);
++    *max_bitrate = p->max_bitrate_kbps > 0 ? (RK_U32)p->max_bitrate_kbps : *bitrate * 3 / 2;
++    if (*max_bitrate < *bitrate)
+     {
+-        video_signal->colour_primaries = 6; // SMPTE 170M
+-        video_signal->transfer_characteristics = 6; // SMPTE 170M
+-        video_signal->matrix_coefficients = 6; // SMPTE 170M
++        *max_bitrate = *bitrate;
+     }
+ }
+ 
+-static void populate_venc_attr(VENC_CHN_ATTR_S *stAttr, RK_U32 bitrate, RK_U32 max_bitrate, RK_U32 width, RK_U32 height, RK_U32 fps)
++static void venc_set_rc_attr(VENC_CHN_ATTR_S *stAttr, bool hevc, RK_U32 bitrate, RK_U32 max_bitrate, RK_U32 fps, RK_U32 gop)
+ {
+-    memset(stAttr, 0, sizeof(VENC_CHN_ATTR_S));
+-
+     RK_U32 min_bitrate = bitrate / 2;
+     if (min_bitrate < 2) min_bitrate = 2;
+ 
+-    // GOP scales with framerate so IDR cadence stays ~0.5s regardless of source
+-    // refresh — keeps WebRTC recovery latency bounded at 60 Hz and 120 Hz alike.
+-    RK_U32 gop = fps > 0 ? fps / 2 : 30;
+-    if (gop < 1) gop = 1;
+-
+-    if (codec_type == 1) {
+-        // H.265 (HEVC)
++    if (hevc) {
+         stAttr->stRcAttr.enRcMode = VENC_RC_MODE_H265VBR;
+         stAttr->stRcAttr.stH265Vbr.u32BitRate = bitrate;
+         stAttr->stRcAttr.stH265Vbr.u32MaxBitRate = max_bitrate;
+@@ -189,10 +281,7 @@ static void populate_venc_attr(VENC_CHN_ATTR_S *stAttr, RK_U32 bitrate, RK_U32 m
+         stAttr->stRcAttr.stH265Vbr.u32SrcFrameRateDen = 1;
+         stAttr->stRcAttr.stH265Vbr.fr32DstFrameRateNum = fps;
+         stAttr->stRcAttr.stH265Vbr.fr32DstFrameRateDen = 1;
+-        stAttr->stVencAttr.enType = RK_VIDEO_ID_HEVC;
+-        stAttr->stVencAttr.u32Profile = H265E_PROFILE_MAIN;
+     } else {
+-        // H.264 (AVC)
+         stAttr->stRcAttr.enRcMode = VENC_RC_MODE_H264VBR;
+         stAttr->stRcAttr.stH264Vbr.u32BitRate = bitrate;
+         stAttr->stRcAttr.stH264Vbr.u32MaxBitRate = max_bitrate;
+@@ -203,10 +292,17 @@ static void populate_venc_attr(VENC_CHN_ATTR_S *stAttr, RK_U32 bitrate, RK_U32 m
+         stAttr->stRcAttr.stH264Vbr.u32SrcFrameRateDen = 1;
+         stAttr->stRcAttr.stH264Vbr.fr32DstFrameRateNum = fps;
+         stAttr->stRcAttr.stH264Vbr.fr32DstFrameRateDen = 1;
+-        stAttr->stVencAttr.enType = RK_VIDEO_ID_AVC;
+-        stAttr->stVencAttr.u32Profile = H264E_PROFILE_HIGH;
+     }
++}
+ 
++static void populate_venc_attr(VENC_CHN_ATTR_S *stAttr, RK_U32 bitrate, RK_U32 max_bitrate, RK_U32 width, RK_U32 height, RK_U32 fps, RK_U32 gop)
++{
++    memset(stAttr, 0, sizeof(VENC_CHN_ATTR_S));
++
++    const bool hevc = codec_type == 1;
++    venc_set_rc_attr(stAttr, hevc, bitrate, max_bitrate, fps, gop);
++    stAttr->stVencAttr.enType = hevc ? RK_VIDEO_ID_HEVC : RK_VIDEO_ID_AVC;
++    stAttr->stVencAttr.u32Profile = hevc ? H265E_PROFILE_MAIN : H264E_PROFILE_HIGH;
+     stAttr->stVencAttr.enPixelFormat = RK_FMT_YUV422_YUYV;
+     stAttr->stVencAttr.u32PicWidth = width;
+     stAttr->stVencAttr.u32PicHeight = height;
+@@ -217,7 +313,7 @@ static void populate_venc_attr(VENC_CHN_ATTR_S *stAttr, RK_U32 bitrate, RK_U32 m
+     stAttr->stVencAttr.enMirror = MIRROR_NONE;
+ }
+ 
+-static void venc_configure_limited_range_vui(RK_U32 height)
++static void venc_configure_limited_range_vui(void)
+ {
+     int32_t ret;
+ 
+@@ -231,7 +327,7 @@ static void venc_configure_limited_range_vui(RK_U32 height)
+             log_warn("RK_MPI_VENC_GetH265Vui failed: %#x", ret);
+             return;
+         }
+-        configure_vui_video_signal(&stH265Vui.stVuiVideoSignal, height);
++        configure_vui_video_signal(&stH265Vui.stVuiVideoSignal);
+         ret = RK_MPI_VENC_SetH265Vui(VENC_CHANNEL, &stH265Vui);
+         if (ret != RK_SUCCESS)
+         {
+@@ -249,7 +345,7 @@ static void venc_configure_limited_range_vui(RK_U32 height)
+             log_warn("RK_MPI_VENC_GetH264Vui failed: %#x", ret);
+             return;
+         }
+-        configure_vui_video_signal(&stH264Vui.stVuiVideoSignal, height);
++        configure_vui_video_signal(&stH264Vui.stVuiVideoSignal);
+         ret = RK_MPI_VENC_SetH264Vui(VENC_CHANNEL, &stH264Vui);
+         if (ret != RK_SUCCESS)
+         {
+@@ -258,37 +354,193 @@ static void venc_configure_limited_range_vui(RK_U32 height)
+         }
+     }
+ 
+-    log_info("configured VENC VUI as limited-range %s", is_hd_video(height) ? "BT.709" : "BT.601");
++    log_notice("configured VENC VUI as limited-range, BT.601 matrix, BT.709 primaries/transfer");
++}
++
++// Re-encode any frame above this size so it never trips the 1,036,800-byte
++// maxFrameSize check in internal/native/proxy.go (which kills the stream).
++#define VENC_SUPER_FRAME_BITS (800u * 1024u * 8u)
++
++#define VENC_APPLY_QP_LIMITS(p, min_qp, max_qp, max_iqp) \
++    do                                                   \
++    {                                                    \
++        (p).u32MinQp = (min_qp);                         \
++        (p).u32MinIQp = (min_qp);                        \
++        (p).u32FrmMinQp = (min_qp);                      \
++        (p).u32FrmMinIQp = (min_qp);                     \
++        (p).u32MaxQp = (max_qp);                         \
++        (p).u32FrmMaxQp = (max_qp);                      \
++        (p).u32MaxIQp = (max_iqp);                       \
++        (p).u32FrmMaxIQp = (max_iqp);                    \
++    } while (0)
++
++// Rockchip defaults pin the frame-level QP floor at ~26-28 and apply
++// texture-adaptive QP (up to +8 on high-texture blocks, i.e. text), so desktop
++// text stays soft at any bitrate. Lower the floor and flatten AQ so the VBR
++// bitrate target decides quality. Used at channel creation and for live
++// updates; returns false if any step failed (logged as error: the native
++// process logs at ERROR by default).
++static VENC_RC_PARAM2_S venc_default_rc2; // Rockchip AQ defaults of the channel
++static bool venc_default_rc2_valid = false;
++
++static bool venc_configure_rc_for_desktop(const jetkvm_venc_params_t *p, bool hevc)
++{
++    const RK_U32 min_qp = p->min_qp;
++    const RK_U32 max_qp = p->max_qp;
++    const RK_U32 max_iqp = max_qp >= min_qp + 2 ? max_qp - 2 : max_qp;
++    bool ok = true;
++    int32_t ret;
++
++    VENC_RC_PARAM_S stRcParam;
++    memset(&stRcParam, 0, sizeof(stRcParam));
++    ret = RK_MPI_VENC_GetRcParam(VENC_CHANNEL, &stRcParam);
++    if (ret == RK_SUCCESS)
++    {
++        if (hevc)
++        {
++            VENC_APPLY_QP_LIMITS(stRcParam.stParamH265, min_qp, max_qp, max_iqp);
++        }
++        else
++        {
++            VENC_APPLY_QP_LIMITS(stRcParam.stParamH264, min_qp, max_qp, max_iqp);
++        }
++        ret = RK_MPI_VENC_SetRcParam(VENC_CHANNEL, &stRcParam);
++    }
++    if (ret != RK_SUCCESS)
++    {
++        log_error("VENC QP limits not applied: %#x", ret);
++        ok = false;
++    }
++
++    if (venc_default_rc2_valid)
++    {
++        VENC_RC_PARAM2_S stRcParam2 = venc_default_rc2;
++        if (!p->aq)
++        {
++            // Zero QP steps => uniform QP per frame; the texture thresholds
++            // (u32ThrdI/P) become irrelevant. Zeroing thresholds instead would
++            // push every block into the top (+8) bucket.
++            memset(stRcParam2.s32AqStepI, 0, sizeof(stRcParam2.s32AqStepI));
++            memset(stRcParam2.s32AqStepP, 0, sizeof(stRcParam2.s32AqStepP));
++            stRcParam2.u32RowQpDelta = 0;
++            stRcParam2.u32RowIQpDelta = 0;
++        }
++        ret = RK_MPI_VENC_SetRcParam2(VENC_CHANNEL, &stRcParam2);
++        if (ret != RK_SUCCESS)
++        {
++            log_error("VENC AQ setting not applied: %#x", ret);
++            ok = false;
++        }
++    }
++    else
++    {
++        log_error("VENC AQ setting not applied: channel defaults unknown");
++        ok = false;
++    }
++
++    log_notice("configured VENC RC: qp %u-%u (I max %u), aq %s%s",
++               min_qp, max_qp, max_iqp, p->aq ? "rockchip default" : "off", ok ? "" : " (with errors)");
++    return ok;
++}
++
++static void venc_configure_super_frame(void)
++{
++    VENC_SUPERFRAME_CFG_S stSuperFrm;
++    memset(&stSuperFrm, 0, sizeof(stSuperFrm));
++    stSuperFrm.enSuperFrmMode = SUPERFRM_REENCODE;
++    stSuperFrm.u32SuperIFrmBitsThr = VENC_SUPER_FRAME_BITS;
++    stSuperFrm.u32SuperPFrmBitsThr = VENC_SUPER_FRAME_BITS;
++    stSuperFrm.u32SuperBFrmBitsThr = VENC_SUPER_FRAME_BITS;
++    stSuperFrm.enRcPriority = VENC_RC_PRIORITY_FRAMEBITS_FIRST;
++    int32_t ret = RK_MPI_VENC_SetSuperFrameStrategy(VENC_CHANNEL, &stSuperFrm);
++    if (ret != RK_SUCCESS)
++    {
++        log_error("RK_MPI_VENC_SetSuperFrameStrategy failed: %#x", ret);
++    }
+ }
+ 
+ pthread_t *venc_read_thread = NULL;
+ volatile bool venc_running = false;
+-static int32_t venc_start(int32_t bitrate, int32_t max_bitrate, int32_t width, int32_t height, int32_t fps)
++// Guards venc_running and venc_live. Held across channel creation and every
++// call that touches the running channel from another thread (IDR requests,
++// live parameter updates), so none of them races RK_MPI_VENC_DestroyChn and a
++// parameter change either precedes the creation snapshot or is applied live.
++static pthread_mutex_t venc_state_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++// What the running channel is configured with.
++static struct
++{
++    jetkvm_venc_params_t params;
++    bool hevc;
++    RK_U32 width;
++    RK_U32 height;
++    RK_U32 source_fps;
++    volatile RK_U32 encode_fps; // also read lock-free by the capture loop
++    RK_U32 gop;       // nominal GOP length
++    RK_U32 gop_nudge; // 0/1 frame added by the keyframe GOP-nudge fallback
++    RK_U32 bitrate;
++    RK_U32 max_bitrate;
++} venc_live;
++
++static void venc_set_running(bool running)
++{
++    pthread_mutex_lock(&venc_state_mutex);
++    venc_running = running;
++    pthread_mutex_unlock(&venc_state_mutex);
++}
++
++static int32_t venc_start(RK_U32 width, RK_U32 height, RK_U32 source_fps)
+ {
+     int32_t ret;
+     VENC_CHN_ATTR_S stAttr;
+-    populate_venc_attr(&stAttr, bitrate, max_bitrate, width, height, fps);
+ 
++    pthread_mutex_lock(&venc_state_mutex);
++    const jetkvm_venc_params_t params = venc_get_params();
++    venc_live.params = params;
++    venc_live.hevc = codec_type == 1;
++    venc_live.width = width;
++    venc_live.height = height;
++    venc_live.source_fps = source_fps;
++    venc_live.encode_fps = venc_encode_fps(source_fps, params.max_fps);
++    venc_live.gop = venc_gop_frames(venc_live.encode_fps, params.gop_seconds);
++    venc_live.gop_nudge = 0;
++    venc_bitrates(&params, width, height, &venc_live.bitrate, &venc_live.max_bitrate);
++
++    populate_venc_attr(&stAttr, venc_live.bitrate, venc_live.max_bitrate, width, height,
++                       venc_live.encode_fps, venc_live.gop);
+     ret = RK_MPI_VENC_CreateChn(VENC_CHANNEL, &stAttr);
+-    if (ret < 0)
++    if (ret != RK_SUCCESS)
+     {
+         RK_LOGE("error RK_MPI_VENC_CreateChn, %d", ret);
+-        return ret;
++        goto out;
+     }
++    log_notice("configured VENC GOP: %u frames (%.1f s at %u of %u fps), bitrate %u kbps (max %u)",
++               venc_live.gop, params.gop_seconds, venc_live.encode_fps, source_fps,
++               venc_live.bitrate, venc_live.max_bitrate);
+ 
+-    venc_configure_limited_range_vui(height);
++    venc_configure_limited_range_vui();
++    venc_default_rc2_valid = RK_MPI_VENC_GetRcParam2(VENC_CHANNEL, &venc_default_rc2) == RK_SUCCESS;
++    venc_configure_rc_for_desktop(&params, venc_live.hevc);
++    venc_configure_super_frame();
+ 
+     VENC_RECV_PIC_PARAM_S stRecvParam;
+     memset(&stRecvParam, 0, sizeof(VENC_RECV_PIC_PARAM_S));
+     stRecvParam.s32RecvPicNum = -1;
+     ret = RK_MPI_VENC_StartRecvFrame(VENC_CHANNEL, &stRecvParam);
+-    if (ret < 0)
++    if (ret != RK_SUCCESS)
+     {
+         RK_LOGE("error RK_MPI_VENC_StartRecvFrame, %d", ret);
++        goto out;
++    }
++    venc_running = true;
++
++out:
++    pthread_mutex_unlock(&venc_state_mutex);
++    if (ret != RK_SUCCESS)
++    {
+         return ret;
+     }
+ 
+-    venc_running = true;
+     venc_read_thread = malloc(sizeof(pthread_t));
+     if (pthread_create(venc_read_thread, NULL, venc_read_stream, NULL) != 0)
+     {
+@@ -299,9 +551,58 @@ static int32_t venc_start(int32_t bitrate, int32_t max_bitrate, int32_t width, i
+     return RK_SUCCESS;
+ }
+ 
++// Applies p to the running channel without recreating it; caller holds
++// venc_state_mutex with venc_running set. Bitrate/QP/AQ changes leave the GOP
++// alone; a frame-rate or GOP-length change makes MPP (under rockit) resend
++// SPS/PPS with an IDR (mpp_enc_proc_rc_cfg -> enc_set_resend_hdr). Returns
++// false on any failure so the caller can fall back to a stream restart.
++static bool venc_apply_live_locked(const jetkvm_venc_params_t *p)
++{
++    const RK_U32 encode_fps = venc_encode_fps(venc_live.source_fps, p->max_fps);
++    const RK_U32 gop = venc_gop_frames(encode_fps, p->gop_seconds);
++    RK_U32 bitrate, max_bitrate;
++    venc_bitrates(p, venc_live.width, venc_live.height, &bitrate, &max_bitrate);
++
++    if (bitrate != venc_live.bitrate || max_bitrate != venc_live.max_bitrate ||
++        encode_fps != venc_live.encode_fps || gop != venc_live.gop)
++    {
++        VENC_CHN_ATTR_S stAttr;
++        memset(&stAttr, 0, sizeof(stAttr));
++        int32_t ret = RK_MPI_VENC_GetChnAttr(VENC_CHANNEL, &stAttr);
++        if (ret == RK_SUCCESS)
++        {
++            venc_set_rc_attr(&stAttr, venc_live.hevc, bitrate, max_bitrate, encode_fps, gop + venc_live.gop_nudge);
++            ret = RK_MPI_VENC_SetChnAttr(VENC_CHANNEL, &stAttr);
++        }
++        if (ret != RK_SUCCESS)
++        {
++            log_error("live VENC rate update failed: %#x", ret);
++            return false;
++        }
++        venc_live.bitrate = bitrate;
++        venc_live.max_bitrate = max_bitrate;
++        venc_live.gop = gop;
++        venc_live.encode_fps = encode_fps;
++    }
++
++    if (p->min_qp != venc_live.params.min_qp || p->max_qp != venc_live.params.max_qp ||
++        p->aq != venc_live.params.aq)
++    {
++        if (!venc_configure_rc_for_desktop(p, venc_live.hevc))
++        {
++            return false;
++        }
++    }
++
++    venc_live.params = *p;
++    log_notice("applied VENC params live: gop %u frames (%.1f s at %u of %u fps), bitrate %u kbps (max %u)",
++               gop, p->gop_seconds, encode_fps, venc_live.source_fps, bitrate, max_bitrate);
++    return true;
++}
++
+ static int32_t venc_stop()
+ {
+-    venc_running = false;
++    venc_set_running(false);
+ 
+     int32_t ret;
+     ret = RK_MPI_VENC_StopRecvFrame(VENC_CHANNEL);
+@@ -328,6 +629,228 @@ static int32_t venc_stop()
+     return RK_SUCCESS;
+ }
+ 
++// Encoder output counters, bumped by venc_read_stream for every frame / IDR;
++// video_request_keyframe waits on them to verify that a request worked.
++static pthread_mutex_t venc_out_mutex = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t venc_out_cond = PTHREAD_COND_INITIALIZER;
++static uint64_t venc_out_frames = 0;
++static uint64_t venc_out_idrs = 0;
++
++// True if the first VCL NAL unit of an Annex-B access unit is an IDR slice.
++// Parsed from the bitstream because rockit's pack DataType is not reliable.
++static bool annexb_is_idr(const uint8_t *data, size_t len, bool hevc)
++{
++    const size_t limit = len < 4096 ? len : 4096;
++    for (size_t i = 0; i + 3 < limit; i++)
++    {
++        if (data[i] != 0 || data[i + 1] != 0 || data[i + 2] != 1)
++        {
++            continue;
++        }
++        const uint8_t header = data[i + 3];
++        if (hevc)
++        {
++            const uint8_t type = (header >> 1) & 0x3f;
++            if (type <= 31) // VCL
++            {
++                return type == 19 || type == 20; // IDR_W_RADL, IDR_N_LP
++            }
++        }
++        else
++        {
++            const uint8_t type = header & 0x1f;
++            if (type >= 1 && type <= 5) // coded slice
++            {
++                return type == 5;
++            }
++        }
++        i += 3;
++    }
++    return false;
++}
++
++static void venc_count_output(const uint8_t *data, size_t len)
++{
++    const bool idr = annexb_is_idr(data, len, venc_live.hevc);
++    pthread_mutex_lock(&venc_out_mutex);
++    venc_out_frames++;
++    if (idr)
++    {
++        venc_out_idrs++;
++    }
++    pthread_cond_broadcast(&venc_out_cond);
++    pthread_mutex_unlock(&venc_out_mutex);
++    if (idr)
++    {
++        log_info("VENC IDR frame: %u bytes", (unsigned)len);
++    }
++}
++
++// MPP forces an IDR and resends SPS/PPS when the GOP length changes
++// (mpp_enc_proc_rc_cfg -> enc_set_resend_hdr), so alternate it by one frame.
++// Caller holds venc_state_mutex with venc_running set.
++static int32_t venc_gop_nudge_locked(void)
++{
++    VENC_CHN_ATTR_S stAttr;
++    memset(&stAttr, 0, sizeof(stAttr));
++    int32_t ret = RK_MPI_VENC_GetChnAttr(VENC_CHANNEL, &stAttr);
++    if (ret != RK_SUCCESS)
++    {
++        return ret;
++    }
++    const RK_U32 nudge = venc_live.gop_nudge ^ 1;
++    venc_set_rc_attr(&stAttr, venc_live.hevc, venc_live.bitrate, venc_live.max_bitrate,
++                     venc_live.encode_fps, venc_live.gop + nudge);
++    ret = RK_MPI_VENC_SetChnAttr(VENC_CHANNEL, &stAttr);
++    if (ret == RK_SUCCESS)
++    {
++        venc_live.gop_nudge = nudge;
++    }
++    return ret;
++}
++
++// Keyframe paths in fallback order. This rockit build rejects instant
++// RequestIDR with RK_ERR_VENC_NOT_SUPPORT; the non-instant variant returns 0
++// even when the encoder ignores it, so every path is verified by watching the
++// encoder output for an IDR.
++enum
++{
++    KF_REQUEST_IDR_INSTANT,
++    KF_REQUEST_IDR,
++    KF_GOP_NUDGE,
++    KF_PATH_COUNT
++};
++static const char *const kf_path_names[KF_PATH_COUNT] = {
++    "RK_MPI_VENC_RequestIDR(instant)",
++    "RK_MPI_VENC_RequestIDR(non-instant)",
++    "RK_MPI_VENC_SetChnAttr GOP nudge",
++};
++#define KF_VERIFY_FRAMES 6 // encoded frames without an IDR before a path counts as failed
++#define KF_NOT_RUNNING 1
++
++static pthread_mutex_t kf_mutex = PTHREAD_MUTEX_INITIALIZER;
++static int kf_path = KF_REQUEST_IDR_INSTANT; // first path to try; the last one that worked
++static int kf_path_logged = -1;
++
++static int32_t kf_issue(int path, RK_U32 *encode_fps)
++{
++    int32_t ret = KF_NOT_RUNNING;
++    pthread_mutex_lock(&venc_state_mutex);
++    // Not running: nothing to do, a (re)created channel starts with an IDR.
++    if (venc_running)
++    {
++        *encode_fps = venc_live.encode_fps;
++        switch (path)
++        {
++        case KF_REQUEST_IDR_INSTANT:
++            ret = RK_MPI_VENC_RequestIDR(VENC_CHANNEL, RK_TRUE);
++            break;
++        case KF_REQUEST_IDR:
++            ret = RK_MPI_VENC_RequestIDR(VENC_CHANNEL, RK_FALSE);
++            break;
++        default:
++            ret = venc_gop_nudge_locked();
++            break;
++        }
++    }
++    pthread_mutex_unlock(&venc_state_mutex);
++    return ret;
++}
++
++typedef enum
++{
++    KF_SEEN,         // an IDR came out
++    KF_MISSING,      // KF_VERIFY_FRAMES frames came out, none an IDR
++    KF_INCONCLUSIVE, // too few frames (no signal, restart): don't judge the path
++} kf_result_t;
++
++static kf_result_t kf_wait_for_idr(uint64_t frames0, uint64_t idrs0, RK_U32 encode_fps)
++{
++    // Room for KF_VERIFY_FRAMES + 2 frame intervals plus encoder latency.
++    const long timeout_ms = 200 + (KF_VERIFY_FRAMES + 2) * 1000L / (encode_fps > 0 ? encode_fps : 1);
++    struct timespec deadline;
++    clock_gettime(CLOCK_REALTIME, &deadline);
++    deadline.tv_sec += timeout_ms / 1000;
++    deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
++    if (deadline.tv_nsec >= 1000000000L)
++    {
++        deadline.tv_sec++;
++        deadline.tv_nsec -= 1000000000L;
++    }
++
++    kf_result_t result = KF_INCONCLUSIVE;
++    pthread_mutex_lock(&venc_out_mutex);
++    for (;;)
++    {
++        if (venc_out_idrs != idrs0)
++        {
++            result = KF_SEEN;
++            break;
++        }
++        if (venc_out_frames - frames0 >= KF_VERIFY_FRAMES)
++        {
++            result = KF_MISSING;
++            break;
++        }
++        if (pthread_cond_timedwait(&venc_out_cond, &venc_out_mutex, &deadline) == ETIMEDOUT)
++        {
++            break;
++        }
++    }
++    pthread_mutex_unlock(&venc_out_mutex);
++    return result;
++}
++
++int video_request_keyframe()
++{
++    int32_t status = -1;
++    pthread_mutex_lock(&kf_mutex);
++    for (int path = kf_path; path < KF_PATH_COUNT; path++)
++    {
++        pthread_mutex_lock(&venc_out_mutex);
++        const uint64_t frames0 = venc_out_frames;
++        const uint64_t idrs0 = venc_out_idrs;
++        pthread_mutex_unlock(&venc_out_mutex);
++
++        RK_U32 encode_fps = 0;
++        const int32_t ret = kf_issue(path, &encode_fps);
++        if (ret == KF_NOT_RUNNING)
++        {
++            status = 0;
++            break;
++        }
++        if (ret != RK_SUCCESS)
++        {
++            log_notice("keyframe path %s failed: %#x", kf_path_names[path], ret);
++            continue;
++        }
++
++        const kf_result_t result = kf_wait_for_idr(frames0, idrs0, encode_fps);
++        if (result == KF_MISSING)
++        {
++            log_notice("keyframe path %s produced no IDR within %d frames",
++                       kf_path_names[path], KF_VERIFY_FRAMES);
++            continue;
++        }
++        // Seen, or nothing to judge by (no frames flowing): keep this path.
++        kf_path = path;
++        if (result == KF_SEEN && kf_path_logged != path)
++        {
++            log_notice("keyframe requests use %s", kf_path_names[path]);
++            kf_path_logged = path;
++        }
++        status = 0;
++        break;
++    }
++    if (status != 0)
++    {
++        log_error("all keyframe paths failed; next request starts over");
++        kf_path = KF_REQUEST_IDR_INSTANT;
++    }
++    pthread_mutex_unlock(&kf_mutex);
++    return status;
++}
++
+ struct buffer
+ {
+     struct v4l2_plane plane_buffer;
+@@ -359,6 +882,7 @@ pthread_t *format_thread = NULL;
+ int video_init(float factor)
+ {
+     detect_sleep_mode();
++    venc_params_load_env();
+ 
+     if (factor <= 0) {
+         factor = 1.0f;
+@@ -450,6 +974,7 @@ static void *venc_read_stream(void *arg)
+                    loopCount, stFrame.u32Seq, stFrame.pstPack->u32Len,
+                    stFrame.pstPack->u64PTS, nowUs - stFrame.pstPack->u64PTS);
+             pData = RK_MPI_MB_Handle2VirAddr(stFrame.pstPack->pMbBlk);
++            venc_count_output(pData, stFrame.pstPack->u32Len);
+             video_send_frame(pData, (ssize_t)stFrame.pstPack->u32Len);
+             s32Ret = RK_MPI_VENC_ReleaseStream(VENC_CHANNEL, &stFrame);
+             if (s32Ret != RK_SUCCESS)
+@@ -563,7 +1088,7 @@ void *run_video_stream(void *arg)
+         fmt.fmt.pix_mp.height = height;
+         fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_YUYV;
+         fmt.fmt.pix_mp.field = V4L2_FIELD_ANY;
+-        set_v4l2_yuv_colorimetry(&fmt.fmt.pix_mp, height);
++        set_v4l2_yuv_colorimetry(&fmt.fmt.pix_mp);
+ 
+         if (ioctl(video_dev_fd, VIDIOC_S_FMT, &fmt) < 0)
+         {
+@@ -668,8 +1193,7 @@ void *run_video_stream(void *arg)
+         struct v4l2_plane tmp_plane;
+ 
+         // Set VENC parameters
+-        int32_t bitrate = calculate_bitrate(quality_factor, width, height);
+-        RK_S32 ret = venc_start(bitrate, bitrate * 3 / 2, width, height, fps);
++        RK_S32 ret = venc_start(width, height, fps);
+         if (ret != RK_SUCCESS)
+         {
+             log_error("Set VENC parameters failed with %#x", ret);
+@@ -680,6 +1204,7 @@ void *run_video_stream(void *arg)
+         struct timeval tv;
+         int r;
+         uint32_t num = 0;
++        uint32_t frame_credit = 0;
+         VIDEO_FRAME_INFO_S stFrame;
+         memset(&stFrame, 0, sizeof(VIDEO_FRAME_INFO_S));
+         stFrame.stVFrame.u32Width = width;
+@@ -691,7 +1216,7 @@ void *run_video_stream(void *arg)
+         stFrame.stVFrame.enVideoFormat = VIDEO_FORMAT_LINEAR;
+         stFrame.stVFrame.enCompressMode = COMPRESS_MODE_NONE;
+         stFrame.stVFrame.enDynamicRange = DYNAMIC_RANGE_SDR8;
+-        stFrame.stVFrame.enColorGamut = color_gamut_for_height(height);
++        stFrame.stVFrame.enColorGamut = COLOR_GAMUT_BT601;
+ 
+         while (streaming_flag)
+         {
+@@ -727,6 +1252,18 @@ void *run_video_stream(void *arg)
+                 break;
+             }
+             log_trace("got frame, bytesused = %d", tmp_plane.bytesused);
++            // Drop frames evenly to encode encode_fps of fps. Done here rather
++            // than via the VENC dst frame rate, whose drop behaviour rockit
++            // does not document; the encoder is configured for encode_fps.
++            // encode_fps can change live (venc_apply_live_locked).
++            frame_credit += venc_live.encode_fps;
++            if (frame_credit < fps)
++            {
++                if (ioctl(video_dev_fd, VIDIOC_QBUF, &buf) < 0)
++                    log_error("failure VIDIOC_QBUF: %s", strerror(errno));
++                continue;
++            }
++            frame_credit -= fps;
+             MB_BLK blk = RK_MPI_MMZ_Fd2Handle(tmp_plane.m.fd);
+             assert(blk != RK_NULL);
+             stFrame.stVFrame.pMbBlk = blk;
+@@ -1018,10 +1555,33 @@ exit:
+ }
+ 
+ 
++// Drops runtime overrides (video_set_encoder_params). Applies at the next
++// channel start; callers stop or restart the stream right after.
++void video_reset_encoder_params(void)
++{
++    pthread_mutex_lock(&venc_params_mutex);
++    const jetkvm_venc_params_t *d = &venc_params_defaults;
++    const jetkvm_venc_params_t *p = &venc_params;
++    const bool changed = p->min_qp != d->min_qp || p->max_qp != d->max_qp ||
++                         p->gop_seconds != d->gop_seconds || p->aq != d->aq ||
++                         p->max_fps != d->max_fps || p->bitrate_kbps != d->bitrate_kbps ||
++                         p->max_bitrate_kbps != d->max_bitrate_kbps;
++    venc_params = venc_params_defaults;
++    pthread_mutex_unlock(&venc_params_mutex);
++    if (changed)
++    {
++        log_notice("encoder params reset to defaults");
++    }
++}
++
+ void video_set_quality_factor(float factor)
+ {
+     quality_factor = factor;
+ 
++    // A quality change from the UI should take full effect: drop any runtime
++    // overrides a client's quality governor left behind.
++    video_reset_encoder_params();
++
+     // TODO: update venc bitrate without stopping streaming
+     video_restart_streaming();
+ }
+@@ -1030,6 +1590,50 @@ float video_get_quality_factor() {
+     return quality_factor;
+ }
+ 
++int video_set_encoder_params(const jetkvm_venc_params_t *params)
++{
++    if (params == NULL || !venc_params_valid(params))
++    {
++        return -1;
++    }
++
++    pthread_mutex_lock(&venc_state_mutex);
++    pthread_mutex_lock(&venc_params_mutex);
++    venc_params = *params;
++    pthread_mutex_unlock(&venc_params_mutex);
++    log_notice("encoder params set: qp %d-%d, gop %.1f s, aq %s, max fps %d, bitrate %d/%d kbps (0 = auto)",
++               params->min_qp, params->max_qp, params->gop_seconds,
++               params->aq ? "rockchip default" : "off", params->max_fps,
++               params->bitrate_kbps, params->max_bitrate_kbps);
++    // No running channel: the next venc_start() picks the values up.
++    const bool applied = !venc_running || venc_apply_live_locked(params);
++    pthread_mutex_unlock(&venc_state_mutex);
++
++    if (!applied)
++    {
++        // Same path as video_set_quality_factor: restarts capture + VENC
++        // only; EDID and HDMI hot-plug are untouched.
++        log_notice("live VENC update failed, restarting the stream");
++        video_restart_streaming();
++    }
++    return 0;
++}
++
++void video_get_encoder_status(jetkvm_venc_status_t *status)
++{
++    memset(status, 0, sizeof(*status));
++    status->params = venc_get_params();
++    status->source_fps = detected_fps;
++    status->encode_fps = venc_encode_fps(detected_fps, status->params.max_fps);
++    status->gop_frames = venc_gop_frames(status->encode_fps, status->params.gop_seconds);
++    RK_U32 bitrate, max_bitrate;
++    venc_bitrates(&status->params, detected_width, detected_height, &bitrate, &max_bitrate);
++    status->effective_bitrate_kbps = bitrate;
++    status->effective_max_bitrate_kbps = max_bitrate;
++    status->codec = codec_type;
++    status->streaming = video_get_streaming_status() == 1;
++}
++
+ void video_set_codec_type(int type) {
+     codec_type = type;
+ }
+diff --git a/internal/native/cgo/video.h b/internal/native/cgo/video.h
+index c3b3826..ee21540 100644
+--- a/internal/native/cgo/video.h
++++ b/internal/native/cgo/video.h
+@@ -38,6 +38,13 @@ void video_stop_streaming();
+  */
+ uint8_t video_get_streaming_status();
+ 
++/**
++ * @brief Ask the running encoder for an IDR frame (no-op when not streaming)
++ *
++ * @return int 0 on success or when not streaming, the rockit error code otherwise
++ */
++int video_request_keyframe();
++
+ /**
+  * @brief Set the quality factor of the video
+  *
+diff --git a/internal/native/cgo_linux.go b/internal/native/cgo_linux.go
+index df30404..ca0a017 100644
+--- a/internal/native/cgo_linux.go
++++ b/internal/native/cgo_linux.go
+@@ -169,6 +169,68 @@ func videoStop() {
+ 	C.jetkvm_video_stop()
+ }
+ 
++// videoRequestKeyframe does not take cgoLock: it is held across whole stream
++// restarts, and video.c serializes this call with its own encoder mutex.
++func videoRequestKeyframe() error {
++	ret := C.jetkvm_video_request_keyframe()
++	if ret != 0 {
++		return fmt.Errorf("failed to request keyframe: %#x", uint32(ret))
++	}
++	return nil
++}
++
++func videoGetEncoderStatus() VideoEncoderStatus {
++	cgoLock.Lock()
++	defer cgoLock.Unlock()
++
++	var s C.jetkvm_venc_status_t
++	C.jetkvm_video_get_encoder_status(&s)
++	return VideoEncoderStatus{
++		VideoEncoderParams: VideoEncoderParams{
++			MinQP:          int(s.params.min_qp),
++			MaxQP:          int(s.params.max_qp),
++			GOPSeconds:     float64(s.params.gop_seconds),
++			AQ:             bool(s.params.aq),
++			MaxFPS:         int(s.params.max_fps),
++			BitrateKbps:    int(s.params.bitrate_kbps),
++			MaxBitrateKbps: int(s.params.max_bitrate_kbps),
++		},
++		SourceFPS:               int(s.source_fps),
++		EncodeFPS:               int(s.encode_fps),
++		GOPFrames:               int(s.gop_frames),
++		EffectiveBitrateKbps:    int(s.effective_bitrate_kbps),
++		EffectiveMaxBitrateKbps: int(s.effective_max_bitrate_kbps),
++		Codec:                   videoCodecName(int(s.codec)),
++		Streaming:               bool(s.streaming),
++	}
++}
++
++func videoSetEncoderParams(params VideoEncoderParams) error {
++	cgoLock.Lock()
++	defer cgoLock.Unlock()
++
++	cParams := C.jetkvm_venc_params_t{
++		min_qp:           C.int(params.MinQP),
++		max_qp:           C.int(params.MaxQP),
++		gop_seconds:      C.double(params.GOPSeconds),
++		aq:               C.bool(params.AQ),
++		max_fps:          C.int(params.MaxFPS),
++		bitrate_kbps:     C.int(params.BitrateKbps),
++		max_bitrate_kbps: C.int(params.MaxBitrateKbps),
++	}
++	if ret := C.jetkvm_video_set_encoder_params(&cParams); ret != 0 {
++		return fmt.Errorf("failed to set encoder params: %d", ret)
++	}
++	return nil
++}
++
++func videoResetEncoderParams() {
++	cgoLock.Lock()
++	defer cgoLock.Unlock()
++
++	C.jetkvm_video_reset_encoder_params()
++}
++
+ func videoGetStreamingStatus() VideoStreamingStatus {
+ 	cgoLock.Lock()
+ 	defer cgoLock.Unlock()
+diff --git a/internal/native/cgo_notlinux.go b/internal/native/cgo_notlinux.go
+index 383f992..a294091 100644
+--- a/internal/native/cgo_notlinux.go
++++ b/internal/native/cgo_notlinux.go
+@@ -133,6 +133,25 @@ func videoSetEDID(edid string) error {
+ 	return nil
+ }
+ 
++func videoRequestKeyframe() error {
++	panicPlatformNotSupported()
++	return nil
++}
++
++func videoGetEncoderStatus() VideoEncoderStatus {
++	panicPlatformNotSupported()
++	return VideoEncoderStatus{}
++}
++
++func videoSetEncoderParams(params VideoEncoderParams) error {
++	panicPlatformNotSupported()
++	return nil
++}
++
++func videoResetEncoderParams() {
++	panicPlatformNotSupported()
++}
++
+ func videoGetStreamingStatus() VideoStreamingStatus {
+ 	panicPlatformNotSupported()
+ 	return VideoStreamingStatusInactive
+diff --git a/internal/native/chan.go b/internal/native/chan.go
+index cd6d07a..ee896d5 100644
+--- a/internal/native/chan.go
++++ b/internal/native/chan.go
+@@ -58,7 +58,8 @@ func (n *Native) handleLogChan() {
+ 		case zerolog.TraceLevel:
+ 			l.Trace().Msg(entry.Message)
+ 		case zerolog.NoLevel:
+-			l.Info().Msg(entry.Message)
++			// C log_notice: bypass the level filter, render as info.
++			l.Log().Str(zerolog.LevelFieldName, zerolog.InfoLevel.String()).Msg(entry.Message)
+ 		default:
+ 			l.Info().Msg(entry.Message)
+ 		}
+diff --git a/internal/native/empty.go b/internal/native/empty.go
+index 25b3e3d..f61c630 100644
+--- a/internal/native/empty.go
++++ b/internal/native/empty.go
+@@ -49,6 +49,18 @@ func (e *EmptyNativeInterface) VideoStart() error {
+ 	return nil
+ }
+ 
++func (e *EmptyNativeInterface) VideoRequestKeyframe() error {
++	return nil
++}
++
++func (e *EmptyNativeInterface) VideoGetEncoderParams() (VideoEncoderStatus, error) {
++	return VideoEncoderStatus{}, nil
++}
++
++func (e *EmptyNativeInterface) VideoSetEncoderParams(params VideoEncoderParams) error {
++	return nil
++}
++
+ func (e *EmptyNativeInterface) GetLVGLVersion() (string, error) {
+ 	return "", nil
+ }
+diff --git a/internal/native/encoder_params.go b/internal/native/encoder_params.go
+new file mode 100644
+index 0000000..fbad24a
+--- /dev/null
++++ b/internal/native/encoder_params.go
+@@ -0,0 +1,151 @@
++package native
++
++import (
++	"fmt"
++
++	pb "github.com/jetkvm/kvm/internal/native/proto"
++)
++
++// VideoEncoderParams are the runtime-tunable VENC settings (cgo/video.c).
++// Defaults come from JETKVM_VENC_* env or compiled values. Changes are kept in
++// memory only and reset to the defaults when the last session disconnects and
++// on setStreamQualityFactor.
++type VideoEncoderParams struct {
++	MinQP      int     `json:"minQp"`
++	MaxQP      int     `json:"maxQp"`
++	GOPSeconds float64 `json:"gopSeconds"`
++	AQ         bool    `json:"aq"`
++	MaxFPS     int     `json:"maxFps"` // 0 = encode at the source rate
++	// Explicit RC targets; 0 = derived from the stream quality factor.
++	BitrateKbps    int `json:"bitrateKbps"`
++	MaxBitrateKbps int `json:"maxBitrateKbps"`
++}
++
++// VideoEncoderParamsUpdate is a partial VideoEncoderParams; nil fields keep
++// their current value.
++type VideoEncoderParamsUpdate struct {
++	MinQP      *int     `json:"minQp"`
++	MaxQP      *int     `json:"maxQp"`
++	GOPSeconds *float64 `json:"gopSeconds"`
++	AQ         *bool    `json:"aq"`
++	MaxFPS     *int     `json:"maxFps"`
++
++	BitrateKbps    *int `json:"bitrateKbps"`
++	MaxBitrateKbps *int `json:"maxBitrateKbps"`
++}
++
++// VideoEncoderStatus is the effective encoder configuration.
++type VideoEncoderStatus struct {
++	VideoEncoderParams
++	SourceFPS               int    `json:"sourceFps"`
++	EncodeFPS               int    `json:"encodeFps"`
++	GOPFrames               int    `json:"gopFrames"`
++	EffectiveBitrateKbps    int    `json:"effectiveBitrateKbps"`
++	EffectiveMaxBitrateKbps int    `json:"effectiveMaxBitrateKbps"`
++	Codec                   string `json:"codec"`
++	Streaming               bool   `json:"streaming"`
++}
++
++// Validate mirrors venc_params_valid in cgo/video.c.
++func (p VideoEncoderParams) Validate() error {
++	switch {
++	case p.MinQP < 8 || p.MinQP > 40:
++		return fmt.Errorf("minQp must be 8-40, got %d", p.MinQP)
++	case p.MaxQP < p.MinQP || p.MaxQP > 51:
++		return fmt.Errorf("maxQp must be %d-51 (minQp-51), got %d", p.MinQP, p.MaxQP)
++	case !(p.GOPSeconds >= 0.5 && p.GOPSeconds <= 60):
++		return fmt.Errorf("gopSeconds must be 0.5-60, got %g", p.GOPSeconds)
++	case p.MaxFPS < 0 || p.MaxFPS > 120:
++		return fmt.Errorf("maxFps must be 1-120, or 0 for the source rate, got %d", p.MaxFPS)
++	case p.BitrateKbps != 0 && (p.BitrateKbps < 100 || p.BitrateKbps > 50000):
++		return fmt.Errorf("bitrateKbps must be 100-50000, or 0 for the quality factor, got %d", p.BitrateKbps)
++	case p.MaxBitrateKbps != 0 && (p.MaxBitrateKbps < 100 || p.MaxBitrateKbps > 50000):
++		return fmt.Errorf("maxBitrateKbps must be 100-50000, or 0 for 1.5x the target, got %d", p.MaxBitrateKbps)
++	case p.BitrateKbps != 0 && p.MaxBitrateKbps != 0 && p.MaxBitrateKbps < p.BitrateKbps:
++		return fmt.Errorf("maxBitrateKbps (%d) must be >= bitrateKbps (%d)", p.MaxBitrateKbps, p.BitrateKbps)
++	}
++	return nil
++}
++
++// ApplyTo returns p with every field set in u replaced.
++func (u VideoEncoderParamsUpdate) ApplyTo(p VideoEncoderParams) VideoEncoderParams {
++	if u.MinQP != nil {
++		p.MinQP = *u.MinQP
++	}
++	if u.MaxQP != nil {
++		p.MaxQP = *u.MaxQP
++	}
++	if u.GOPSeconds != nil {
++		p.GOPSeconds = *u.GOPSeconds
++	}
++	if u.AQ != nil {
++		p.AQ = *u.AQ
++	}
++	if u.MaxFPS != nil {
++		p.MaxFPS = *u.MaxFPS
++	}
++	if u.BitrateKbps != nil {
++		p.BitrateKbps = *u.BitrateKbps
++	}
++	if u.MaxBitrateKbps != nil {
++		p.MaxBitrateKbps = *u.MaxBitrateKbps
++	}
++	return p
++}
++
++func videoCodecName(codecType int) string {
++	if codecType == 1 {
++		return "h265"
++	}
++	return "h264"
++}
++
++func (p VideoEncoderParams) toProto() *pb.VideoEncoderParams {
++	return &pb.VideoEncoderParams{
++		MinQp:          int32(p.MinQP),
++		MaxQp:          int32(p.MaxQP),
++		GopSeconds:     p.GOPSeconds,
++		Aq:             p.AQ,
++		MaxFps:         int32(p.MaxFPS),
++		BitrateKbps:    int32(p.BitrateKbps),
++		MaxBitrateKbps: int32(p.MaxBitrateKbps),
++	}
++}
++
++func videoEncoderParamsFromProto(p *pb.VideoEncoderParams) VideoEncoderParams {
++	return VideoEncoderParams{
++		MinQP:          int(p.GetMinQp()),
++		MaxQP:          int(p.GetMaxQp()),
++		GOPSeconds:     p.GetGopSeconds(),
++		AQ:             p.GetAq(),
++		MaxFPS:         int(p.GetMaxFps()),
++		BitrateKbps:    int(p.GetBitrateKbps()),
++		MaxBitrateKbps: int(p.GetMaxBitrateKbps()),
++	}
++}
++
++func (s VideoEncoderStatus) toProto() *pb.VideoEncoderStatus {
++	return &pb.VideoEncoderStatus{
++		Params:                  s.VideoEncoderParams.toProto(),
++		SourceFps:               int32(s.SourceFPS),
++		EncodeFps:               int32(s.EncodeFPS),
++		GopFrames:               int32(s.GOPFrames),
++		EffectiveBitrateKbps:    int32(s.EffectiveBitrateKbps),
++		EffectiveMaxBitrateKbps: int32(s.EffectiveMaxBitrateKbps),
++		Codec:                   s.Codec,
++		Streaming:               s.Streaming,
++	}
++}
++
++func videoEncoderStatusFromProto(s *pb.VideoEncoderStatus) VideoEncoderStatus {
++	return VideoEncoderStatus{
++		VideoEncoderParams:      videoEncoderParamsFromProto(s.GetParams()),
++		SourceFPS:               int(s.GetSourceFps()),
++		EncodeFPS:               int(s.GetEncodeFps()),
++		GOPFrames:               int(s.GetGopFrames()),
++		EffectiveBitrateKbps:    int(s.GetEffectiveBitrateKbps()),
++		EffectiveMaxBitrateKbps: int(s.GetEffectiveMaxBitrateKbps()),
++		Codec:                   s.GetCodec(),
++		Streaming:               s.GetStreaming(),
++	}
++}
+diff --git a/internal/native/grpc_clientmethods.go b/internal/native/grpc_clientmethods.go
+index bfd00c5..690492f 100644
+--- a/internal/native/grpc_clientmethods.go
++++ b/internal/native/grpc_clientmethods.go
+@@ -87,6 +87,24 @@ func (c *GRPCClient) VideoStart() error {
+ 	return err
+ }
+ 
++func (c *GRPCClient) VideoRequestKeyframe() error {
++	_, err := c.client.VideoRequestKeyframe(context.Background(), &pb.Empty{})
++	return err
++}
++
++func (c *GRPCClient) VideoGetEncoderParams() (VideoEncoderStatus, error) {
++	resp, err := c.client.VideoGetEncoderParams(context.Background(), &pb.Empty{})
++	if err != nil {
++		return VideoEncoderStatus{}, err
++	}
++	return videoEncoderStatusFromProto(resp), nil
++}
++
++func (c *GRPCClient) VideoSetEncoderParams(params VideoEncoderParams) error {
++	_, err := c.client.VideoSetEncoderParams(context.Background(), params.toProto())
++	return err
++}
++
+ // UI methods
+ func (c *GRPCClient) GetLVGLVersion() (string, error) {
+ 	resp, err := c.client.GetLVGLVersion(context.Background(), &pb.Empty{})
+diff --git a/internal/native/grpc_servermethods.go b/internal/native/grpc_servermethods.go
+index 439ab00..4d9ffe2 100644
+--- a/internal/native/grpc_servermethods.go
++++ b/internal/native/grpc_servermethods.go
+@@ -98,6 +98,28 @@ func (s *grpcServer) VideoStart(ctx context.Context, req *pb.Empty) (*pb.Empty,
+ 	return &pb.Empty{}, nil
+ }
+ 
++func (s *grpcServer) VideoRequestKeyframe(ctx context.Context, req *pb.Empty) (*pb.Empty, error) {
++	if err := s.native.VideoRequestKeyframe(); err != nil {
++		return nil, status.Error(codes.Internal, err.Error())
++	}
++	return &pb.Empty{}, nil
++}
++
++func (s *grpcServer) VideoGetEncoderParams(ctx context.Context, req *pb.Empty) (*pb.VideoEncoderStatus, error) {
++	encoderStatus, err := s.native.VideoGetEncoderParams()
++	if err != nil {
++		return nil, status.Error(codes.Internal, err.Error())
++	}
++	return encoderStatus.toProto(), nil
++}
++
++func (s *grpcServer) VideoSetEncoderParams(ctx context.Context, req *pb.VideoEncoderParams) (*pb.Empty, error) {
++	if err := s.native.VideoSetEncoderParams(videoEncoderParamsFromProto(req)); err != nil {
++		return nil, status.Error(codes.InvalidArgument, err.Error())
++	}
++	return &pb.Empty{}, nil
++}
++
+ // UI methods
+ func (s *grpcServer) GetLVGLVersion(ctx context.Context, req *pb.Empty) (*pb.GetLVGLVersionResponse, error) {
+ 	version, err := s.native.GetLVGLVersion()
+diff --git a/internal/native/interface.go b/internal/native/interface.go
+index 2f33920..4d3ec18 100644
+--- a/internal/native/interface.go
++++ b/internal/native/interface.go
+@@ -15,6 +15,9 @@ type NativeInterface interface {
+ 	VideoLogStatus() (string, error)
+ 	VideoStop() error
+ 	VideoStart() error
++	VideoRequestKeyframe() error
++	VideoGetEncoderParams() (VideoEncoderStatus, error)
++	VideoSetEncoderParams(params VideoEncoderParams) error
+ 	GetLVGLVersion() (string, error)
+ 	UIObjHide(objName string) (bool, error)
+ 	UIObjShow(objName string) (bool, error)
+diff --git a/internal/native/proto/native.pb.go b/internal/native/proto/native.pb.go
+index af2bc57..dd93f75 100644
+--- a/internal/native/proto/native.pb.go
++++ b/internal/native/proto/native.pb.go
+@@ -2356,6 +2356,198 @@ func (x *VideoFrame) GetDurationNs() int64 {
+ 	return 0
+ }
+ 
++type VideoEncoderParams struct {
++	state          protoimpl.MessageState `protogen:"open.v1"`
++	MinQp          int32                  `protobuf:"varint,1,opt,name=min_qp,json=minQp,proto3" json:"min_qp,omitempty"`
++	MaxQp          int32                  `protobuf:"varint,2,opt,name=max_qp,json=maxQp,proto3" json:"max_qp,omitempty"`
++	GopSeconds     float64                `protobuf:"fixed64,3,opt,name=gop_seconds,json=gopSeconds,proto3" json:"gop_seconds,omitempty"`
++	Aq             bool                   `protobuf:"varint,4,opt,name=aq,proto3" json:"aq,omitempty"`
++	MaxFps         int32                  `protobuf:"varint,5,opt,name=max_fps,json=maxFps,proto3" json:"max_fps,omitempty"`
++	BitrateKbps    int32                  `protobuf:"varint,6,opt,name=bitrate_kbps,json=bitrateKbps,proto3" json:"bitrate_kbps,omitempty"`
++	MaxBitrateKbps int32                  `protobuf:"varint,7,opt,name=max_bitrate_kbps,json=maxBitrateKbps,proto3" json:"max_bitrate_kbps,omitempty"`
++	unknownFields  protoimpl.UnknownFields
++	sizeCache      protoimpl.SizeCache
++}
++
++func (x *VideoEncoderParams) Reset() {
++	*x = VideoEncoderParams{}
++	mi := &file_internal_native_proto_native_proto_msgTypes[48]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *VideoEncoderParams) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*VideoEncoderParams) ProtoMessage() {}
++
++func (x *VideoEncoderParams) ProtoReflect() protoreflect.Message {
++	mi := &file_internal_native_proto_native_proto_msgTypes[48]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use VideoEncoderParams.ProtoReflect.Descriptor instead.
++func (*VideoEncoderParams) Descriptor() ([]byte, []int) {
++	return file_internal_native_proto_native_proto_rawDescGZIP(), []int{48}
++}
++
++func (x *VideoEncoderParams) GetMinQp() int32 {
++	if x != nil {
++		return x.MinQp
++	}
++	return 0
++}
++
++func (x *VideoEncoderParams) GetMaxQp() int32 {
++	if x != nil {
++		return x.MaxQp
++	}
++	return 0
++}
++
++func (x *VideoEncoderParams) GetGopSeconds() float64 {
++	if x != nil {
++		return x.GopSeconds
++	}
++	return 0
++}
++
++func (x *VideoEncoderParams) GetAq() bool {
++	if x != nil {
++		return x.Aq
++	}
++	return false
++}
++
++func (x *VideoEncoderParams) GetMaxFps() int32 {
++	if x != nil {
++		return x.MaxFps
++	}
++	return 0
++}
++
++func (x *VideoEncoderParams) GetBitrateKbps() int32 {
++	if x != nil {
++		return x.BitrateKbps
++	}
++	return 0
++}
++
++func (x *VideoEncoderParams) GetMaxBitrateKbps() int32 {
++	if x != nil {
++		return x.MaxBitrateKbps
++	}
++	return 0
++}
++
++type VideoEncoderStatus struct {
++	state                   protoimpl.MessageState `protogen:"open.v1"`
++	Params                  *VideoEncoderParams    `protobuf:"bytes,1,opt,name=params,proto3" json:"params,omitempty"`
++	SourceFps               int32                  `protobuf:"varint,2,opt,name=source_fps,json=sourceFps,proto3" json:"source_fps,omitempty"`
++	EncodeFps               int32                  `protobuf:"varint,3,opt,name=encode_fps,json=encodeFps,proto3" json:"encode_fps,omitempty"`
++	GopFrames               int32                  `protobuf:"varint,4,opt,name=gop_frames,json=gopFrames,proto3" json:"gop_frames,omitempty"`
++	EffectiveBitrateKbps    int32                  `protobuf:"varint,5,opt,name=effective_bitrate_kbps,json=effectiveBitrateKbps,proto3" json:"effective_bitrate_kbps,omitempty"`
++	EffectiveMaxBitrateKbps int32                  `protobuf:"varint,6,opt,name=effective_max_bitrate_kbps,json=effectiveMaxBitrateKbps,proto3" json:"effective_max_bitrate_kbps,omitempty"`
++	Codec                   string                 `protobuf:"bytes,7,opt,name=codec,proto3" json:"codec,omitempty"`
++	Streaming               bool                   `protobuf:"varint,8,opt,name=streaming,proto3" json:"streaming,omitempty"`
++	unknownFields           protoimpl.UnknownFields
++	sizeCache               protoimpl.SizeCache
++}
++
++func (x *VideoEncoderStatus) Reset() {
++	*x = VideoEncoderStatus{}
++	mi := &file_internal_native_proto_native_proto_msgTypes[49]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *VideoEncoderStatus) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*VideoEncoderStatus) ProtoMessage() {}
++
++func (x *VideoEncoderStatus) ProtoReflect() protoreflect.Message {
++	mi := &file_internal_native_proto_native_proto_msgTypes[49]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use VideoEncoderStatus.ProtoReflect.Descriptor instead.
++func (*VideoEncoderStatus) Descriptor() ([]byte, []int) {
++	return file_internal_native_proto_native_proto_rawDescGZIP(), []int{49}
++}
++
++func (x *VideoEncoderStatus) GetParams() *VideoEncoderParams {
++	if x != nil {
++		return x.Params
++	}
++	return nil
++}
++
++func (x *VideoEncoderStatus) GetSourceFps() int32 {
++	if x != nil {
++		return x.SourceFps
++	}
++	return 0
++}
++
++func (x *VideoEncoderStatus) GetEncodeFps() int32 {
++	if x != nil {
++		return x.EncodeFps
++	}
++	return 0
++}
++
++func (x *VideoEncoderStatus) GetGopFrames() int32 {
++	if x != nil {
++		return x.GopFrames
++	}
++	return 0
++}
++
++func (x *VideoEncoderStatus) GetEffectiveBitrateKbps() int32 {
++	if x != nil {
++		return x.EffectiveBitrateKbps
++	}
++	return 0
++}
++
++func (x *VideoEncoderStatus) GetEffectiveMaxBitrateKbps() int32 {
++	if x != nil {
++		return x.EffectiveMaxBitrateKbps
++	}
++	return 0
++}
++
++func (x *VideoEncoderStatus) GetCodec() string {
++	if x != nil {
++		return x.Codec
++	}
++	return ""
++}
++
++func (x *VideoEncoderStatus) GetStreaming() bool {
++	if x != nil {
++		return x.Streaming
++	}
++	return false
++}
++
+ var File_internal_native_proto_native_proto protoreflect.FileDescriptor
+ 
+ const file_internal_native_proto_native_proto_rawDesc = "" +
+@@ -2490,7 +2682,28 @@ const file_internal_native_proto_native_proto_rawDesc = "" +
+ 	"VideoFrame\x12\x14\n" +
+ 	"\x05frame\x18\x01 \x01(\fR\x05frame\x12\x1f\n" +
+ 	"\vduration_ns\x18\x02 \x01(\x03R\n" +
+-	"durationNs2\x8a\x13\n" +
++	"durationNs\"\xd9\x01\n" +
++	"\x12VideoEncoderParams\x12\x15\n" +
++	"\x06min_qp\x18\x01 \x01(\x05R\x05minQp\x12\x15\n" +
++	"\x06max_qp\x18\x02 \x01(\x05R\x05maxQp\x12\x1f\n" +
++	"\vgop_seconds\x18\x03 \x01(\x01R\n" +
++	"gopSeconds\x12\x0e\n" +
++	"\x02aq\x18\x04 \x01(\bR\x02aq\x12\x17\n" +
++	"\amax_fps\x18\x05 \x01(\x05R\x06maxFps\x12!\n" +
++	"\fbitrate_kbps\x18\x06 \x01(\x05R\vbitrateKbps\x12(\n" +
++	"\x10max_bitrate_kbps\x18\a \x01(\x05R\x0emaxBitrateKbps\"\xcc\x02\n" +
++	"\x12VideoEncoderStatus\x122\n" +
++	"\x06params\x18\x01 \x01(\v2\x1a.native.VideoEncoderParamsR\x06params\x12\x1d\n" +
++	"\n" +
++	"source_fps\x18\x02 \x01(\x05R\tsourceFps\x12\x1d\n" +
++	"\n" +
++	"encode_fps\x18\x03 \x01(\x05R\tencodeFps\x12\x1d\n" +
++	"\n" +
++	"gop_frames\x18\x04 \x01(\x05R\tgopFrames\x124\n" +
++	"\x16effective_bitrate_kbps\x18\x05 \x01(\x05R\x14effectiveBitrateKbps\x12;\n" +
++	"\x1aeffective_max_bitrate_kbps\x18\x06 \x01(\x05R\x17effectiveMaxBitrateKbps\x12\x14\n" +
++	"\x05codec\x18\a \x01(\tR\x05codec\x12\x1c\n" +
++	"\tstreaming\x18\b \x01(\bR\tstreaming2\xc8\x14\n" +
+ 	"\rNativeService\x12:\n" +
+ 	"\aIsReady\x12\x16.native.IsReadyRequest\x1a\x17.native.IsReadyResponse\x12D\n" +
+ 	"\x11VideoSetSleepMode\x12 .native.VideoSetSleepModeRequest\x1a\r.native.Empty\x12E\n" +
+@@ -2505,7 +2718,10 @@ const file_internal_native_proto_native_proto_rawDesc = "" +
+ 	"\x0eVideoLogStatus\x12\r.native.Empty\x1a\x1e.native.VideoLogStatusResponse\x12)\n" +
+ 	"\tVideoStop\x12\r.native.Empty\x1a\r.native.Empty\x12*\n" +
+ 	"\n" +
+-	"VideoStart\x12\r.native.Empty\x1a\r.native.Empty\x12?\n" +
++	"VideoStart\x12\r.native.Empty\x1a\r.native.Empty\x124\n" +
++	"\x14VideoRequestKeyframe\x12\r.native.Empty\x1a\r.native.Empty\x12B\n" +
++	"\x15VideoGetEncoderParams\x12\r.native.Empty\x1a\x1a.native.VideoEncoderStatus\x12B\n" +
++	"\x15VideoSetEncoderParams\x12\x1a.native.VideoEncoderParams\x1a\r.native.Empty\x12?\n" +
+ 	"\x0eGetLVGLVersion\x12\r.native.Empty\x1a\x1e.native.GetLVGLVersionResponse\x12@\n" +
+ 	"\tUIObjHide\x12\x18.native.UIObjHideRequest\x1a\x19.native.UIObjHideResponse\x12@\n" +
+ 	"\tUIObjShow\x12\x18.native.UIObjShowRequest\x1a\x19.native.UIObjShowResponse\x122\n" +
+@@ -2540,7 +2756,7 @@ func file_internal_native_proto_native_proto_rawDescGZIP() []byte {
+ 	return file_internal_native_proto_native_proto_rawDescData
+ }
+ 
+-var file_internal_native_proto_native_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
++var file_internal_native_proto_native_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
+ var file_internal_native_proto_native_proto_goTypes = []any{
+ 	(*Empty)(nil),                                 // 0: native.Empty
+ 	(*IsReadyRequest)(nil),                        // 1: native.IsReadyRequest
+@@ -2590,83 +2806,92 @@ var file_internal_native_proto_native_proto_goTypes = []any{
+ 	(*SwitchToScreenIfDifferentRequest)(nil),      // 45: native.SwitchToScreenIfDifferentRequest
+ 	(*Event)(nil),                                 // 46: native.Event
+ 	(*VideoFrame)(nil),                            // 47: native.VideoFrame
++	(*VideoEncoderParams)(nil),                    // 48: native.VideoEncoderParams
++	(*VideoEncoderStatus)(nil),                    // 49: native.VideoEncoderStatus
+ }
+ var file_internal_native_proto_native_proto_depIdxs = []int32{
+ 	3,  // 0: native.Event.video_state:type_name -> native.VideoState
+ 	47, // 1: native.Event.video_frame:type_name -> native.VideoFrame
+-	1,  // 2: native.NativeService.IsReady:input_type -> native.IsReadyRequest
+-	4,  // 3: native.NativeService.VideoSetSleepMode:input_type -> native.VideoSetSleepModeRequest
+-	0,  // 4: native.NativeService.VideoGetSleepMode:input_type -> native.Empty
+-	0,  // 5: native.NativeService.VideoSleepModeSupported:input_type -> native.Empty
+-	7,  // 6: native.NativeService.VideoSetQualityFactor:input_type -> native.VideoSetQualityFactorRequest
+-	0,  // 7: native.NativeService.VideoGetQualityFactor:input_type -> native.Empty
+-	9,  // 8: native.NativeService.VideoSetCodecType:input_type -> native.VideoSetCodecTypeRequest
+-	0,  // 9: native.NativeService.VideoGetCodecType:input_type -> native.Empty
+-	11, // 10: native.NativeService.VideoSetEDID:input_type -> native.VideoSetEDIDRequest
+-	0,  // 11: native.NativeService.VideoGetEDID:input_type -> native.Empty
+-	0,  // 12: native.NativeService.VideoLogStatus:input_type -> native.Empty
+-	0,  // 13: native.NativeService.VideoStop:input_type -> native.Empty
+-	0,  // 14: native.NativeService.VideoStart:input_type -> native.Empty
+-	0,  // 15: native.NativeService.GetLVGLVersion:input_type -> native.Empty
+-	15, // 16: native.NativeService.UIObjHide:input_type -> native.UIObjHideRequest
+-	17, // 17: native.NativeService.UIObjShow:input_type -> native.UIObjShowRequest
+-	19, // 18: native.NativeService.UISetVar:input_type -> native.UISetVarRequest
+-	20, // 19: native.NativeService.UIGetVar:input_type -> native.UIGetVarRequest
+-	22, // 20: native.NativeService.UIObjAddState:input_type -> native.UIObjAddStateRequest
+-	24, // 21: native.NativeService.UIObjClearState:input_type -> native.UIObjClearStateRequest
+-	26, // 22: native.NativeService.UIObjAddFlag:input_type -> native.UIObjAddFlagRequest
+-	28, // 23: native.NativeService.UIObjClearFlag:input_type -> native.UIObjClearFlagRequest
+-	30, // 24: native.NativeService.UIObjSetOpacity:input_type -> native.UIObjSetOpacityRequest
+-	32, // 25: native.NativeService.UIObjFadeIn:input_type -> native.UIObjFadeInRequest
+-	34, // 26: native.NativeService.UIObjFadeOut:input_type -> native.UIObjFadeOutRequest
+-	36, // 27: native.NativeService.UIObjSetLabelText:input_type -> native.UIObjSetLabelTextRequest
+-	38, // 28: native.NativeService.UIObjSetImageSrc:input_type -> native.UIObjSetImageSrcRequest
+-	40, // 29: native.NativeService.DisplaySetRotation:input_type -> native.DisplaySetRotationRequest
+-	42, // 30: native.NativeService.UpdateLabelIfChanged:input_type -> native.UpdateLabelIfChangedRequest
+-	43, // 31: native.NativeService.UpdateLabelAndChangeVisibility:input_type -> native.UpdateLabelAndChangeVisibilityRequest
+-	44, // 32: native.NativeService.SwitchToScreenIf:input_type -> native.SwitchToScreenIfRequest
+-	45, // 33: native.NativeService.SwitchToScreenIfDifferent:input_type -> native.SwitchToScreenIfDifferentRequest
+-	0,  // 34: native.NativeService.DoNotUseThisIsForCrashTestingOnly:input_type -> native.Empty
+-	0,  // 35: native.NativeService.StreamEvents:input_type -> native.Empty
+-	2,  // 36: native.NativeService.IsReady:output_type -> native.IsReadyResponse
+-	0,  // 37: native.NativeService.VideoSetSleepMode:output_type -> native.Empty
+-	5,  // 38: native.NativeService.VideoGetSleepMode:output_type -> native.VideoGetSleepModeResponse
+-	6,  // 39: native.NativeService.VideoSleepModeSupported:output_type -> native.VideoSleepModeSupportedResponse
+-	0,  // 40: native.NativeService.VideoSetQualityFactor:output_type -> native.Empty
+-	8,  // 41: native.NativeService.VideoGetQualityFactor:output_type -> native.VideoGetQualityFactorResponse
+-	0,  // 42: native.NativeService.VideoSetCodecType:output_type -> native.Empty
+-	10, // 43: native.NativeService.VideoGetCodecType:output_type -> native.VideoGetCodecTypeResponse
+-	0,  // 44: native.NativeService.VideoSetEDID:output_type -> native.Empty
+-	12, // 45: native.NativeService.VideoGetEDID:output_type -> native.VideoGetEDIDResponse
+-	13, // 46: native.NativeService.VideoLogStatus:output_type -> native.VideoLogStatusResponse
+-	0,  // 47: native.NativeService.VideoStop:output_type -> native.Empty
+-	0,  // 48: native.NativeService.VideoStart:output_type -> native.Empty
+-	14, // 49: native.NativeService.GetLVGLVersion:output_type -> native.GetLVGLVersionResponse
+-	16, // 50: native.NativeService.UIObjHide:output_type -> native.UIObjHideResponse
+-	18, // 51: native.NativeService.UIObjShow:output_type -> native.UIObjShowResponse
+-	0,  // 52: native.NativeService.UISetVar:output_type -> native.Empty
+-	21, // 53: native.NativeService.UIGetVar:output_type -> native.UIGetVarResponse
+-	23, // 54: native.NativeService.UIObjAddState:output_type -> native.UIObjAddStateResponse
+-	25, // 55: native.NativeService.UIObjClearState:output_type -> native.UIObjClearStateResponse
+-	27, // 56: native.NativeService.UIObjAddFlag:output_type -> native.UIObjAddFlagResponse
+-	29, // 57: native.NativeService.UIObjClearFlag:output_type -> native.UIObjClearFlagResponse
+-	31, // 58: native.NativeService.UIObjSetOpacity:output_type -> native.UIObjSetOpacityResponse
+-	33, // 59: native.NativeService.UIObjFadeIn:output_type -> native.UIObjFadeInResponse
+-	35, // 60: native.NativeService.UIObjFadeOut:output_type -> native.UIObjFadeOutResponse
+-	37, // 61: native.NativeService.UIObjSetLabelText:output_type -> native.UIObjSetLabelTextResponse
+-	39, // 62: native.NativeService.UIObjSetImageSrc:output_type -> native.UIObjSetImageSrcResponse
+-	41, // 63: native.NativeService.DisplaySetRotation:output_type -> native.DisplaySetRotationResponse
+-	0,  // 64: native.NativeService.UpdateLabelIfChanged:output_type -> native.Empty
+-	0,  // 65: native.NativeService.UpdateLabelAndChangeVisibility:output_type -> native.Empty
+-	0,  // 66: native.NativeService.SwitchToScreenIf:output_type -> native.Empty
+-	0,  // 67: native.NativeService.SwitchToScreenIfDifferent:output_type -> native.Empty
+-	0,  // 68: native.NativeService.DoNotUseThisIsForCrashTestingOnly:output_type -> native.Empty
+-	46, // 69: native.NativeService.StreamEvents:output_type -> native.Event
+-	36, // [36:70] is the sub-list for method output_type
+-	2,  // [2:36] is the sub-list for method input_type
+-	2,  // [2:2] is the sub-list for extension type_name
+-	2,  // [2:2] is the sub-list for extension extendee
+-	0,  // [0:2] is the sub-list for field type_name
++	48, // 2: native.VideoEncoderStatus.params:type_name -> native.VideoEncoderParams
++	1,  // 3: native.NativeService.IsReady:input_type -> native.IsReadyRequest
++	4,  // 4: native.NativeService.VideoSetSleepMode:input_type -> native.VideoSetSleepModeRequest
++	0,  // 5: native.NativeService.VideoGetSleepMode:input_type -> native.Empty
++	0,  // 6: native.NativeService.VideoSleepModeSupported:input_type -> native.Empty
++	7,  // 7: native.NativeService.VideoSetQualityFactor:input_type -> native.VideoSetQualityFactorRequest
++	0,  // 8: native.NativeService.VideoGetQualityFactor:input_type -> native.Empty
++	9,  // 9: native.NativeService.VideoSetCodecType:input_type -> native.VideoSetCodecTypeRequest
++	0,  // 10: native.NativeService.VideoGetCodecType:input_type -> native.Empty
++	11, // 11: native.NativeService.VideoSetEDID:input_type -> native.VideoSetEDIDRequest
++	0,  // 12: native.NativeService.VideoGetEDID:input_type -> native.Empty
++	0,  // 13: native.NativeService.VideoLogStatus:input_type -> native.Empty
++	0,  // 14: native.NativeService.VideoStop:input_type -> native.Empty
++	0,  // 15: native.NativeService.VideoStart:input_type -> native.Empty
++	0,  // 16: native.NativeService.VideoRequestKeyframe:input_type -> native.Empty
++	0,  // 17: native.NativeService.VideoGetEncoderParams:input_type -> native.Empty
++	48, // 18: native.NativeService.VideoSetEncoderParams:input_type -> native.VideoEncoderParams
++	0,  // 19: native.NativeService.GetLVGLVersion:input_type -> native.Empty
++	15, // 20: native.NativeService.UIObjHide:input_type -> native.UIObjHideRequest
++	17, // 21: native.NativeService.UIObjShow:input_type -> native.UIObjShowRequest
++	19, // 22: native.NativeService.UISetVar:input_type -> native.UISetVarRequest
++	20, // 23: native.NativeService.UIGetVar:input_type -> native.UIGetVarRequest
++	22, // 24: native.NativeService.UIObjAddState:input_type -> native.UIObjAddStateRequest
++	24, // 25: native.NativeService.UIObjClearState:input_type -> native.UIObjClearStateRequest
++	26, // 26: native.NativeService.UIObjAddFlag:input_type -> native.UIObjAddFlagRequest
++	28, // 27: native.NativeService.UIObjClearFlag:input_type -> native.UIObjClearFlagRequest
++	30, // 28: native.NativeService.UIObjSetOpacity:input_type -> native.UIObjSetOpacityRequest
++	32, // 29: native.NativeService.UIObjFadeIn:input_type -> native.UIObjFadeInRequest
++	34, // 30: native.NativeService.UIObjFadeOut:input_type -> native.UIObjFadeOutRequest
++	36, // 31: native.NativeService.UIObjSetLabelText:input_type -> native.UIObjSetLabelTextRequest
++	38, // 32: native.NativeService.UIObjSetImageSrc:input_type -> native.UIObjSetImageSrcRequest
++	40, // 33: native.NativeService.DisplaySetRotation:input_type -> native.DisplaySetRotationRequest
++	42, // 34: native.NativeService.UpdateLabelIfChanged:input_type -> native.UpdateLabelIfChangedRequest
++	43, // 35: native.NativeService.UpdateLabelAndChangeVisibility:input_type -> native.UpdateLabelAndChangeVisibilityRequest
++	44, // 36: native.NativeService.SwitchToScreenIf:input_type -> native.SwitchToScreenIfRequest
++	45, // 37: native.NativeService.SwitchToScreenIfDifferent:input_type -> native.SwitchToScreenIfDifferentRequest
++	0,  // 38: native.NativeService.DoNotUseThisIsForCrashTestingOnly:input_type -> native.Empty
++	0,  // 39: native.NativeService.StreamEvents:input_type -> native.Empty
++	2,  // 40: native.NativeService.IsReady:output_type -> native.IsReadyResponse
++	0,  // 41: native.NativeService.VideoSetSleepMode:output_type -> native.Empty
++	5,  // 42: native.NativeService.VideoGetSleepMode:output_type -> native.VideoGetSleepModeResponse
++	6,  // 43: native.NativeService.VideoSleepModeSupported:output_type -> native.VideoSleepModeSupportedResponse
++	0,  // 44: native.NativeService.VideoSetQualityFactor:output_type -> native.Empty
++	8,  // 45: native.NativeService.VideoGetQualityFactor:output_type -> native.VideoGetQualityFactorResponse
++	0,  // 46: native.NativeService.VideoSetCodecType:output_type -> native.Empty
++	10, // 47: native.NativeService.VideoGetCodecType:output_type -> native.VideoGetCodecTypeResponse
++	0,  // 48: native.NativeService.VideoSetEDID:output_type -> native.Empty
++	12, // 49: native.NativeService.VideoGetEDID:output_type -> native.VideoGetEDIDResponse
++	13, // 50: native.NativeService.VideoLogStatus:output_type -> native.VideoLogStatusResponse
++	0,  // 51: native.NativeService.VideoStop:output_type -> native.Empty
++	0,  // 52: native.NativeService.VideoStart:output_type -> native.Empty
++	0,  // 53: native.NativeService.VideoRequestKeyframe:output_type -> native.Empty
++	49, // 54: native.NativeService.VideoGetEncoderParams:output_type -> native.VideoEncoderStatus
++	0,  // 55: native.NativeService.VideoSetEncoderParams:output_type -> native.Empty
++	14, // 56: native.NativeService.GetLVGLVersion:output_type -> native.GetLVGLVersionResponse
++	16, // 57: native.NativeService.UIObjHide:output_type -> native.UIObjHideResponse
++	18, // 58: native.NativeService.UIObjShow:output_type -> native.UIObjShowResponse
++	0,  // 59: native.NativeService.UISetVar:output_type -> native.Empty
++	21, // 60: native.NativeService.UIGetVar:output_type -> native.UIGetVarResponse
++	23, // 61: native.NativeService.UIObjAddState:output_type -> native.UIObjAddStateResponse
++	25, // 62: native.NativeService.UIObjClearState:output_type -> native.UIObjClearStateResponse
++	27, // 63: native.NativeService.UIObjAddFlag:output_type -> native.UIObjAddFlagResponse
++	29, // 64: native.NativeService.UIObjClearFlag:output_type -> native.UIObjClearFlagResponse
++	31, // 65: native.NativeService.UIObjSetOpacity:output_type -> native.UIObjSetOpacityResponse
++	33, // 66: native.NativeService.UIObjFadeIn:output_type -> native.UIObjFadeInResponse
++	35, // 67: native.NativeService.UIObjFadeOut:output_type -> native.UIObjFadeOutResponse
++	37, // 68: native.NativeService.UIObjSetLabelText:output_type -> native.UIObjSetLabelTextResponse
++	39, // 69: native.NativeService.UIObjSetImageSrc:output_type -> native.UIObjSetImageSrcResponse
++	41, // 70: native.NativeService.DisplaySetRotation:output_type -> native.DisplaySetRotationResponse
++	0,  // 71: native.NativeService.UpdateLabelIfChanged:output_type -> native.Empty
++	0,  // 72: native.NativeService.UpdateLabelAndChangeVisibility:output_type -> native.Empty
++	0,  // 73: native.NativeService.SwitchToScreenIf:output_type -> native.Empty
++	0,  // 74: native.NativeService.SwitchToScreenIfDifferent:output_type -> native.Empty
++	0,  // 75: native.NativeService.DoNotUseThisIsForCrashTestingOnly:output_type -> native.Empty
++	46, // 76: native.NativeService.StreamEvents:output_type -> native.Event
++	40, // [40:77] is the sub-list for method output_type
++	3,  // [3:40] is the sub-list for method input_type
++	3,  // [3:3] is the sub-list for extension type_name
++	3,  // [3:3] is the sub-list for extension extendee
++	0,  // [0:3] is the sub-list for field type_name
+ }
+ 
+ func init() { file_internal_native_proto_native_proto_init() }
+@@ -2686,7 +2911,7 @@ func file_internal_native_proto_native_proto_init() {
+ 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
+ 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_native_proto_native_proto_rawDesc), len(file_internal_native_proto_native_proto_rawDesc)),
+ 			NumEnums:      0,
+-			NumMessages:   48,
++			NumMessages:   50,
+ 			NumExtensions: 0,
+ 			NumServices:   1,
+ 		},
+diff --git a/internal/native/proto/native.proto b/internal/native/proto/native.proto
+index 8186af1..e01f18e 100644
+--- a/internal/native/proto/native.proto
++++ b/internal/native/proto/native.proto
+@@ -22,6 +22,9 @@ service NativeService {
+   rpc VideoLogStatus(Empty) returns (VideoLogStatusResponse);
+   rpc VideoStop(Empty) returns (Empty);
+   rpc VideoStart(Empty) returns (Empty);
++  rpc VideoRequestKeyframe(Empty) returns (Empty);
++  rpc VideoGetEncoderParams(Empty) returns (VideoEncoderStatus);
++  rpc VideoSetEncoderParams(VideoEncoderParams) returns (Empty);
+ 
+   // UI methods
+   rpc GetLVGLVersion(Empty) returns (GetLVGLVersionResponse);
+@@ -266,3 +269,23 @@ message VideoFrame {
+   int64 duration_ns = 2;
+ }
+ 
++message VideoEncoderParams {
++  int32 min_qp = 1;
++  int32 max_qp = 2;
++  double gop_seconds = 3;
++  bool aq = 4;
++  int32 max_fps = 5;
++  int32 bitrate_kbps = 6;
++  int32 max_bitrate_kbps = 7;
++}
++
++message VideoEncoderStatus {
++  VideoEncoderParams params = 1;
++  int32 source_fps = 2;
++  int32 encode_fps = 3;
++  int32 gop_frames = 4;
++  int32 effective_bitrate_kbps = 5;
++  int32 effective_max_bitrate_kbps = 6;
++  string codec = 7;
++  bool streaming = 8;
++}
+diff --git a/internal/native/proto/native_grpc.pb.go b/internal/native/proto/native_grpc.pb.go
+index 9a11de6..3e9aa6f 100644
+--- a/internal/native/proto/native_grpc.pb.go
++++ b/internal/native/proto/native_grpc.pb.go
+@@ -32,6 +32,9 @@ const (
+ 	NativeService_VideoLogStatus_FullMethodName                    = "/native.NativeService/VideoLogStatus"
+ 	NativeService_VideoStop_FullMethodName                         = "/native.NativeService/VideoStop"
+ 	NativeService_VideoStart_FullMethodName                        = "/native.NativeService/VideoStart"
++	NativeService_VideoRequestKeyframe_FullMethodName              = "/native.NativeService/VideoRequestKeyframe"
++	NativeService_VideoGetEncoderParams_FullMethodName             = "/native.NativeService/VideoGetEncoderParams"
++	NativeService_VideoSetEncoderParams_FullMethodName             = "/native.NativeService/VideoSetEncoderParams"
+ 	NativeService_GetLVGLVersion_FullMethodName                    = "/native.NativeService/GetLVGLVersion"
+ 	NativeService_UIObjHide_FullMethodName                         = "/native.NativeService/UIObjHide"
+ 	NativeService_UIObjShow_FullMethodName                         = "/native.NativeService/UIObjShow"
+@@ -76,6 +79,9 @@ type NativeServiceClient interface {
+ 	VideoLogStatus(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*VideoLogStatusResponse, error)
+ 	VideoStop(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
+ 	VideoStart(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
++	VideoRequestKeyframe(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
++	VideoGetEncoderParams(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*VideoEncoderStatus, error)
++	VideoSetEncoderParams(ctx context.Context, in *VideoEncoderParams, opts ...grpc.CallOption) (*Empty, error)
+ 	// UI methods
+ 	GetLVGLVersion(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*GetLVGLVersionResponse, error)
+ 	UIObjHide(ctx context.Context, in *UIObjHideRequest, opts ...grpc.CallOption) (*UIObjHideResponse, error)
+@@ -240,6 +246,36 @@ func (c *nativeServiceClient) VideoStart(ctx context.Context, in *Empty, opts ..
+ 	return out, nil
+ }
+ 
++func (c *nativeServiceClient) VideoRequestKeyframe(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error) {
++	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
++	out := new(Empty)
++	err := c.cc.Invoke(ctx, NativeService_VideoRequestKeyframe_FullMethodName, in, out, cOpts...)
++	if err != nil {
++		return nil, err
++	}
++	return out, nil
++}
++
++func (c *nativeServiceClient) VideoGetEncoderParams(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*VideoEncoderStatus, error) {
++	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
++	out := new(VideoEncoderStatus)
++	err := c.cc.Invoke(ctx, NativeService_VideoGetEncoderParams_FullMethodName, in, out, cOpts...)
++	if err != nil {
++		return nil, err
++	}
++	return out, nil
++}
++
++func (c *nativeServiceClient) VideoSetEncoderParams(ctx context.Context, in *VideoEncoderParams, opts ...grpc.CallOption) (*Empty, error) {
++	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
++	out := new(Empty)
++	err := c.cc.Invoke(ctx, NativeService_VideoSetEncoderParams_FullMethodName, in, out, cOpts...)
++	if err != nil {
++		return nil, err
++	}
++	return out, nil
++}
++
+ func (c *nativeServiceClient) GetLVGLVersion(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*GetLVGLVersionResponse, error) {
+ 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+ 	out := new(GetLVGLVersionResponse)
+@@ -480,6 +516,9 @@ type NativeServiceServer interface {
+ 	VideoLogStatus(context.Context, *Empty) (*VideoLogStatusResponse, error)
+ 	VideoStop(context.Context, *Empty) (*Empty, error)
+ 	VideoStart(context.Context, *Empty) (*Empty, error)
++	VideoRequestKeyframe(context.Context, *Empty) (*Empty, error)
++	VideoGetEncoderParams(context.Context, *Empty) (*VideoEncoderStatus, error)
++	VideoSetEncoderParams(context.Context, *VideoEncoderParams) (*Empty, error)
+ 	// UI methods
+ 	GetLVGLVersion(context.Context, *Empty) (*GetLVGLVersionResponse, error)
+ 	UIObjHide(context.Context, *UIObjHideRequest) (*UIObjHideResponse, error)
+@@ -553,6 +592,15 @@ func (UnimplementedNativeServiceServer) VideoStop(context.Context, *Empty) (*Emp
+ func (UnimplementedNativeServiceServer) VideoStart(context.Context, *Empty) (*Empty, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method VideoStart not implemented")
+ }
++func (UnimplementedNativeServiceServer) VideoRequestKeyframe(context.Context, *Empty) (*Empty, error) {
++	return nil, status.Error(codes.Unimplemented, "method VideoRequestKeyframe not implemented")
++}
++func (UnimplementedNativeServiceServer) VideoGetEncoderParams(context.Context, *Empty) (*VideoEncoderStatus, error) {
++	return nil, status.Error(codes.Unimplemented, "method VideoGetEncoderParams not implemented")
++}
++func (UnimplementedNativeServiceServer) VideoSetEncoderParams(context.Context, *VideoEncoderParams) (*Empty, error) {
++	return nil, status.Error(codes.Unimplemented, "method VideoSetEncoderParams not implemented")
++}
+ func (UnimplementedNativeServiceServer) GetLVGLVersion(context.Context, *Empty) (*GetLVGLVersionResponse, error) {
+ 	return nil, status.Error(codes.Unimplemented, "method GetLVGLVersion not implemented")
+ }
+@@ -871,6 +919,60 @@ func _NativeService_VideoStart_Handler(srv interface{}, ctx context.Context, dec
+ 	return interceptor(ctx, in, info, handler)
+ }
+ 
++func _NativeService_VideoRequestKeyframe_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
++	in := new(Empty)
++	if err := dec(in); err != nil {
++		return nil, err
++	}
++	if interceptor == nil {
++		return srv.(NativeServiceServer).VideoRequestKeyframe(ctx, in)
++	}
++	info := &grpc.UnaryServerInfo{
++		Server:     srv,
++		FullMethod: NativeService_VideoRequestKeyframe_FullMethodName,
++	}
++	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
++		return srv.(NativeServiceServer).VideoRequestKeyframe(ctx, req.(*Empty))
++	}
++	return interceptor(ctx, in, info, handler)
++}
++
++func _NativeService_VideoGetEncoderParams_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
++	in := new(Empty)
++	if err := dec(in); err != nil {
++		return nil, err
++	}
++	if interceptor == nil {
++		return srv.(NativeServiceServer).VideoGetEncoderParams(ctx, in)
++	}
++	info := &grpc.UnaryServerInfo{
++		Server:     srv,
++		FullMethod: NativeService_VideoGetEncoderParams_FullMethodName,
++	}
++	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
++		return srv.(NativeServiceServer).VideoGetEncoderParams(ctx, req.(*Empty))
++	}
++	return interceptor(ctx, in, info, handler)
++}
++
++func _NativeService_VideoSetEncoderParams_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
++	in := new(VideoEncoderParams)
++	if err := dec(in); err != nil {
++		return nil, err
++	}
++	if interceptor == nil {
++		return srv.(NativeServiceServer).VideoSetEncoderParams(ctx, in)
++	}
++	info := &grpc.UnaryServerInfo{
++		Server:     srv,
++		FullMethod: NativeService_VideoSetEncoderParams_FullMethodName,
++	}
++	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
++		return srv.(NativeServiceServer).VideoSetEncoderParams(ctx, req.(*VideoEncoderParams))
++	}
++	return interceptor(ctx, in, info, handler)
++}
++
+ func _NativeService_GetLVGLVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+ 	in := new(Empty)
+ 	if err := dec(in); err != nil {
+@@ -1301,6 +1403,18 @@ var NativeService_ServiceDesc = grpc.ServiceDesc{
+ 			MethodName: "VideoStart",
+ 			Handler:    _NativeService_VideoStart_Handler,
+ 		},
++		{
++			MethodName: "VideoRequestKeyframe",
++			Handler:    _NativeService_VideoRequestKeyframe_Handler,
++		},
++		{
++			MethodName: "VideoGetEncoderParams",
++			Handler:    _NativeService_VideoGetEncoderParams_Handler,
++		},
++		{
++			MethodName: "VideoSetEncoderParams",
++			Handler:    _NativeService_VideoSetEncoderParams_Handler,
++		},
+ 		{
+ 			MethodName: "GetLVGLVersion",
+ 			Handler:    _NativeService_GetLVGLVersion_Handler,
+diff --git a/internal/native/proxy.go b/internal/native/proxy.go
+index 93e8d1a..6ca7db6 100644
+--- a/internal/native/proxy.go
++++ b/internal/native/proxy.go
+@@ -606,6 +606,26 @@ func (p *NativeProxy) VideoStart() error {
+ 	})
+ }
+ 
++func (p *NativeProxy) VideoRequestKeyframe() error {
++	return nativeProxyClientExecWithoutArgument(p, func(client *GRPCClient) error {
++		return client.VideoRequestKeyframe()
++	})
++}
++
++func (p *NativeProxy) VideoGetEncoderParams() (encoderStatus VideoEncoderStatus, err error) {
++	err = nativeProxyClientExecWithoutArgument(p, func(client *GRPCClient) error {
++		encoderStatus, err = client.VideoGetEncoderParams()
++		return err
++	})
++	return encoderStatus, err
++}
++
++func (p *NativeProxy) VideoSetEncoderParams(params VideoEncoderParams) error {
++	return nativeProxyClientExecWithoutArgument(p, func(client *GRPCClient) error {
++		return client.VideoSetEncoderParams(params)
++	})
++}
++
+ func (p *NativeProxy) GetLVGLVersion() (string, error) {
+ 	return nativeProxyClientExec[string](p, func(client *GRPCClient) (string, error) {
+ 		return client.GetLVGLVersion()
+diff --git a/internal/native/video.go b/internal/native/video.go
+index 5b36607..b1aed02 100644
+--- a/internal/native/video.go
++++ b/internal/native/video.go
+@@ -210,12 +210,16 @@ func (n *Native) VideoLogStatus() (string, error) {
+ 	return videoLogStatus(), nil
+ }
+ 
+-// VideoStop stops the video stream.
++// VideoStop stops the video stream. The main process issues it only when the
++// last WebRTC session disconnects, so runtime encoder overrides
++// (VideoSetEncoderParams) are dropped here: the next client, or the web UI,
++// starts from the env/compiled defaults.
+ func (n *Native) VideoStop() error {
+ 	n.videoLock.Lock()
+ 	defer n.videoLock.Unlock()
+ 
+ 	videoStop()
++	videoResetEncoderParams()
+ 	return nil
+ }
+ 
+@@ -241,6 +245,31 @@ func (n *Native) VideoStart() error {
+ 	return nil
+ }
+ 
++// VideoRequestKeyframe asks the encoder for an IDR frame. It deliberately
++// skips videoLock: start/stop/quality changes hold it for seconds, and the
++// C side orders the request against encoder teardown itself.
++func (n *Native) VideoRequestKeyframe() error {
++	return videoRequestKeyframe()
++}
++
++// VideoGetEncoderParams reports the effective encoder configuration.
++func (n *Native) VideoGetEncoderParams() (VideoEncoderStatus, error) {
++	return videoGetEncoderStatus(), nil
++}
++
++// VideoSetEncoderParams replaces the encoder tunables (in memory) and applies
++// them to the running channel, falling back to the VideoSetQualityFactor
++// restart path (capture + VENC only, no EDID/hot-plug) if that fails.
++func (n *Native) VideoSetEncoderParams(params VideoEncoderParams) error {
++	if err := params.Validate(); err != nil {
++		return err
++	}
++	n.videoLock.Lock()
++	defer n.videoLock.Unlock()
++
++	return videoSetEncoderParams(params)
++}
++
+ // VideoGetStreamingStatus gets the streaming status of the video.
+ func (n *Native) VideoGetStreamingStatus() VideoStreamingStatus {
+ 	n.videoLock.Lock()
+diff --git a/jsonrpc.go b/jsonrpc.go
+index 6669a82..cba5165 100644
+--- a/jsonrpc.go
++++ b/jsonrpc.go
+@@ -18,6 +18,7 @@ import (
+ 
+ 	"github.com/jetkvm/kvm/internal/hidrpc"
+ 	"github.com/jetkvm/kvm/internal/logging"
++	"github.com/jetkvm/kvm/internal/native"
+ 	"github.com/jetkvm/kvm/internal/usbgadget"
+ 	"github.com/jetkvm/kvm/internal/utils"
+ )
+@@ -199,6 +200,39 @@ func rpcSetStreamQualityFactor(factor float64) error {
+ 	return nil
+ }
+ 
++func rpcGetVideoEncoderParams() (native.VideoEncoderStatus, error) {
++	return nativeInstance.VideoGetEncoderParams()
++}
++
++// rpcSetVideoEncoderParams applies a partial update (omitted fields keep their
++// value) and returns the effective configuration. Changes are applied to the
++// running encoder (restart of capture + VENC only as fallback, never EDID or
++// hot-plug), are not persisted, and reset to the defaults when the last session
++// disconnects or the stream quality factor changes.
++func rpcSetVideoEncoderParams(params native.VideoEncoderParamsUpdate) (native.VideoEncoderStatus, error) {
++	current, err := nativeInstance.VideoGetEncoderParams()
++	if err != nil {
++		return native.VideoEncoderStatus{}, err
++	}
++	next := params.ApplyTo(current.VideoEncoderParams)
++	if err := next.Validate(); err != nil {
++		return native.VideoEncoderStatus{}, err
++	}
++	if next == current.VideoEncoderParams {
++		return current, nil
++	}
++
++	logger.Info().Interface("params", next).Msg("Setting video encoder params")
++	if err := nativeInstance.VideoSetEncoderParams(next); err != nil {
++		return native.VideoEncoderStatus{}, err
++	}
++	return nativeInstance.VideoGetEncoderParams()
++}
++
++func rpcRequestKeyframe() {
++	requestKeyframe("rpc")
++}
++
+ func rpcGetSupportedVideoCodecs() []string {
+ 	return []string{"h264", "h265"}
+ }
+@@ -1358,6 +1392,9 @@ var rpcHandlers = map[string]RPCHandler{
+ 	"sendWOLMagicPacket":         {Func: rpcSendWOLMagicPacket, Params: []string{"macAddress"}, OptionalParams: []string{"broadcastIP"}},
+ 	"getStreamQualityFactor":     {Func: rpcGetStreamQualityFactor},
+ 	"setStreamQualityFactor":     {Func: rpcSetStreamQualityFactor, Params: []string{"factor"}},
++	"getVideoEncoderParams":      {Func: rpcGetVideoEncoderParams},
++	"setVideoEncoderParams":      {Func: rpcSetVideoEncoderParams, Params: []string{"params"}},
++	"requestKeyframe":            {Func: rpcRequestKeyframe},
+ 	"getSupportedVideoCodecs":    {Func: rpcGetSupportedVideoCodecs},
+ 	"getVideoCodecPreference":    {Func: rpcGetVideoCodecPreference},
+ 	"setVideoCodecPreference":    {Func: rpcSetVideoCodecPreference, Params: []string{"codec"}},
+diff --git a/native.go b/native.go
+index 529ab4a..918e4ab 100644
+--- a/native.go
++++ b/native.go
+@@ -98,6 +98,7 @@ func initNative(systemVersion *semver.Version, appVersion *semver.Version) {
+ 	if err := nativeInstance.Start(); err != nil {
+ 		nativeLogger.Fatal().Err(err).Msg("failed to start native proxy")
+ 	}
++	go runKeyframeRequester()
+ 	go func() {
+ 		_ = reapplyHostDisplayAdvertisement("native_started")
+ 	}()
+diff --git a/video.go b/video.go
+index e981979..9d7ca5d 100644
+--- a/video.go
++++ b/video.go
+@@ -17,8 +17,34 @@ var (
+ 
+ const (
+ 	defaultVideoSleepModeDuration = 1 * time.Minute
++
++	// keyframeRequestInterval caps on-demand IDRs (receiver PLI/FIR, new
++	// sessions) at two per second. Requests inside the window coalesce into
++	// one that is sent when it ends, so none is lost.
++	keyframeRequestInterval = 500 * time.Millisecond
+ )
+ 
++var keyframeRequests = make(chan string, 1)
++
++// requestKeyframe queues an encoder IDR request without blocking the caller.
++func requestKeyframe(reason string) {
++	select {
++	case keyframeRequests <- reason:
++	default: // one is already pending
++	}
++}
++
++func runKeyframeRequester() {
++	for reason := range keyframeRequests {
++		if err := nativeInstance.VideoRequestKeyframe(); err != nil {
++			nativeLogger.Warn().Err(err).Str("reason", reason).Msg("keyframe request failed")
++		} else {
++			nativeLogger.Debug().Str("reason", reason).Msg("requested keyframe")
++		}
++		time.Sleep(keyframeRequestInterval)
++	}
++}
++
+ func triggerVideoStateUpdate() {
+ 	go func() {
+ 		writeJSONRPCEvent("videoInputState", lastVideoState, currentSession)
+diff --git a/webrtc.go b/webrtc.go
+index 27020aa..2c1f03c 100644
+--- a/webrtc.go
++++ b/webrtc.go
+@@ -20,6 +20,7 @@ import (
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/pion/ice/v4"
+ 	"github.com/pion/interceptor"
++	"github.com/pion/rtcp"
+ 	"github.com/pion/webrtc/v4"
+ 	"github.com/rs/zerolog"
+ )
+@@ -171,18 +172,35 @@ func (s *Session) attachAudioTrack(offerSDP string) error {
+ 	}
+ 	s.AudioTrack = track
+ 	webrtcLogger.Info().Str("codec", audioMime).Msg("audio track enabled")
+-	go drainRTCP(sender)
++	go drainRTCP(sender, nil)
+ 	return nil
+ }
+ 
+-// drainRTCP reads and discards RTCP packets from a sender. Required for NACK
+-// handling on outgoing tracks; the sender stops on connection close.
+-func drainRTCP(sender *webrtc.RTPSender) {
++// drainRTCP reads RTCP packets from a sender until the connection closes.
++// Reading is required for NACK handling on outgoing tracks. PLI/FIR feedback
++// is passed to onKeyframeRequest when it is set; everything else is dropped.
++func drainRTCP(sender *webrtc.RTPSender, onKeyframeRequest func(reason string)) {
+ 	buf := make([]byte, 1500)
+ 	for {
+-		if _, _, err := sender.Read(buf); err != nil {
++		n, _, err := sender.Read(buf)
++		if err != nil {
+ 			return
+ 		}
++		if onKeyframeRequest == nil {
++			continue
++		}
++		pkts, err := rtcp.Unmarshal(buf[:n])
++		if err != nil {
++			continue
++		}
++		for _, pkt := range pkts {
++			switch pkt.(type) {
++			case *rtcp.PictureLossIndication:
++				onKeyframeRequest("pli")
++			case *rtcp.FullIntraRequest:
++				onKeyframeRequest("fir")
++			}
++		}
+ 	}
+ }
+ 
+@@ -233,7 +251,13 @@ func (s *Session) ExchangeOffer(offerStr string) (string, error) {
+ 		return "", err
+ 	}
+ 
+-	go drainRTCP(rtpSender)
++	go drainRTCP(rtpSender, func(reason string) {
++		// A replaced session lingers ~1 s before it is closed; only the
++		// session that receives frames may ask for keyframes.
++		if currentSession == s {
++			requestKeyframe(reason)
++		}
++	})
+ 
+ 	if err := s.attachAudioTrack(offer.SDP); err != nil {
+ 		return "", err
+@@ -605,6 +629,16 @@ func newSession(config SessionConfig) (*Session, error) {
+ 		}
+ 	})
+ 
++	// The video track drops samples until DTLS is up, and with a long GOP the
++	// next periodic IDR can be seconds away. A freshly started encoder opens
++	// with an IDR, but a handoff joins a running one (and the first IDR may
++	// beat the DTLS handshake), so ask for one once media can flow.
++	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
++		if state == webrtc.PeerConnectionStateConnected {
++			requestKeyframe("session_connected")
++		}
++	})
++
+ 	peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
+ 		scopedLogger.Info().Str("connectionState", connectionState.String()).Msg("ICE Connection State has changed")
+ 		if connectionState == webrtc.ICEConnectionStateConnected {
