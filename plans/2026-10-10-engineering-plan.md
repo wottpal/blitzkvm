@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Date | 2026-10-10 (v1), revised 2026-10-10 (v2) |
-| Status | Approved direction. Implemented on branch `native-foundation`: Phases 0, 1a, 1b and 2 done, Phase 3 MVP in part (see §19). |
+| Status | Approved direction. Implemented on branch `native-foundation`: Phases 0, 1a, 1b and 2 done, Phase 3 MVP done except settings UI (see §19). |
 | Repo | `wottpal/jetkvm-desktop` (private fork), base commit `289df51`, identical to `lkarlslund/jetkvm-desktop` `main` |
 | Target firmware | JetKVM app 0.5.9 / system 0.2.8 (live device `.107`). Upstream `jetkvm/kvm`: `dev` @ `8f6c300` (2026-10-05), `release/0.5.9` @ `36c008f`. **Note:** upstream develops on `dev`; `main` is frozen at 0.4.8. |
 | Method | v1: five parallel deep-dives (video pipeline, UI architecture, protocol and session, build/CI/dependencies, product landscape), then a re-check of key claims against code. v2: independent adversarial review with three parallel reviewers plus a PM interview, then each review finding re-checked against the code before being accepted (§16). |
@@ -414,7 +414,7 @@ Order:
    - method names / dead methods (E13, without the serial change)
    - engine races (E16)
 3. **Video.**
-   - explicit MediaEngine: **H.264 only** for the OpenH264 client, H.265 opt-in for the native shell, with `nack`, `nack pli`, `ccm fir`, fmtp; NACK interval ~20 ms (E2)
+   - explicit MediaEngine: **H.264 only** for the OpenH264 client, H.265 opt-in for the native shell, with `nack`, `nack pli`, `ccm fir`, fmtp; NACK interval ~20 ms (E2) *(built: 40 ms, at most 6 per packet; see §20)*
    - a marker-driven access-unit assembler with RTT-aware gap deadline and keyframe wait, replacing samplebuilder (E3)
    - OpenH264 `FlushFrame` after an empty decode (E4)
    - verify M2; continue after non-fatal read errors; real decode stats; dead `frameCh` removed (E5)
@@ -459,7 +459,7 @@ The Ebiten app keeps compiling as a manual test client; no polish.
 - Input: per-device Cmd↔Ctrl / Option↔Alt profiles (macOS targets pass ⌘ through; Linux maps it); Caps Lock as a toggle with LED sync; precise scroll accumulation.
 - ⌘V paste with progress and cancel; layout per device.
 - ATX/DC power, virtual media (URL + `/storage/upload` with progress), serial console.
-- Connection health in the toolbar; reconnect on `NWPathMonitor` changes; TLS trust-on-first-use pinning per `deviceId`.
+- Connection health in the toolbar; reconnect on `NWPathMonitor` changes; TLS trust-on-first-use pinning per `deviceId` *(built: the device CA is pinned, not the leaf; see §20)*.
 - An "Open web settings…" escape hatch until Phase 4 (it kicks the app's session; the app shows "taken over" and reconnects).
 
 ### Phase 4: Full settings parity and extras (ongoing; parity ~4–6 months from start)
@@ -630,16 +630,16 @@ The acceptance bar is relative (≥ Safari, §1). These numbers are diagnostics,
 
 ## 15. Open questions and unverified items
 
-| # | Item | Resolve in |
-|---|---|---|
-| 1 | Live video path (timing, real High-profile stream, colour metadata); `.107` has no HDMI signal yet | Phase R |
-| 2 | Windowed/fullscreen latency at 60/120 Hz; Safari and Regi baselines | Phase R / 2 |
-| 3 | M2 (concealed frames discarded) | Phase 1b emulator loss test |
-| 4 | H.265 visual gain at equal bitrate on this device | Phase R |
-| 5 | TURN-over-TCP with a host-only device | Phase 2 |
-| 6 | VPN interfaces don't trigger the Local Network prompt | Phase 2 |
-| 7 | `go/packages` schema walk on darwin | Before Phase 4 |
-| 8 | ISO §/` swap on Mac keyboards; JetRemote claims | Phase 3 / R |
+| # | Item | Resolve in | Status (2026-10-10) |
+|---|---|---|---|
+| 1 | Live video path (timing, real High-profile stream, colour metadata); `.107` has no HDMI signal yet | Phase R | Partly: `.107` got HDMI; H.264 and H.265 decode live at ~60 fps, 0 errors. Timing still open. |
+| 2 | Windowed/fullscreen latency at 60/120 Hz; Safari and Regi baselines | Phase R / 2 | Open (Phase R) |
+| 3 | M2 (concealed frames discarded) | Phase 1b emulator loss test | Resolved: the assembler replaced samplebuilder; loss is repaired by NACK in the emulator test |
+| 4 | H.265 visual gain at equal bitrate on this device | Phase R | Open; new devices default to H.264 meanwhile |
+| 5 | TURN-over-TCP with a host-only device | Phase 2 | Open (not built) |
+| 6 | VPN interfaces don't trigger the Local Network prompt | Phase 2 | Open (needs a VPN test on a signed build) |
+| 7 | `go/packages` schema walk on darwin | Before Phase 4 | Open |
+| 8 | ISO §/` swap on Mac keyboards; JetRemote claims | Phase 3 / R | §/` swap built and unit-tested; not tried on an ISO keyboard |
 
 ---
 
@@ -705,7 +705,9 @@ The independent review (`plans/2026-10-10-engineering-plan-review.md`, merged in
 | 2026-10-10 | New devices default to H.264; H.265 is a per-device opt-in until Phase R shows its benefit |
 | 2026-10-10 | NACK every 40 ms, at most 6 per packet; assembler gap deadline from the selected pair's RTT (assumed 100 ms until known) |
 | 2026-10-10 | Escape chord ⌃⌘ releases keyboard capture |
-| 2026-10-10 | Ad-hoc signing until Developer ID details exist (Accessibility grants do not survive rebuilds) |
+| 2026-10-10 | Developer ID signing (Scio Labs), hardened runtime; every signed build is copied to ~/Downloads |
+| 2026-10-10 | HTTPS: pin the device CA the chain is signed up to, on first use; publicly trusted devices pin to public trust |
+| 2026-10-10 | Serial console is line-based (Return sends the line + device terminator), not a full terminal emulator |
 
 ## 18. PM to-dos
 
@@ -724,7 +726,7 @@ Branch `native-foundation`, on top of `289df51`. The live device was used **read
 | 1a Emulator parity | Done, plus the review round below | `2e81584`, review commit |
 | 1b Engine | Done (lifecycle, RPC, video assembler, input, paste, tests) | `2e81584`, review commit |
 | 2 Native spike | Done except the pass criteria that need Phase R measurements | `a777c58`, `36b848c` |
-| 3 Native MVP | In part: device library, Keychain, tabs, background sessions without decode, fit-window-to-remote, power menu, paste progress/cancel, path-change reconnect | `b8b06f5` |
+| 3 Native MVP | Done: device library, Keychain, tabs, background sessions without decode, fit-window-to-remote, power menu, paste progress/cancel, path-change reconnect, virtual media, serial console, extension port, TLS pinning | `b8b06f5`, Phase 3 commit |
 | R, 4 | Not started (R needs the HDMI rig) | |
 
 **Verified**
@@ -752,11 +754,72 @@ Branch `native-foundation`, on top of `289df51`. The live device was used **read
   - smaller items: a stale reconnect wake token, library edits dropping a learned ID, shared Keychain items deleted with a duplicate entry, app log opened with `O_APPEND` and rotated at runtime.
 - Not adopted: login limiter windowing and an end-to-end 429 test (low value now); recording only inputs the firmware acts on (the log is a test aid).
 
+**Phase 3 completion** (virtual media, serial console, TLS pinning)
+- Virtual media window: what is mounted (eject), mount by URL as CD/DVD or USB disk, the device's storage (mount, delete), uploads with progress, cancel and resume. As on the firmware, an interrupted upload stays as `.incomplete` and continues when the same file is uploaded again.
+- Serial console window: output with ANSI sequences filtered, a line input sent with the device's terminator, ⌃C/⌃D, baud rate. Output keeps arriving while the window is closed. Device → Extension Port switches ATX / DC / serial.
+- HTTPS devices: the firmware's self-signed mode signs a certificate per hostname with a device CA that it sends in the chain, so the app pins that CA on first use (same pin for LAN, .local and VPN names). A different CA stops the connection before any password is sent; the user can trust a new certificate explicitly. Publicly trusted certificates need no pin.
+- Emulator: HTTPS with a device CA, streaming uploads with supersede/resume and an upload throttle, the firmware's URL check before HTTP mounts, the serial channel with an echoing target.
+- Verified: Go tests (engine-level upload cancel/resume, serial round trip, TLS pin and mismatch), and `make -C macos selftest-extras`, which drives the app's own models and windows against the emulator over http and https (upload, mount, eject, delete, serial echo, probe with and without the pin).
+- Independent review of this work, all findings accepted and fixed with tests that fail without the fix:
+  - **Critical:** the first pinning design compared the chain's last certificate without checking that the leaf was signed by it. Since the device CA is public, an interceptor presenting its own leaf plus the real CA got the password (reproduced end to end). Each certificate must now be signed by the next; a regression test runs that interceptor.
+  - **High:** publicly trusted devices recorded no pin, so a later self-signed interceptor counted as a new first use. They are now pinned to public trust (`webpki`).
+  - **Medium:** a public certificate reached by IP pinned a shared intermediate (the leaf is pinned now); an unterminated escape sequence silenced the serial view (sequences are bounded and abort on control characters); closing a window left awaited calls hanging; a bigger partial upload under the same name made a new upload "succeed" without storing it (replaced, and every upload is checked on the device afterwards); the upload-cancel test was timing-dependent.
+  - The emulator's serial output now matches the firmware's console broker (`RX: ` line prefixes, `<BS>`-style control names, `[serial attached]` on open); the app shows it as the web UI does.
+
 **Open (next)**
 - Phase R benchmark and the Phase 2 pass criteria that depend on it.
-- Settings parity (Phase 4), virtual media and serial console UI, TLS trust-on-first-use, Developer ID signing.
+- Settings parity (Phase 4); notarization once credentials are stored.
 - Event-tap reliability needs an Accessibility grant on a signed build.
 - Relative mouse / pointer lock; audio.
+
+## 20. Execution report (2026-10-10)
+
+The plan was executed in one long working session by AI agents, with the PM away most of the time. This section records what was built against the plan, where it diverged and why, and what the execution taught. §19 has the per-phase status and verification details.
+
+### What was built
+
+| Plan item | Outcome |
+|---|---|
+| Phase 0: fork CI, dependency refresh, logging | Done (`07afb11`) |
+| Phase 1a: firmware-faithful emulator | Done, and taken further after review (strict RPC parameters, realistic reboot, HTTPS, uploads, serial) |
+| Phase 1b: engine restructure and fixes | Done (`2e81584`, review fixes in `ec054ce`) |
+| Phase 2: native spike | Done except the pass criteria that need Phase R measurements |
+| Phase 3: native MVP | Done except the settings UI (Phase 4 anyway) |
+| Phase R: benchmark | Not started: needs the HDMI rig and a sink window for safe input tests |
+| Phase 4: settings parity | Not started |
+| Developer ID signing | Done (Scio Labs team); notarization waits for stored credentials |
+
+### Where execution diverged from the plan
+
+| Plan said | What was done | Why |
+|---|---|---|
+| `/device` needs no login, so check the device ID before sending a password (S5/F4) | Check before login only where the device allows it; otherwise over RPC right after login, before any input. A 401 counts as a JetKVM only if `/device/status` answers like one. | Wrong premise: firmware 0.5.9 protects `/device`. A reviewer caught it by reading upstream. |
+| TLS pinning per `deviceId` (leaf certificate) | Pin the device CA that the chain is signed up to (the leaf if the chain ends without a self-signed root); publicly trusted devices are pinned to public trust | Firmware issues a different leaf per hostname, so a leaf pin would break across LAN, `.local` and VPN names |
+| NACK interval ~20 ms | 40 ms, at most 6 requests per packet | Matches the assembler's wait; fewer duplicate requests on lossy links |
+| CI with staticcheck and actionlint | Neither in CI; actionlint run locally | staticcheck cannot read go1.27 export data yet |
+| H.265 is a Should | Built and tested, but new devices default to H.264 | Its benefit on this device is unmeasured (Phase R) |
+| Phase order R ∥ 0 → 1a → 1b → 2 → 3 | 0 → 1a → 1b → 2 → 3, R still pending | R is blocked on hardware; the emulator made progress possible without it |
+| Typed RPC wrappers after schema generation | The app uses the engine's generic `rpc` command for media and power | Avoids writing wrappers twice; the emulator checks parameter names against the firmware |
+| Serial console (unspecified) | Line-based console with ANSI filtering, not a terminal emulator | Enough for boot logs and shells; a full terminal is a bigger, separate job |
+| Ad-hoc signing until team details arrive | Developer ID signing, hardened runtime; every signed build is copied to `~/Downloads` | The PM created the certificates during the session |
+| Self-test as a spike feature | Kept and extended into the main end-to-end check (`selftest`, `selftest-extras`) | It exercises the real app, engine and emulator together and caught real bugs |
+
+### Takeaways
+
+1. **Read the firmware, don't infer it.** The one wrong premise in the plan (`/device` being public) survived two plan reviews and was only caught by a reviewer reading `web.go`. Statements about device behaviour should cite upstream code.
+2. **A faithful emulator pays for itself.** Making the emulator stricter exposed real client bugs: void RPC responses, wrong method and parameter names, keepalive timing between key holds, and `Reboot()` reporting "client closed" for a reboot that succeeded.
+3. **Tests need negative controls.** Several tests could not fail (stats after close, keyframe assertions, a timing window too short to observe). Breaking the code on purpose and watching the test fail became routine, and was worth it.
+4. **Pinning is not authentication by itself.** The first TLS pin checked that the device CA appeared in the chain, not that the leaf was signed by it; the CA is public, so a proxy could pass. A reviewer proved it by capturing the password. Security code gets an attack test, not only a happy-path test.
+5. **Independent reviews found something every time.** Each review round (plan, three code reviewers, two follow-up passes) turned up at least one High issue. Reviewing the reviewers' fixes found more.
+6. **The development Mac itself causes flakiness.** Multiple network interfaces made ICE slow and flaky in tests; loopback-only ICE fixed it. Screen captures of app windows need Screen Recording permission for the shell.
+7. **Hardware stays the bottleneck.** Agents wrote and verified the code within a day; what remains unverified needs the device: latency against Safari, input on a real target, a password-protected device, TLS on the real firmware, VPN behaviour.
+
+### Next steps
+
+1. PM: connect the sink-window harness and run Phase R (latency, H.264 vs H.265, CPU).
+2. PM: store notarization credentials; then `make -C macos notarize` produces a shareable build.
+3. Try the app daily against `.107` with input, once input can safely go to a separate machine.
+4. Phase 4: generated schema, then the settings sections.
 
 ## Appendix A: Key sources
 
