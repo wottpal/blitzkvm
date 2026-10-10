@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>KVM quality pattern</title>
+<style>
+  html, body { margin: 0; background: #000; overflow: hidden; cursor: none; }
+  img { display: block; width: 1920px; height: 1080px; image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<img id="p" src="pattern.png">
+<script>
+  // f: full screen (needs a user gesture). s: scroll test on/off.
+  // 1-9: scroll speed = 2*N px per display frame (default 2 px = 120 px/s at 60 Hz).
+  const img = document.getElementById('p');
+  let scrolling = false, offset = 0, speed = 2;
+  function tick() {
+    if (!scrolling) return;
+    offset = (offset + speed) % 1080;
+    img.style.transform = `translateY(${-offset}px)`;
+    requestAnimationFrame(tick);
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key === 'f') document.documentElement.requestFullscreen();
+    if (e.key >= '1' && e.key <= '9') speed = 2 * Number(e.key);
+    if (e.key === 's') {
+      scrolling = !scrolling;
+      if (!scrolling) { offset = 0; img.style.transform = ''; } else requestAnimationFrame(tick);
+    }
+  });
+  document.addEventListener('click', () => document.documentElement.requestFullscreen());
+</script>
+</body>
+</html>
