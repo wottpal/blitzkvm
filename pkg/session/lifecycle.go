@@ -224,6 +224,7 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 			s.CertSHA256 = c.pin.Pinned()
 		})
 		go c.bootstrap(ctx, cl)
+		go c.autoQuality(ctx, cl)
 
 		reason := c.watch(ctx, cl)
 		_ = cl.Close()

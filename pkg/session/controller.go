@@ -70,6 +70,11 @@ type Config struct {
 	OnAccessUnit func(video.AccessUnit)
 	// NewVideoSink creates the video decoder (see client.Config).
 	NewVideoSink func(ctx context.Context, codec video.Codec) (video.Sink, error)
+	// AutoQuality adapts the device's stream quality to the link (see
+	// autoquality.go); otherwise QualityLevel (a ladder level name, if set)
+	// is applied on each connect.
+	AutoQuality  bool
+	QualityLevel string
 }
 
 type Snapshot struct {
@@ -110,6 +115,10 @@ type Snapshot struct {
 	FailsafeReason string
 	// CertSHA256 is the pinned certificate authority of an https device.
 	CertSHA256 string
+	// AutoQuality is on when the quality follows the link; QualityLevel
+	// names the current rung of the ladder.
+	AutoQuality  bool
+	QualityLevel string
 }
 
 type Controller struct {
@@ -129,6 +138,13 @@ type Controller struct {
 	reconnectNow bool
 	// wake interrupts a retry wait (ReconnectNow).
 	wake chan struct{}
+
+	// autoRunning marks clients with a running quality governor.
+	autoRunning map[*client.Client]bool
+	// encoderParamsOK caches, for encoderParamsClient, whether the device
+	// takes live encoder parameters (patched firmware).
+	encoderParamsClient *client.Client
+	encoderParamsOK     bool
 
 	pasteMu     sync.Mutex
 	pasteCancel context.CancelFunc
@@ -239,9 +255,10 @@ func New(cfg Config) *Controller {
 		pin:  pin,
 		wake: make(chan struct{}, 1),
 		snapshot: Snapshot{
-			Phase:   PhaseIdle,
-			Status:  "idle",
-			BaseURL: cfg.BaseURL,
+			Phase:       PhaseIdle,
+			Status:      "idle",
+			BaseURL:     cfg.BaseURL,
+			AutoQuality: cfg.AutoQuality,
 		},
 	}
 }

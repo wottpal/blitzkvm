@@ -183,6 +183,17 @@ func (e *Engine) command(cmd engineipc.Command) error {
 			return nil
 		}
 		go e.withController(cmd, func(c *session.Controller) error { return c.SetSerialSettings(settings) })
+	case "setAutoQuality":
+		if c := e.controller(); c != nil {
+			c.SetAutoQuality(cmd.AutoQuality)
+		}
+		e.reply(cmd.ID, nil, "")
+	case "setQualityLevel":
+		go e.withController(cmd, func(c *session.Controller) error {
+			ctx, cancel := context.WithTimeout(e.ctx, defaultRPCWait)
+			defer cancel()
+			return c.SetQualityLevel(ctx, cmd.QualityLevel)
+		})
 	case "upload":
 		go e.upload(cmd)
 	case "cancelUpload":
@@ -294,6 +305,8 @@ func (e *Engine) startSession(baseURL string, cmd engineipc.Command) {
 		CertSHA256:       cmd.CertSHA256,
 		Reconnect:        true,
 		OfferH265:        cmd.OfferH265,
+		AutoQuality:      cmd.AutoQuality,
+		QualityLevel:     cmd.QualityLevel,
 		OnAccessUnit:     e.onAccessUnit,
 		OnSerialText:     e.onSerialText,
 	})

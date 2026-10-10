@@ -78,18 +78,24 @@ type Command struct {
 	// Cmd is one of: connect, disconnect, reconnect, rpc, paste,
 	// cancelPaste, releaseAll, ping, serialSend, setExtension (Text),
 	// setSerialSettings (Params: session.SerialSettings), upload,
-	// cancelUpload.
+	// cancelUpload, setAutoQuality (AutoQuality), setQualityLevel
+	// (QualityLevel).
 	Cmd      string `json:"cmd"`
 	BaseURL  string `json:"baseURL,omitempty"`
 	Password string `json:"password,omitempty"`
 	DeviceID string `json:"deviceID,omitempty"`
 	// CertSHA256 pins an https device's certificate authority (connect).
-	CertSHA256 string          `json:"certSHA256,omitempty"`
-	OfferH265  bool            `json:"offerH265,omitempty"`
-	Method     string          `json:"method,omitempty"`
-	Params     json.RawMessage `json:"params,omitempty"`
-	Text       string          `json:"text,omitempty"`
-	Delay      int             `json:"delay,omitempty"`
+	CertSHA256 string `json:"certSHA256,omitempty"`
+	OfferH265  bool   `json:"offerH265,omitempty"`
+	// AutoQuality adapts the stream quality to the link (connect,
+	// setAutoQuality). QualityLevel names a fixed level of the quality
+	// ladder (connect without AutoQuality, setQualityLevel).
+	AutoQuality  bool            `json:"autoQuality,omitempty"`
+	QualityLevel string          `json:"qualityLevel,omitempty"`
+	Method       string          `json:"method,omitempty"`
+	Params       json.RawMessage `json:"params,omitempty"`
+	Text         string          `json:"text,omitempty"`
+	Delay        int             `json:"delay,omitempty"`
 	// Path is a local file to upload to the device's storage (upload).
 	Path string `json:"path,omitempty"`
 	// Target is the ID of the upload command to cancel (cancelUpload).

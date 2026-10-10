@@ -44,14 +44,6 @@ public enum EngineProtocol {
         return encode(.absPointer, p)
     }
 
-    public static func relativePointer(dx: Int16, dy: Int16, buttons: UInt8) -> Data {
-        var p = Data(capacity: 5)
-        p.appendBigEndian(UInt16(bitPattern: dx))
-        p.appendBigEndian(UInt16(bitPattern: dy))
-        p.append(buttons)
-        return encode(.relPointer, p)
-    }
-
     public static func wheel(y: Int8, x: Int8) -> Data {
         encode(.wheel, Data([UInt8(bitPattern: y), UInt8(bitPattern: x)]))
     }
@@ -110,6 +102,10 @@ public struct EngineCommand: Codable, Equatable {
     /// Pins an https device's certificate authority (SHA-256 hex).
     public var certSHA256: String?
     public var offerH265: Bool?
+    /// Adapt the stream quality to the link (connect, setAutoQuality).
+    public var autoQuality: Bool?
+    /// A fixed quality ladder level (connect, setQualityLevel).
+    public var qualityLevel: String?
     public var method: String?
     public var params: JSONValue?
     public var text: String?
@@ -120,7 +116,8 @@ public struct EngineCommand: Codable, Equatable {
     public var target: Int64?
 
     public init(id: Int64? = nil, cmd: String, baseURL: String? = nil, password: String? = nil,
-                deviceID: String? = nil, certSHA256: String? = nil, offerH265: Bool? = nil, method: String? = nil,
+                deviceID: String? = nil, certSHA256: String? = nil, offerH265: Bool? = nil, autoQuality: Bool? = nil,
+                qualityLevel: String? = nil, method: String? = nil,
                 params: JSONValue? = nil, text: String? = nil, delay: Int? = nil, path: String? = nil, target: Int64? = nil) {
         self.id = id
         self.cmd = cmd
@@ -129,6 +126,8 @@ public struct EngineCommand: Codable, Equatable {
         self.deviceID = deviceID
         self.certSHA256 = certSHA256
         self.offerH265 = offerH265
+        self.autoQuality = autoQuality
+        self.qualityLevel = qualityLevel
         self.method = method
         self.params = params
         self.text = text
@@ -161,6 +160,9 @@ public struct SessionSnapshot: Decodable, Equatable {
     public var PasteInProgress: Bool?
     public var KeyboardLEDs: Int?
     public var ActiveExtension: String?
+    /// Whether the engine adapts quality to the link, and its current level.
+    public var AutoQuality: Bool?
+    public var QualityLevel: String?
     /// The pinned certificate authority of an https device.
     public var CertSHA256: String?
     /// Go session.SerialSettings (field names as in Go), kept as JSON so a

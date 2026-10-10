@@ -110,6 +110,9 @@ type SerialConsoleEvent struct {
 }
 
 type StatsSnapshot struct {
+	// SampledAt is when the transport statistics were collected (once a
+	// second); zero before the first sample.
+	SampledAt       time.Time
 	SignalingMode   SignalingMode
 	RTCState        webrtc.PeerConnectionState
 	HIDReady        bool
@@ -1417,6 +1420,7 @@ func (c *Client) collectStats(now time.Time) {
 	}
 	c.statsHistory = trimmed
 	snap.BitrateKbps, snap.FramesPerSecond = computeSmoothedRates(c.statsHistory)
+	snap.SampledAt = now
 	c.stats = snap
 	c.statsMu.Unlock()
 }
