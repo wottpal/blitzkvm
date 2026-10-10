@@ -21,6 +21,9 @@ struct Options {
     var crashEngineAfter: Double?
     var snapshotPath: String?
     var injectInput = false
+    /// Never sends keyboard or mouse input (safe testing against a device
+    /// whose target is this very Mac).
+    var viewOnly = false
     var windowSize: (Double, Double)?
     var scaling: ScalingMode = .fit
     var profile: ModifierProfile = .mac
@@ -42,6 +45,7 @@ struct Options {
             case "--crash-engine-after": o.crashEngineAfter = next().flatMap(Double.init)
             case "--snapshot": o.snapshotPath = next()
             case "--inject-input": o.injectInput = true
+            case "--view-only": o.viewOnly = true
             case "--window-size":
                 let parts = (next() ?? "").split(separator: "x").compactMap { Double($0) }
                 if parts.count == 2 { o.windowSize = (parts[0], parts[1]) }
@@ -92,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = DeviceWindowController(address: device, password: options.password, offerH265: options.offerH265, engineURL: engineURL)
         controller.videoView.scalingMode = options.scaling
         controller.input.modifierProfile = options.profile
+        controller.input.viewOnly = options.viewOnly
         windows.append(controller)
         if let seconds = options.selfTestSeconds {
             selfTest = SelfTest(controller: controller, seconds: seconds, crashEngineAfter: options.crashEngineAfter, snapshotPath: options.snapshotPath)

@@ -15,6 +15,8 @@ final class InputController {
     var onCaptureChange: ((Bool) -> Void)?
     var modifierProfile: ModifierProfile = .mac
     var invertScroll = false
+    /// When set, nothing is ever sent and capture never engages.
+    var viewOnly = false
 
     private(set) var captured = false
     private var pressedUsages = Set<UInt8>()
@@ -32,7 +34,7 @@ final class InputController {
     // MARK: Capture
 
     func setCaptured(_ on: Bool) {
-        guard on != captured else { return }
+        guard on != captured, !(on && viewOnly) else { return }
         captured = on
         if !on {
             releaseAll()
@@ -156,6 +158,7 @@ final class InputController {
     }
 
     private func sendKey(_ usage: UInt8, down: Bool) {
+        guard !viewOnly else { return }
         if down {
             pressedUsages.insert(usage)
         } else {
@@ -167,6 +170,7 @@ final class InputController {
     /// Releases every key and button we pressed on the remote (focus loss,
     /// capture release): nothing may stay stuck down there.
     func releaseAll() {
+        guard !viewOnly else { return }
         for usage in pressedUsages {
             send(EngineProtocol.key(hid: usage, pressed: false))
         }
@@ -197,7 +201,7 @@ final class InputController {
     }
 
     func mouse(at point: (Double, Double), in layout: VideoLayout, buttons: UInt8) {
-        guard let (x, y) = layout.absolutePosition(px: point.0, py: point.1) else { return }
+        guard !viewOnly, let (x, y) = layout.absolutePosition(px: point.0, py: point.1) else { return }
         // Moves outside the video only matter while a button is held (drags).
         if !layout.contains(px: point.0, py: point.1) && buttons == 0 && lastButtons == 0 { return }
         lastButtons = buttons
@@ -205,6 +209,7 @@ final class InputController {
     }
 
     func scroll(_ event: NSEvent) {
+        guard !viewOnly else { return }
         var dy = Double(event.scrollingDeltaY)
         var dx = Double(event.scrollingDeltaX)
         if invertScroll { dy = -dy; dx = -dx }
