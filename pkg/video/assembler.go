@@ -57,10 +57,8 @@ const (
 	// arrive a moment after connecting). Erring long only costs time when a
 	// packet is actually missing; erring short turns a repairable loss into
 	// a freeze until the next keyframe.
-	assumedRTT = 100 * time.Millisecond
-	// nackInterval matches the NACK generator interval configured by the client.
-	nackInterval       = 20 * time.Millisecond
-	minKeyframeRequest = time.Second
+	assumedRTT                 = 100 * time.Millisecond
+	minKeyframeRequestInterval = time.Second
 )
 
 // Assembler turns an RTP packet stream into complete access units.
@@ -74,10 +72,22 @@ const (
 // discards everything until a keyframe, asking the sender for one (rate
 // limited). Emitting later P-frames after a lost frame would only produce
 // corrupted pictures.
+// NACKInterval is how often the client's NACK generator asks for missing
+// packets; the assembler's retransmission wait is derived from it.
+const NACKInterval = 40 * time.Millisecond
+
 type Assembler struct {
 	codec           Codec
 	deliver         func(AccessUnit)
 	requestKeyframe func()
+
+	// deliverMu serialises Push and Tick from assembly through delivery, so
+	// frames reach the decoder in order even though they run on different
+	// goroutines.
+	deliverMu sync.Mutex
+	// seenParams: parameter sets (SPS/PPS, VPS/SPS/PPS) have been delivered,
+	// so any later IDR is decodable on its own.
+	seenParams bool
 
 	mu              sync.Mutex
 	pending         map[uint16]pendingPacket
@@ -129,7 +139,7 @@ func (a *Assembler) gapDeadline() time.Duration {
 	if rtt <= 0 {
 		rtt = assumedRTT
 	}
-	d := 2*nackInterval + 2*rtt + 20*time.Millisecond
+	d := 2*NACKInterval + 2*rtt + 20*time.Millisecond
 	return min(max(d, minGapDeadline), maxGapDeadline)
 }
 
@@ -138,6 +148,8 @@ func seqLess(a, b uint16) bool { return int16(a-b) < 0 }
 
 // Push adds a packet. now is its arrival time.
 func (a *Assembler) Push(pkt *rtp.Packet, now time.Time) {
+	a.deliverMu.Lock()
+	defer a.deliverMu.Unlock()
 	var out []AccessUnit
 	a.mu.Lock()
 	seq := pkt.SequenceNumber
@@ -165,6 +177,8 @@ func (a *Assembler) Push(pkt *rtp.Packet, now time.Time) {
 
 // Tick enforces the retransmission deadline when no packets arrive.
 func (a *Assembler) Tick(now time.Time) {
+	a.deliverMu.Lock()
+	defer a.deliverMu.Unlock()
 	a.mu.Lock()
 	out := a.drainLocked(now)
 	a.mu.Unlock()
@@ -254,13 +268,19 @@ func (a *Assembler) drainLocked(now time.Time) []AccessUnit {
 			a.enterKeyframeWaitLocked(now)
 			continue
 		}
+		hasParams := HasParameterSets(a.codec, au.Data)
 		if a.waitingKeyframe {
-			if !au.Keyframe {
+			// Until parameter sets have been seen, an IDR alone (e.g. joined
+			// after its SPS/PPS packet) cannot be decoded.
+			if !au.Keyframe || (!a.seenParams && !hasParams) {
 				a.stats.DroppedFrames++
 				a.maybeRequestKeyframeLocked(now)
 				continue
 			}
 			a.waitingKeyframe = false
+		}
+		if hasParams {
+			a.seenParams = true
 		}
 		a.stats.Frames++
 		out = append(out, au)
@@ -367,7 +387,7 @@ func (a *Assembler) enterKeyframeWaitLocked(now time.Time) {
 }
 
 func (a *Assembler) maybeRequestKeyframeLocked(now time.Time) {
-	if a.requestKeyframe == nil || now.Sub(a.lastKeyframeReq) < minKeyframeRequest {
+	if a.requestKeyframe == nil || now.Sub(a.lastKeyframeReq) < minKeyframeRequestInterval {
 		return
 	}
 	a.lastKeyframeReq = now
@@ -428,6 +448,39 @@ func IsKeyframe(codec Codec, annexB []byte) bool {
 		return true
 	})
 	return found
+}
+
+// HasParameterSets reports whether an access unit carries the parameter sets
+// a decoder needs to start: SPS and PPS (H.264) or VPS, SPS and PPS (H.265).
+func HasParameterSets(codec Codec, annexB []byte) bool {
+	var vps, sps, pps bool
+	ForEachNAL(annexB, func(nal []byte) bool {
+		if len(nal) == 0 {
+			return true
+		}
+		if codec == CodecH265 {
+			switch (nal[0] >> 1) & 0x3f {
+			case 32:
+				vps = true
+			case 33:
+				sps = true
+			case 34:
+				pps = true
+			}
+		} else {
+			switch nal[0] & 0x1f {
+			case 7:
+				sps = true
+			case 8:
+				pps = true
+			}
+		}
+		return true
+	})
+	if codec == CodecH265 {
+		return vps && sps && pps
+	}
+	return sps && pps
 }
 
 // ForEachNAL calls fn with each NAL unit (without start code) of an Annex-B

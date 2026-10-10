@@ -72,6 +72,9 @@ class VideoView: NSView {
         metalLayer.maximumDrawableCount = 2
         metalLayer.displaySyncEnabled = true
         metalLayer.backgroundColor = NSColor.black.cgColor
+        // The shader outputs Rec.709-encoded RGB; tag it so wide-gamut (P3)
+        // displays color-match instead of oversaturating.
+        metalLayer.colorspace = CGColorSpace(name: CGColorSpace.itur_709)
         layer = metalLayer
         CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)
         do {
@@ -210,7 +213,7 @@ class VideoView: NSView {
         texture.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
         guard let provider = CGDataProvider(data: Data(bytes) as CFData),
               let image = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  space: CGColorSpace(name: CGColorSpace.itur_709)!,
                                   bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
                                   provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
               let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { return false }

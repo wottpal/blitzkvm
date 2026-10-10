@@ -80,6 +80,7 @@ type Command struct {
 	Cmd       string          `json:"cmd"`
 	BaseURL   string          `json:"baseURL,omitempty"`
 	Password  string          `json:"password,omitempty"`
+	DeviceID  string          `json:"deviceID,omitempty"`
 	OfferH265 bool            `json:"offerH265,omitempty"`
 	Method    string          `json:"method,omitempty"`
 	Params    json.RawMessage `json:"params,omitempty"`

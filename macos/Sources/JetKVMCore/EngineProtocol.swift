@@ -104,6 +104,9 @@ public struct EngineCommand: Codable, Equatable {
     public var cmd: String
     public var baseURL: String?
     public var password: String?
+    /// The engine verifies this ID before any input: before login when the
+    /// device answers GET /device without one, else over RPC after login.
+    public var deviceID: String?
     public var offerH265: Bool?
     public var method: String?
     public var params: JSONValue?
@@ -111,11 +114,12 @@ public struct EngineCommand: Codable, Equatable {
     public var delay: Int?
 
     public init(id: Int64? = nil, cmd: String, baseURL: String? = nil, password: String? = nil,
-                offerH265: Bool? = nil, method: String? = nil, params: JSONValue? = nil, text: String? = nil, delay: Int? = nil) {
+                deviceID: String? = nil, offerH265: Bool? = nil, method: String? = nil, params: JSONValue? = nil, text: String? = nil, delay: Int? = nil) {
         self.id = id
         self.cmd = cmd
         self.baseURL = baseURL
         self.password = password
+        self.deviceID = deviceID
         self.offerH265 = offerH265
         self.method = method
         self.params = params

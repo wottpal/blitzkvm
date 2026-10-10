@@ -21,8 +21,18 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     var onRestart: ((String) -> Void)?
     /// Called when a session connects (to persist device ID, last use).
     var onConnected: ((DeviceWindowController) -> Void)?
-    /// Called when the user enters a password (to store it in the Keychain).
-    var onPasswordEntered: ((DeviceWindowController, String) -> Void)?
+    /// The device ID became known after connecting; passes the device as it
+    /// was before (its credential account may change).
+    var onIdentityLearned: ((DeviceWindowController, Device) -> Void)?
+    /// Called with a password the user typed, once it has been accepted by
+    /// the device (to store it in the Keychain).
+    var onPasswordAccepted: ((DeviceWindowController, String) -> Void)?
+    /// Supplies the current stored password on reconnect.
+    var credentialProvider: ((Device) -> String?)?
+    /// Called when the window closes for good.
+    var onClose: ((DeviceWindowController) -> Void)?
+    private var unverifiedPassword: String?
+    private let codecLock = NSLock()
     private var statusTimer: Timer?
     private var isShutDown = false
     private var wasConnected = false
@@ -102,7 +112,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func start() throws {
         try engine.start()
-        engine.connect(baseURL: address, password: password, offerH265: offerH265)
+        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, offerH265: offerH265)
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshStatus() }
         startPathMonitor()
     }
@@ -112,8 +122,13 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             self.offerH265 = offerH265
             device.offerH265 = offerH265
         }
+        if unverifiedPassword == nil, let stored = credentialProvider?(device) {
+            // Pick up a password changed in the device library meanwhile.
+            password = stored
+        }
+        pendingPasteID = nil
         decoder.reset()
-        engine.connect(baseURL: address, password: password, offerH265: self.offerH265)
+        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, offerH265: self.offerH265)
     }
 
     /// Ends the session: releases input and stops the engine helper.
@@ -125,6 +140,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         statusTimer?.invalidate()
         pathMonitor?.cancel()
         engine.stop()
+        decoder.reset()
     }
 
     /// When the network comes back (Wi-Fi switch, VPN up, wake from sleep),
@@ -136,7 +152,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             DispatchQueue.main.async {
                 guard let self else { return }
                 defer { lastStatus = path.status }
-                if path.status == .satisfied, lastStatus != nil, lastStatus != .satisfied, self.snapshot.Phase != "connected" {
+                // Only shorten a retry already in progress: never reconnect
+                // after a takeover (it would kick the other user) or an
+                // auth failure (it would count toward the login lockout).
+                let retrying = ["reconnecting", "disconnected", "connecting"].contains(self.snapshot.Phase)
+                if path.status == .satisfied, lastStatus != nil, lastStatus != .satisfied, retrying {
                     self.engine.send(command: EngineCommand(cmd: "reconnect"))
                 }
             }
@@ -192,23 +212,39 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     // MARK: EngineProcessDelegate
 
+    /// Called on the engine's I/O queue.
     func engine(_ engine: EngineProcess, didReceive header: AccessUnitHeader, data: Data) {
+        codecLock.lock()
         codecName = header.codec == .h265 ? "H.265" : "H.264"
+        codecLock.unlock()
         decoder.decode(header, annexB: data)
     }
 
     func engine(_ engine: EngineProcess, didUpdate snapshot: SessionSnapshot) {
         self.snapshot = snapshot
-        if snapshot.Phase == "auth_failed" && password == nil {
+        if snapshot.Phase == "auth_failed" && !snapshot.Status.contains("locked") {
+            // Wrong, empty or changed password: always ask (the engine has
+            // stopped retrying). A lockout (429) must not trigger more tries.
+            unverifiedPassword = nil
             promptForPassword()
         }
         if snapshot.Phase == "connected" && !wasConnected {
             wasConnected = true
-            if let id = snapshot.DeviceID, !id.isEmpty, device.deviceID == nil { device.deviceID = id }
+            if let accepted = unverifiedPassword {
+                unverifiedPassword = nil
+                onPasswordAccepted?(self, accepted)
+            }
             device.lastConnected = Date()
             onConnected?(self)
         } else if snapshot.Phase != "connected" {
             wasConnected = false
+        }
+        // The ID loads in the background after connecting.
+        if snapshot.Phase == "connected", let id = snapshot.DeviceID, !id.isEmpty, device.deviceID == nil {
+            let before = device
+            device.deviceID = id
+            engine.pin(deviceID: id)
+            onIdentityLearned?(self, before)
         }
         refreshStatus()
     }
@@ -232,6 +268,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     }
 
     func engineDidRestart(_ engine: EngineProcess, reason: String) {
+        pendingPasteID = nil
         decoder.reset()
         onRestart?(reason)
         refreshStatus(extra: "engine restarted (\(reason))")
@@ -250,7 +287,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .alertFirstButtonReturn else { return }
             self.password = field.stringValue
-            self.onPasswordEntered?(self, field.stringValue)
+            // Stored only once the device accepts it.
+            self.unverifiedPassword = field.stringValue
             self.reconnect()
         }
     }
@@ -261,7 +299,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         if let signal = snapshot.VideoSignal, signal != "ready", !signal.isEmpty {
             parts.append("HDMI: \(signal.replacingOccurrences(of: "_", with: " "))")
         }
+        codecLock.lock()
         parts.append(codecName)
+        codecLock.unlock()
         if let fps = lastStats["FramesPerSecond"] as? Double { parts.append(String(format: "%.0f fps", fps)) }
         if let kbps = lastStats["BitrateKbps"] as? Double { parts.append(String(format: "%.1f Mbit/s", kbps / 1000)) }
         if let rtt = lastStats["RoundTripMs"] as? Double, rtt > 0 { parts.append(String(format: "RTT %.0f ms", rtt)) }
@@ -311,6 +351,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func windowWillClose(_ notification: Notification) {
         shutdown()
+        onClose?(self)
     }
 }
 

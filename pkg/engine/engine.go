@@ -132,7 +132,7 @@ func (e *Engine) command(cmd engineipc.Command) error {
 			e.reply(cmd.ID, err, "")
 			return nil
 		}
-		e.startSession(baseURL, cmd.Password, cmd.OfferH265)
+		e.startSession(baseURL, cmd.Password, cmd.DeviceID, cmd.OfferH265)
 		e.reply(cmd.ID, nil, "")
 	case "disconnect":
 		e.stopSession()
@@ -209,14 +209,15 @@ func (e *Engine) paste(cmd engineipc.Command) {
 	e.reply(cmd.ID, err, input.InvalidRunesString(invalid))
 }
 
-func (e *Engine) startSession(baseURL, password string, offerH265 bool) {
+func (e *Engine) startSession(baseURL, password, deviceID string, offerH265 bool) {
 	e.stopSession()
 	ctrl := session.New(session.Config{
-		BaseURL:      baseURL,
-		Password:     password,
-		Reconnect:    true,
-		OfferH265:    offerH265,
-		OnAccessUnit: e.onAccessUnit,
+		BaseURL:          baseURL,
+		Password:         password,
+		ExpectedDeviceID: deviceID,
+		Reconnect:        true,
+		OfferH265:        offerH265,
+		OnAccessUnit:     e.onAccessUnit,
 	})
 	e.mu.Lock()
 	e.ctrl = ctrl

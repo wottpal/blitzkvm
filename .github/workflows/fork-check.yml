@@ -32,12 +32,13 @@ jobs:
         run: go vet ./...
 
       - name: Generated code is up to date
-        run: |
-          go generate ./...
-          git diff --exit-code
+        run: make generate-check
 
       - name: Test (race)
         run: go test -race -p 1 -count=1 ./...
+
+      - name: Test (timing-sensitive, skipped under race)
+        run: make test-timing
 
       - name: Test vendored openh264 module
         working-directory: third_party/openh264-go

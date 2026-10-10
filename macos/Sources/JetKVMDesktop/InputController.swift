@@ -72,6 +72,9 @@ final class InputController {
     private func removeEventTap() {
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
+            // Without invalidation the tap stays registered with the window
+            // server (holding an unretained pointer to self).
+            CFMachPortInvalidate(tap)
         }
         if let source = tapSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
@@ -109,7 +112,10 @@ final class InputController {
 
     /// Returns true if the event was consumed.
     func handle(_ event: NSEvent) -> Bool {
-        guard captured, eventTap == nil else { return false }
+        // With the tap active, captured keys are swallowed before AppKit
+        // sees them; anything that still arrives here bypassed the tap
+        // (Secure Event Input, tap briefly disabled) and must be forwarded.
+        guard captured else { return false }
         switch event.type {
         case .keyDown:
             if !event.isARepeat { key(keyCode: event.keyCode, down: true) }
@@ -126,6 +132,8 @@ final class InputController {
     }
 
     private func key(keyCode: UInt16, down: Bool) {
+        // ⌃⌘ followed by a key is a shortcut (⌃⌘Q, ⌃⌘F), not the release chord.
+        if down { chordArmed = false }
         guard let usage = KeyMap.hidUsage(keyCode: keyCode, isISO: isISO) else { return }
         sendKey(usage, down: down)
     }
@@ -193,7 +201,9 @@ final class InputController {
     func mouse(_ event: NSEvent, at point: (Double, Double), in layout: VideoLayout) {
         let bit: UInt8 = event.buttonNumber < 5 ? UInt8(1) << UInt8(event.buttonNumber) : 0
         switch event.type {
-        case .leftMouseDown, .rightMouseDown, .otherMouseDown: buttonState |= bit
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            buttonState |= bit
+            chordArmed = false
         case .leftMouseUp, .rightMouseUp, .otherMouseUp: buttonState &= ~bit
         default: break
         }
@@ -209,7 +219,9 @@ final class InputController {
     }
 
     func scroll(_ event: NSEvent) {
-        guard !viewOnly else { return }
+        // macOS delivers scroll events to inactive windows; only a captured
+        // (focused) session may scroll the remote.
+        guard !viewOnly, captured else { return }
         var dy = Double(event.scrollingDeltaY)
         var dx = Double(event.scrollingDeltaX)
         if invertScroll { dy = -dy; dx = -dx }

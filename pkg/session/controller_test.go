@@ -22,10 +22,11 @@ func TestControllerConnects(t *testing.T) {
 	defer cancel()
 
 	controller := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
-		Reconnect:  true,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
 	})
 	controller.Start(ctx)
 	defer controller.Stop()
@@ -48,12 +49,13 @@ func TestControllerReconnectsAfterDisconnect(t *testing.T) {
 	defer cancel()
 
 	controller := New(Config{
-		BaseURL:       srv.BaseURL(),
-		Password:      "secret",
-		RPCTimeout:    2 * time.Second,
-		Reconnect:     true,
-		ReconnectBase: 100 * time.Millisecond,
-		ReconnectMax:  300 * time.Millisecond,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
+		ReconnectBase:   100 * time.Millisecond,
+		ReconnectMax:    300 * time.Millisecond,
 	})
 	controller.Start(ctx)
 	defer controller.Stop()
@@ -76,16 +78,18 @@ func TestControllerTransitionsToOtherSession(t *testing.T) {
 	defer cancel()
 
 	first := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
-		Reconnect:  true,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
 	})
 	second := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
-		Reconnect:  true,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
 	})
 	first.Start(ctx)
 	defer first.Stop()
@@ -105,11 +109,12 @@ func TestControllerReceivesVideoAndForwardsInput(t *testing.T) {
 	defer cancel()
 
 	controller := New(Config{
-		BaseURL:      srv.BaseURL(),
-		Password:     "secret",
-		RPCTimeout:   2 * time.Second,
-		Reconnect:    true,
-		NewVideoSink: openh264.NewSink,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
+		NewVideoSink:    openh264.NewSink,
 	})
 	controller.Start(ctx)
 	defer controller.Stop()
@@ -187,6 +192,7 @@ func TestControllerSetQualitySucceedsWhenWriteAckIsDropped(t *testing.T) {
 
 	controller := New(Config{
 		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
 		Password:        "secret",
 		RPCTimeout:      300 * time.Millisecond,
 		MutationTimeout: 2 * time.Second,
@@ -212,6 +218,7 @@ func TestControllerSetKeyboardLayoutSucceedsWhenWriteAckIsDropped(t *testing.T) 
 
 	controller := New(Config{
 		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
 		Password:        "secret",
 		RPCTimeout:      300 * time.Millisecond,
 		MutationTimeout: 2 * time.Second,
@@ -237,6 +244,7 @@ func TestControllerSetUSBDevicesSucceedsWhenWriteAckIsDropped(t *testing.T) {
 
 	controller := New(Config{
 		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
 		Password:        "secret",
 		RPCTimeout:      300 * time.Millisecond,
 		MutationTimeout: 2 * time.Second,
@@ -273,10 +281,11 @@ func TestControllerATXStateAndActions(t *testing.T) {
 	srv.SetATXState(true, false)
 
 	controller := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
-		Reconnect:  true,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
 	})
 	controller.Start(ctx)
 	defer controller.Stop()
@@ -328,10 +337,11 @@ func TestControllerSetActiveExtension(t *testing.T) {
 	defer cancel()
 
 	controller := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
-		Reconnect:  true,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
 	})
 	controller.Start(ctx)
 	defer controller.Stop()
@@ -355,10 +365,11 @@ func TestControllerDCAndSerialExtensionRPCs(t *testing.T) {
 	defer cancel()
 
 	controller := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
-		Reconnect:  true,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
 	})
 	controller.Start(ctx)
 	defer controller.Stop()
@@ -418,10 +429,11 @@ func TestControllerVirtualMediaURLMountAndUnmount(t *testing.T) {
 	defer cancel()
 
 	controller := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
-		Reconnect:  true,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
 	})
 	controller.Start(ctx)
 	defer controller.Stop()
@@ -485,9 +497,10 @@ func TestControllerLocalPasswordLifecycle(t *testing.T) {
 	}
 
 	controller := New(Config{
-		BaseURL:    srv.BaseURL(),
-		RPCTimeout: 2 * time.Second,
-		Reconnect:  true,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
 	})
 	controller.Start(ctx)
 	defer controller.Stop()
@@ -534,10 +547,11 @@ func TestControllerUploadAndMountStorageFile(t *testing.T) {
 	defer cancel()
 
 	controller := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
-		Reconnect:  true,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
 	})
 	controller.Start(ctx)
 	defer controller.Stop()
@@ -613,12 +627,17 @@ func startEmulator(t *testing.T) (*emulator.Server, context.Context, context.Can
 
 func startFaultedEmulator(t *testing.T, faults emulator.FaultConfig) (*emulator.Server, context.Context, context.CancelFunc) {
 	t.Helper()
-	srv, err := emulator.NewServer(emulator.Config{
-		ListenAddr: "127.0.0.1:0",
-		AuthMode:   emulator.AuthModePassword,
-		Password:   "secret",
-		Faults:     faults,
-	})
+	return startEmulatorWith(t, emulator.Config{Faults: faults})
+}
+
+// startEmulatorWith starts a password-protected, loopback-only emulator.
+func startEmulatorWith(t *testing.T, cfg emulator.Config) (*emulator.Server, context.Context, context.CancelFunc) {
+	t.Helper()
+	cfg.ListenAddr = "127.0.0.1:0"
+	cfg.AuthMode = emulator.AuthModePassword
+	cfg.Password = "secret"
+	cfg.ICELoopbackOnly = true
+	srv, err := emulator.NewServer(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -691,7 +710,7 @@ func TestBackoffNeverOverflowsAndStaysBounded(t *testing.T) {
 func TestControllerReportsNoSignal(t *testing.T) {
 	srv, ctx, cancel := startEmulator(t)
 	defer cancel()
-	controller := New(Config{BaseURL: srv.BaseURL(), Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true})
+	controller := New(Config{BaseURL: srv.BaseURL(), ICELoopbackOnly: true, Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true})
 	controller.Start(ctx)
 	defer controller.Stop()
 	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
@@ -711,7 +730,8 @@ func TestControllerFollowsRebootRedirect(t *testing.T) {
 	srv, ctx, cancel := startEmulator(t)
 	defer cancel()
 	controller := New(Config{
-		BaseURL: srv.BaseURL(), Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true, Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true,
 		ReconnectBase: time.Second, ReconnectMax: 2 * time.Second,
 	})
 	controller.Start(ctx)
@@ -728,7 +748,7 @@ func TestControllerFollowsRebootRedirect(t *testing.T) {
 func TestConnectedBeforeSlowBootstrapFinishes(t *testing.T) {
 	srv, ctx, cancel := startFaultedEmulator(t, emulator.FaultConfig{DropRPCMethod: "getEDID"})
 	defer cancel()
-	controller := New(Config{BaseURL: srv.BaseURL(), Password: "secret", RPCTimeout: 3 * time.Second, Reconnect: true})
+	controller := New(Config{BaseURL: srv.BaseURL(), ICELoopbackOnly: true, Password: "secret", RPCTimeout: 3 * time.Second, Reconnect: true})
 	controller.Start(ctx)
 	defer controller.Stop()
 	// getEDID never answers (as on a device without HDMI signal); input must
@@ -747,7 +767,7 @@ func TestConnectedBeforeSlowBootstrapFinishes(t *testing.T) {
 func TestReleaseAllInputClearsRemoteState(t *testing.T) {
 	srv, ctx, cancel := startEmulator(t)
 	defer cancel()
-	controller := New(Config{BaseURL: srv.BaseURL(), Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true})
+	controller := New(Config{BaseURL: srv.BaseURL(), ICELoopbackOnly: true, Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true})
 	controller.Start(ctx)
 	defer controller.Stop()
 	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
@@ -778,5 +798,97 @@ func TestReleaseAllInputClearsRemoteState(t *testing.T) {
 	}
 	if !released {
 		t.Fatal("pointer button release was not sent reliably")
+	}
+}
+
+func TestControllerRefusesADifferentDevice(t *testing.T) {
+	// Slow RPCs widen any window in which input would be open before the
+	// identity check completes.
+	srv, ctx, cancel := startFaultedEmulator(t, emulator.FaultConfig{RPCDelay: 300 * time.Millisecond})
+	defer cancel()
+	controller := New(Config{BaseURL: srv.BaseURL(), ICELoopbackOnly: true, Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true, ExpectedDeviceID: "some-other-device"})
+	controller.Start(ctx)
+	defer controller.Stop()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := controller.Snapshot()
+		if snap.Phase == PhaseConnected {
+			t.Fatal("connected (input enabled) to the wrong device")
+		}
+		if snap.Phase == PhaseFatal {
+			if !strings.Contains(snap.LastError, "different device") {
+				t.Fatalf("unexpected error %q", snap.LastError)
+			}
+			if err := controller.SendKeypress(4, true); err == nil {
+				t.Fatal("input accepted for the wrong device")
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no fatal phase; last snapshot %+v", controller.Snapshot().Phase)
+}
+
+// An identity learned on the first connect pins later reconnects.
+func TestControllerPinsTheDeviceItFirstReached(t *testing.T) {
+	srv, ctx, cancel := startEmulator(t)
+	defer cancel()
+	controller := New(Config{
+		BaseURL: srv.BaseURL(), ICELoopbackOnly: true, Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true,
+		ReconnectBase: 200 * time.Millisecond, ReconnectMax: 400 * time.Millisecond,
+	})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	deadline := time.Now().Add(3 * time.Second)
+	for controller.Snapshot().DeviceID == "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	srv.SetDeviceID("another-jetkvm")
+	srv.DisconnectSession()
+	waitForPhase(t, controller, PhaseFatal, 5*time.Second)
+	if err := controller.SendKeypress(4, true); err == nil {
+		t.Fatal("input accepted for a different device")
+	}
+}
+
+func TestControllerAcceptsTheExpectedDevice(t *testing.T) {
+	srv, ctx, cancel := startEmulator(t)
+	defer cancel()
+	controller := New(Config{BaseURL: srv.BaseURL(), ICELoopbackOnly: true, Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true, ExpectedDeviceID: "emu-jetkvm-001"})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+}
+
+// A reboot takes the device away for a while; the controller must ride it
+// out and reconnect on its own.
+func TestControllerReconnectsAfterReboot(t *testing.T) {
+	srv, ctx, cancel := startEmulatorWith(t, emulator.Config{RebootDowntime: 2 * time.Second})
+	defer cancel()
+	controller := New(Config{
+		BaseURL: srv.BaseURL(), ICELoopbackOnly: true, Password: "secret", RPCTimeout: 3 * time.Second, Reconnect: true,
+		ReconnectBase: 500 * time.Millisecond, ReconnectMax: time.Second,
+	})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	sessions := srv.SessionCount()
+
+	start := time.Now()
+	if err := controller.Reboot(); err != nil {
+		t.Fatalf("reboot: %v", err)
+	}
+	// Firmware waits 1 s before going down, then is away for the downtime.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Since(start) < 3*time.Second || controller.Snapshot().Phase != PhaseConnected {
+		if time.Now().After(deadline) {
+			t.Fatalf("not reconnected after the reboot: %+v", controller.Snapshot().Status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if srv.SessionCount() <= sessions {
+		t.Fatal("no new session after the reboot")
 	}
 }

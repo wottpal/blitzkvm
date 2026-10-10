@@ -1,4 +1,4 @@
-.PHONY: build engine emulator test test-race vet vulncheck generate layouts check app
+.PHONY: build engine emulator test test-race test-timing vet vulncheck generate generate-check layouts check app
 
 GO ?= go
 
@@ -20,6 +20,10 @@ test:
 test-race:
 	$(GO) test -race -count=1 -p 1 ./...
 
+# Timing-sensitive tests skip themselves under the race detector.
+test-timing:
+	$(GO) test -count=1 -run 'TestPacketLossIsRepairedByNACK' ./pkg/emulator
+
 vet:
 	$(GO) vet ./...
 
@@ -29,12 +33,20 @@ vulncheck:
 generate:
 	$(GO) generate ./...
 
+# Fails if generated code is out of date (or the tree has other changes).
+generate-check: generate
+	git diff --exit-code
+
 # Regenerate keyboard layout tables from a jetkvm/kvm checkout:
 #   make layouts UPSTREAM=../kvm
 layouts:
-	$(GO) run ./scripts/genlayouts -upstream $(UPSTREAM) -ref "$$(git -C $(UPSTREAM) describe --always --tags)" > pkg/input/layouts_gen.go
+	@test -n "$(UPSTREAM)" || { echo "usage: make layouts UPSTREAM=../kvm" >&2; exit 2; }
+	$(GO) run ./scripts/genlayouts -upstream $(UPSTREAM) -ref "$$(git -C $(UPSTREAM) describe --always --tags)" > pkg/input/layouts_gen.go.tmp
+	mv pkg/input/layouts_gen.go.tmp pkg/input/layouts_gen.go
 
-check: vet test-race vulncheck
+# The same steps as .github/workflows/fork-check.yml.
+check: vet generate-check test-race test-timing vulncheck
+	cd third_party/openh264-go && $(GO) test -count=1 ./...
 	$(MAKE) -C macos test
 
 # Native macOS app (builds the Go engine helper and bundles it).

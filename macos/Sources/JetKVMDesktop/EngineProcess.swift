@@ -19,10 +19,12 @@ final class EngineProcess {
 
     private let executableURL: URL
     private let ioQueue = DispatchQueue(label: "jetkvm.engine.io", qos: .userInteractive)
+    /// Guards process and stdinHandle, which writers on other threads use.
     private let writeLock = NSLock()
     private var process: Process?
     private var stdinHandle: FileHandle?
-    private var parser = FrameParser()
+    private var readHandles: [FileHandle] = []
+    // Main-thread state.
     private var lastConnect: EngineCommand?
     private var stopped = false
     private var restartDelay: TimeInterval = 0.5
@@ -31,6 +33,10 @@ final class EngineProcess {
 
     init(executableURL: URL) {
         self.executableURL = executableURL
+    }
+
+    deinit {
+        stop()
     }
 
     /// Finds the helper next to the app binary (Contents/Helpers or
@@ -56,16 +62,25 @@ final class EngineProcess {
     func stop() {
         stopped = true
         writeLock.lock()
+        let p = process
+        process = nil
         try? stdinHandle?.close()
         stdinHandle = nil
+        let handles = readHandles
+        readHandles = []
         writeLock.unlock()
-        process?.terminate()
+        // Readability handlers must be removed explicitly: at EOF Foundation
+        // keeps calling them with empty data, spinning a CPU core.
+        handles.forEach { $0.readabilityHandler = nil }
+        p?.terminate()
     }
 
     /// Terminates the helper as a crash would (used by the self-test).
     func simulateCrash() {
-        process?.interrupt()
-        kill(process?.processIdentifier ?? 0, SIGKILL)
+        writeLock.lock()
+        let pid = process?.processIdentifier ?? 0
+        writeLock.unlock()
+        if pid > 0 { kill(pid, SIGKILL) }
     }
 
     private func launch() throws {
@@ -75,32 +90,66 @@ final class EngineProcess {
         p.standardInput = input
         p.standardOutput = output
         p.standardError = errors
-        parser = FrameParser()
+        // Each launch gets its own parser: a restarted helper starts a fresh
+        // byte stream, and the old pipe's handler may still be draining.
+        var parser = FrameParser()
+        let queue = ioQueue
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard let self, !data.isEmpty else { return }
-            self.ioQueue.sync { self.consume(data) }
-        }
-        errors.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
-                FileHandle.standardError.write(Data(("[engine] " + text).utf8))
+            if data.isEmpty {
+                handle.readabilityHandler = nil // EOF
+                return
+            }
+            queue.sync {
+                do {
+                    let frames = try parser.feed(data)
+                    self?.dispatch(frames)
+                } catch {
+                    AppLog.log("engine protocol error: \(error)")
+                    handle.readabilityHandler = nil
+                    p.terminate()
+                }
             }
         }
+        // The helper logs JSON lines (and Go crash output) to stderr.
+        var pending = Data()
+        errors.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                if !pending.isEmpty { AppLog.write(String(decoding: pending, as: UTF8.self), prefix: "[engine] ") }
+                return
+            }
+            pending.append(data)
+            // Only complete lines, so a line split across reads stays whole.
+            guard let end = pending.lastIndex(of: UInt8(ascii: "\n")) else { return }
+            let lines = pending[...end]
+            pending = Data(pending[pending.index(after: end)...])
+            AppLog.write(String(decoding: lines, as: UTF8.self), prefix: "[engine] ")
+        }
         p.terminationHandler = { [weak self] proc in
-            DispatchQueue.main.async { self?.handleTermination(status: proc.terminationStatus, reason: proc.terminationReason) }
+            DispatchQueue.main.async { self?.handleTermination(proc) }
         }
         try p.run()
         writeLock.lock()
         process = p
         stdinHandle = input.fileHandleForWriting
+        readHandles = [output.fileHandleForReading, errors.fileHandleForReading]
         writeLock.unlock()
     }
 
-    private func handleTermination(status: Int32, reason: Process.TerminationReason) {
-        guard !stopped else { return }
+    private func handleTermination(_ proc: Process) {
+        writeLock.lock()
+        let isCurrent = process === proc
+        if isCurrent {
+            process = nil
+            stdinHandle = nil
+        }
+        writeLock.unlock()
+        guard !stopped, isCurrent else { return }
         restarts += 1
-        let why = reason == .uncaughtSignal ? "signal \(status)" : "exit \(status)"
+        let why = proc.terminationReason == .uncaughtSignal ? "signal \(proc.terminationStatus)" : "exit \(proc.terminationStatus)"
+        AppLog.log("engine \(proc.processIdentifier) ended (\(why)); restarting")
         delegate?.engineDidRestart(self, reason: why)
         let delay = restartDelay
         restartDelay = min(restartDelay * 2, 10)
@@ -118,15 +167,8 @@ final class EngineProcess {
         }
     }
 
-    private func consume(_ data: Data) {
-        let frames: [(FrameType?, Data)]
-        do {
-            frames = try parser.feed(data)
-        } catch {
-            FileHandle.standardError.write(Data("engine protocol error: \(error)\n".utf8))
-            process?.terminate()
-            return
-        }
+    /// Runs on ioQueue.
+    private func dispatch(_ frames: [(FrameType?, Data)]) {
         for (type, payload) in frames {
             switch type {
             case .accessUnit:
@@ -155,12 +197,16 @@ final class EngineProcess {
             guard let raw = object["snapshot"],
                   let data = try? JSONSerialization.data(withJSONObject: raw),
                   let snapshot = try? JSONDecoder().decode(SessionSnapshot.self, from: data) else { return }
-            if snapshot.Phase == "connected" { restartDelay = 0.5 }
-            DispatchQueue.main.async { self.delegate?.engine(self, didUpdate: snapshot) }
-        case "stats":
-            if let stats = object["stats"] as? [String: Any] {
-                DispatchQueue.main.async { self.delegate?.engine(self, didUpdateStats: stats) }
+            DispatchQueue.main.async {
+                if snapshot.Phase == "connected" { self.restartDelay = 0.5 }
+                self.delegate?.engine(self, didUpdate: snapshot)
             }
+        case "stats":
+            // {"stats": {"stats": {...client stats...}, "engineDroppedUnits": n}}
+            guard let wrapper = object["stats"] as? [String: Any] else { return }
+            var flat = wrapper["stats"] as? [String: Any] ?? [:]
+            flat["engineDroppedUnits"] = wrapper["engineDroppedUnits"]
+            DispatchQueue.main.async { self.delegate?.engine(self, didUpdateStats: flat) }
         default:
             break
         }
@@ -168,10 +214,16 @@ final class EngineProcess {
 
     // MARK: Sending
 
-    func connect(baseURL: String, password: String?, offerH265: Bool) {
-        let command = EngineCommand(cmd: "connect", baseURL: baseURL, password: password, offerH265: offerH265)
+    func connect(baseURL: String, password: String?, deviceID: String?, offerH265: Bool) {
+        let command = EngineCommand(cmd: "connect", baseURL: baseURL, password: password, deviceID: deviceID, offerH265: offerH265)
         lastConnect = command
         send(command: command)
+    }
+
+    /// Pins a device ID learned after connecting, so a restarted helper
+    /// verifies it too (the running helper pins it itself).
+    func pin(deviceID: String) {
+        lastConnect?.deviceID = deviceID
     }
 
     @discardableResult

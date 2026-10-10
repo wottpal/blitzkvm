@@ -148,6 +148,7 @@ final class SelfTest {
         var ok = decoded > 0 && controller.videoView.presentedFrames > 0
         if crashEngineAfter != nil { ok = ok && afterCrash > 0 && !restarts.isEmpty }
         controller.shutdown()
+        AppLog.flush()
         // _exit: skip atexit/static teardown while VideoToolbox and pipe
         // threads are still running (exit() can crash there).
         _exit(ok ? 0 : 1)

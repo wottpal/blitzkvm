@@ -69,7 +69,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return model
     }()
     private var devicesWindow: DevicesWindowController?
+    /// Open device windows (including minimized ones). Removed only when a
+    /// window closes, which also stops its engine.
     private var windows: [DeviceWindowController] = []
+    /// Devices whose address probe is still running (double-click guard).
+    private var connecting = Set<String>()
+    /// Devices typed ad hoc (--device) that are saved on first connect.
+    private var adHocDeviceIDs = Set<String>()
     private var selfTest: SelfTest?
 
     init(options: Options) {
@@ -97,10 +103,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         windows.forEach { $0.shutdown() }
+        AppLog.flush()
     }
 
+    /// The device window menu actions apply to: the key window, or the main
+    /// window while a panel (e.g. Devices) is key. Never a background tab.
     private var current: DeviceWindowController? {
-        windows.first { $0.window?.isKeyWindow == true } ?? windows.last { $0.window?.isVisible == true }
+        windows.first { $0.window?.isKeyWindow == true } ?? windows.first { $0.window?.isMainWindow == true }
     }
 
     // MARK: Connecting
@@ -118,7 +127,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `--device address`: use the saved device with that address, or a new
     /// one that is saved after the first successful connect.
     private func connectAdHoc(_ address: String) {
-        var device = store.device(matchingAddress: address) ?? Device(name: address, addresses: [address])
+        let saved = store.device(matchingAddress: address)
+        var device = saved ?? Device(name: address, addresses: [address])
+        if saved == nil { adHocDeviceIDs.insert(device.id) }
         if let h265 = options.offerH265 { device.offerH265 = h265 }
         if let scaling = options.scaling { device.scalingMode = scaling.rawValue }
         if let profile = options.profile { device.modifierProfile = profile.rawValue }
@@ -131,19 +142,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func connect(_ device: Device) {
-        if let existing = windows.first(where: { $0.device.id == device.id && $0.window?.isVisible == true }) {
+        if let existing = windows.first(where: { $0.device.id == device.id }) {
             // A second session would take over the first one on the device.
+            if existing.window?.isMiniaturized == true { existing.window?.deminiaturize(nil) }
             existing.window?.makeKeyAndOrderFront(nil)
+            if existing.snapshot.Phase == "auth_failed" || existing.snapshot.Phase == "other_session" {
+                existing.reconnect() // picks up credentials edited in the library
+            }
             return
         }
+        guard !connecting.contains(device.id) else { return }
+        connecting.insert(device.id)
         Task { @MainActor in
+            defer { self.connecting.remove(device.id) }
             let result = await AddressProbe.choose(addresses: device.addresses, expectedDeviceID: device.deviceID,
                                                    fetch: AddressProbe.httpFetch())
             switch result {
             case .success(let (address, identity)):
                 var pinned = device
-                if pinned.deviceID == nil {
-                    pinned.deviceID = identity.deviceId
+                if pinned.deviceID == nil, let id = identity.deviceId {
+                    pinned.deviceID = id
                     self.migrateCredential(from: device, to: pinned)
                 }
                 let password = self.options.password ?? Keychain.password(account: pinned.credentialAccount)
@@ -158,7 +176,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 a.addButton(withTitle: "Try Anyway")
                 a.addButton(withTitle: "Cancel")
                 if a.runModal() == .alertFirstButtonReturn, let first = device.addresses.first {
-                    self.open(device, address: first, password: self.options.password ?? Keychain.password(account: device.credentialAccount))
+                    // The engine still verifies a pinned device ID before any
+                    // input; an unpinned device gets no stored password
+                    // unverified.
+                    let password = device.deviceID == nil ? self.options.password : (self.options.password ?? Keychain.password(account: device.credentialAccount))
+                    self.open(device, address: first, password: password)
                 }
             }
         }
@@ -169,8 +191,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func migrateCredential(from old: Device, to new: Device) {
         guard old.credentialAccount != new.credentialAccount,
               let password = Keychain.password(account: old.credentialAccount) else { return }
-        Keychain.setPassword(password, account: new.credentialAccount)
-        Keychain.deletePassword(account: old.credentialAccount)
+        if Keychain.setPassword(password, account: new.credentialAccount) {
+            Keychain.deletePassword(account: old.credentialAccount)
+        }
     }
 
     private func open(_ device: Device, address: String, password: String?) {
@@ -181,17 +204,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = DeviceWindowController(device: device, address: address, password: password, engineURL: engineURL)
         controller.input.viewOnly = options.viewOnly
         if !isSelfTest {
-            controller.onConnected = { [weak self] c in
-                self?.store.upsert(c.device)
-                try? self?.store.save()
-                self?.devicesModel.reload()
+            controller.onConnected = { [weak self] c in self?.recordConnection(c.device) }
+            controller.onIdentityLearned = { [weak self] c, before in
+                // Password-protected devices reveal their ID only after login.
+                self?.migrateCredential(from: before, to: c.device)
+                self?.recordConnection(c.device)
             }
-            controller.onPasswordEntered = { c, password in
+            controller.onPasswordAccepted = { c, password in
                 Keychain.setPassword(password, account: c.device.credentialAccount)
             }
+            controller.credentialProvider = { Keychain.password(account: $0.credentialAccount) }
         }
-        windows.removeAll { $0.window?.isVisible != true }
-        let tabHost = windows.last?.window
+        controller.onClose = { [weak self] c in self?.windows.removeAll { $0 === c } }
+        let tabHost = (windows.first { $0.window?.isKeyWindow == true } ?? windows.last)?.window
         windows.append(controller)
         if let seconds = options.selfTestSeconds {
             selfTest = SelfTest(controller: controller, seconds: seconds, crashEngineAfter: options.crashEngineAfter, snapshotPath: options.snapshotPath)
@@ -216,6 +241,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         selfTest?.start()
     }
 
+    /// Persists what a connection learned (device ID, last use) without
+    /// overwriting edits made in the library meanwhile; a device deleted
+    /// from the library is not resurrected.
+    private func recordConnection(_ device: Device) {
+        if var saved = store.device(id: device.id) {
+            saved.deviceID = saved.deviceID ?? device.deviceID
+            saved.lastConnected = device.lastConnected
+            store.upsert(saved)
+        } else if adHocDeviceIDs.remove(device.id) != nil {
+            store.upsert(device)
+        } else {
+            return
+        }
+        try? store.save()
+        devicesModel.reload()
+    }
+
     private func alert(_ message: String, detail: String) {
         let a = NSAlert()
         a.messageText = message
@@ -224,8 +266,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func fail(_ message: String) {
-        FileHandle.standardError.write(Data((message + "\n").utf8))
-        if isSelfTest { _exit(2) }
+        AppLog.log(message)
+        if isSelfTest {
+            AppLog.flush()
+            _exit(2)
+        }
         alert(message, detail: "")
     }
 
@@ -247,6 +292,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appItem = NSMenuItem()
         appItem.submenu = appMenu
         main.addItem(appItem)
+
+        // Standard Edit menu so text fields (password sheet, device editor)
+        // support paste, copy and undo. While input is captured the video
+        // view consumes key equivalents before the menu sees them.
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let editItem = NSMenuItem()
+        editItem.submenu = edit
+        main.addItem(editItem)
 
         let device = NSMenu(title: "Device")
         device.addItem(item("Devices…", #selector(showDevices), key: "n"))

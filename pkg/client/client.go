@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,10 @@ var ErrClosed = errors.New("client closed")
 // ErrOfferRejected means the device answered the offer with an error message.
 var ErrOfferRejected = errors.New("device rejected the WebRTC offer")
 
+// ErrDeviceMismatch means the address now belongs to a different JetKVM than
+// the one expected (e.g. after a DHCP change).
+var ErrDeviceMismatch = errors.New("address answers as a different device")
+
 const (
 	defaultRPCTimeout     = 5 * time.Second
 	defaultConnectTimeout = 15 * time.Second
@@ -55,6 +60,18 @@ type Config struct {
 	// (Each login mints a new device-wide token, logging out browser tabs and
 	// writing to the device's flash.)
 	Auth *auth.Client
+	// ExpectedDeviceID, when set, pins the device identity. GET /device is
+	// checked before login when the device answers it without one (no
+	// password, or a still-valid cookie), so no password is sent to the
+	// wrong device; password-protected firmware requires a login for it, and
+	// then VerifyIdentity checks over RPC before any input is sent. This
+	// catches the address now belonging to another JetKVM (e.g. after a DHCP
+	// change); it is not proof against a host impersonating the device.
+	ExpectedDeviceID string
+	// ICELoopbackOnly gathers only loopback candidates: for tests against a
+	// local emulator, where a machine's many interfaces (VPNs, bridges) slow
+	// ICE down needlessly.
+	ICELoopbackOnly bool
 	// OfferH265 also offers H.265. JetKVM streams H.265 whenever the offer
 	// contains it (codec preference "auto"), so only enable this when the
 	// consumer can decode H.265.
@@ -143,6 +160,10 @@ type Client struct {
 
 	hidReady     chan struct{}
 	hidReadyOnce sync.Once
+	rpcReady     chan struct{}
+	rpcReadyOnce sync.Once
+	// identityVerified is set once ExpectedDeviceID has been confirmed.
+	identityVerified atomic.Bool
 
 	videoMu    sync.RWMutex
 	videoSink  video.Sink
@@ -237,6 +258,7 @@ func New(cfg Config) (*Client, error) {
 		serialCh:   make(chan SerialConsoleEvent, 128),
 		pending:    map[string]chan jsonrpc.Response{},
 		hidReady:   make(chan struct{}),
+		rpcReady:   make(chan struct{}),
 		heldKeys:   map[byte]bool{},
 		closeCh:    make(chan struct{}),
 	}
@@ -309,10 +331,16 @@ func (c *Client) newAPI() (*webrtc.API, error) {
 		}
 	}
 	registry := &interceptor.Registry{}
-	// NACK every 20 ms instead of pion's default 100 ms: the assembler holds
-	// a frame while its missing packets are retransmitted.
+	// NACK faster than pion's default 100 ms: the assembler holds a frame
+	// while its missing packets are retransmitted.
 	if err := webrtc.RegisterDefaultInterceptorsWithOptions(m, registry,
-		webrtc.WithNackGeneratorOptions(nack.GeneratorInterval(20*time.Millisecond)),
+		webrtc.WithNackGeneratorOptions(
+			nack.GeneratorInterval(video.NACKInterval),
+			// The device resends on every NACK; bound the repeats so a
+			// congested link is not flooded (6 × 40 ms ≈ the assembler's
+			// longest wait for a missing packet).
+			nack.GeneratorMaxNacksPerPacket(6),
+		),
 	); err != nil {
 		return nil, err
 	}
@@ -320,6 +348,9 @@ func (c *Client) newAPI() (*webrtc.API, error) {
 	se := webrtc.SettingEngine{}
 	// Detect dead paths quickly; the device itself gives up after ~5 s.
 	se.SetICETimeouts(4*time.Second, 8*time.Second, time.Second)
+	if c.cfg.ICELoopbackOnly {
+		restrictICEToLoopback(&se)
+	}
 	return webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(se)), nil
 }
 
@@ -329,6 +360,9 @@ func (c *Client) newAPI() (*webrtc.API, error) {
 func (c *Client) Connect(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, c.cfg.ConnectTimeout)
 	defer cancel()
+	// Close() aborts a connect in progress (dial, login, waits).
+	stop := context.AfterFunc(c.ctx, cancel)
+	defer stop()
 	err := c.connect(ctx)
 	if err != nil {
 		if ctx.Err() != nil && parent.Err() == nil {
@@ -340,11 +374,39 @@ func (c *Client) Connect(parent context.Context) error {
 }
 
 func (c *Client) connect(ctx context.Context) error {
+	if c.cfg.ExpectedDeviceID != "" {
+		info, err := c.authClient.GetDeviceInfo(ctx, c.cfg.BaseURL)
+		var authErr *auth.Error
+		switch {
+		case err == nil:
+			if info.DeviceID != c.cfg.ExpectedDeviceID {
+				return fmt.Errorf("%w: expected %s, found %s", ErrDeviceMismatch, c.cfg.ExpectedDeviceID, info.DeviceID)
+			}
+			c.identityVerified.Store(true)
+		case errors.As(err, &authErr) && authErr.StatusCode == http.StatusUnauthorized:
+			// Password-protected: GET /device needs a login and
+			// VerifyIdentity checks over RPC once the session is up. Only
+			// log in if a JetKVM answers at all: any other host answering
+			// 401 (a router, a camera) must not get the password.
+			if _, statusErr := c.authClient.GetDeviceStatus(ctx, c.cfg.BaseURL); statusErr != nil {
+				return fmt.Errorf("%w: no JetKVM answers (%v)", ErrDeviceMismatch, statusErr)
+			}
+		default:
+			return fmt.Errorf("verify device identity: %w", err)
+		}
+	}
 	conn, err := c.openSignaling(ctx)
 	if err != nil {
 		return err
 	}
 	c.signalMu.Lock()
+	select {
+	case <-c.closeCh:
+		c.signalMu.Unlock()
+		_ = conn.Close()
+		return ErrClosed
+	default:
+	}
 	c.signalConn = conn
 	c.signalMu.Unlock()
 	c.signalMode.Store(uint32(SignalingModeWebSocket))
@@ -383,6 +445,12 @@ func (c *Client) connect(ctx context.Context) error {
 		}
 	})
 	pc.OnTrack(c.onTrack)
+	// Local candidates may be gathered before the offer is written. The
+	// device applies trickled candidates to whatever session is current —
+	// before our offer that is someone else's — so hold them until then.
+	var localMu sync.Mutex
+	var localQueue []webrtc.ICECandidateInit
+	offerSent := false
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate == nil {
 			return
@@ -391,6 +459,13 @@ func (c *Client) connect(ctx context.Context) error {
 		if init.Candidate == "" {
 			return
 		}
+		localMu.Lock()
+		if !offerSent {
+			localQueue = append(localQueue, init)
+			localMu.Unlock()
+			return
+		}
+		localMu.Unlock()
 		_ = c.writeSignal(signalingMessage{Type: "new-ice-candidate", Data: init})
 	})
 
@@ -420,6 +495,14 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 	if err := c.writeSignal(signalingMessage{Type: "offer", Data: offerSignalData{SD: signaling.EncodeSDP(rawOffer)}}); err != nil {
 		return err
+	}
+	localMu.Lock()
+	offerSent = true
+	queued := localQueue
+	localQueue = nil
+	localMu.Unlock()
+	for _, candidate := range queued {
+		_ = c.writeSignal(signalingMessage{Type: "new-ice-candidate", Data: candidate})
 	}
 
 	select {
@@ -620,8 +703,14 @@ func (c *Client) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 	go func() {
 		err := video.Receive(c.ctx, track, asm, func() time.Duration { return time.Duration(c.rttNanos.Load()) })
 		sink.Close()
-		if err != nil && c.ctx.Err() == nil {
-			c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: err.Error()})
+		if c.ctx.Err() == nil {
+			// The track ended while the session lives on: the picture
+			// would stay frozen, so let the session reconnect.
+			msg := "video stream ended"
+			if err != nil {
+				msg = err.Error()
+			}
+			c.emitLifecycle(LifecycleEvent{Type: "video_lost", Err: msg})
 		}
 	}()
 }
@@ -668,6 +757,31 @@ func (c *Client) Close() error {
 		c.lifecycle.close()
 	})
 	return err
+}
+
+// VerifyIdentity confirms ExpectedDeviceID over RPC when the pre-login
+// check could not (see Config.ExpectedDeviceID). Callers send no input until
+// it succeeds.
+func (c *Client) VerifyIdentity(ctx context.Context) error {
+	if c.cfg.ExpectedDeviceID == "" || c.identityVerified.Load() {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("verify device identity: %w", ctx.Err())
+	case <-c.closeCh:
+		return ErrClosed
+	case <-c.rpcReady:
+	}
+	deviceID, err := c.GetDeviceID(ctx)
+	if err != nil {
+		return fmt.Errorf("verify device identity: %w", err)
+	}
+	if deviceID != c.cfg.ExpectedDeviceID {
+		return fmt.Errorf("%w: expected %s, found %s", ErrDeviceMismatch, c.cfg.ExpectedDeviceID, deviceID)
+	}
+	c.identityVerified.Store(true)
+	return nil
 }
 
 func (c *Client) WaitForHID(ctx context.Context) error {
@@ -969,6 +1083,23 @@ func (c *Client) runMacroChunk(ctx context.Context, chunk []hidrpc.KeyboardMacro
 		select {
 		case <-ctx.Done():
 			_ = c.CancelKeyboardMacro()
+			// Wait for the device to report the macro stopped, so that
+			// acknowledgement cannot be mistaken for the end of a later
+			// paste's first chunk.
+			if started {
+				wait := time.NewTimer(time.Second)
+				for done := false; !done; {
+					select {
+					case running := <-state:
+						done = !running
+					case <-wait.C:
+						done = true
+					case <-c.closeCh:
+						done = true
+					}
+				}
+				wait.Stop()
+			}
 			return ctx.Err()
 		case <-c.closeCh:
 			return ErrClosed
@@ -1034,6 +1165,7 @@ func (c *Client) openDataChannels(pc *webrtc.PeerConnection) error {
 		return err
 	}
 	c.watchEssentialChannel(set.rpc)
+	set.rpc.OnOpen(func() { c.rpcReadyOnce.Do(func() { close(c.rpcReady) }) })
 	set.rpc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		if !msg.IsString {
 			return
@@ -1236,6 +1368,14 @@ func (c *Client) collectStats(now time.Time) {
 	}
 	report := pc.GetStats()
 	var snap StatsSnapshot
+	// RTT of the pair ICE actually uses; other succeeded pairs (other
+	// interfaces, VPNs) can differ by orders of magnitude.
+	selectedPair := ""
+	for _, raw := range report {
+		if t, ok := raw.(webrtc.TransportStats); ok && t.SelectedCandidatePairID != "" {
+			selectedPair = t.SelectedCandidatePairID
+		}
+	}
 	var framesDecoded uint32
 	c.videoMu.RLock()
 	if c.frames != nil {
@@ -1256,10 +1396,9 @@ func (c *Client) collectStats(now time.Time) {
 			snap.JitterMs = v.Jitter * 1000
 			snap.FramesRendered = v.FramesRendered
 		case webrtc.ICECandidatePairStats:
-			if v.Nominated || v.State == webrtc.StatsICECandidatePairStateSucceeded {
-				if v.CurrentRoundTripTime > 0 {
-					snap.RoundTripMs = v.CurrentRoundTripTime * 1000
-				}
+			selected := v.ID == selectedPair || (selectedPair == "" && v.Nominated)
+			if selected && v.CurrentRoundTripTime > 0 {
+				snap.RoundTripMs = v.CurrentRoundTripTime * 1000
 			}
 		}
 	}
@@ -1305,6 +1444,17 @@ func (c *Client) runHIDHandshake(dc *webrtc.DataChannel) {
 		}
 	}
 }
+
+// restrictICEToLoopback limits candidate gathering to 127.0.0.1.
+func restrictICEToLoopback(se *webrtc.SettingEngine) {
+	se.SetIncludeLoopbackCandidate(true)
+	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	se.SetIPFilter(func(ip net.IP) bool { return ip.IsLoopback() })
+}
+
+// RestrictICEToLoopback exposes the loopback-only ICE setup for test
+// servers (the emulator).
+func RestrictICEToLoopback(se *webrtc.SettingEngine) { restrictICEToLoopback(se) }
 
 func decodeAnswer(encoded string) (webrtc.SessionDescription, error) {
 	rawAnswer, err := signaling.DecodeSDP(encoded)

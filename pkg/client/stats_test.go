@@ -1,6 +1,7 @@
 package client
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -95,11 +96,23 @@ func TestStatsAfterCloseDoesNotPoll(t *testing.T) {
 	c.pcMu.Lock()
 	c.pc = pc
 	c.pcMu.Unlock()
+	c.statsMu.Lock()
+	c.stats.BytesReceived = 12345 // sentinel: a poll would overwrite it
+	c.statsMu.Unlock()
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
 	}
-	c.collectStats(time.Now())
-	_ = c.Stats()
+	before := c.Stats()
+	c.collectStats(time.Now().Add(time.Minute))
+	if after := c.Stats(); !reflect.DeepEqual(before, after) {
+		t.Fatalf("stats changed after close: %+v -> %+v", before, after)
+	}
+	c.statsMu.Lock()
+	samples := len(c.statsHistory)
+	c.statsMu.Unlock()
+	if samples != 0 {
+		t.Fatalf("closed client recorded %d stats samples", samples)
+	}
 }
 
 func offerSDP(t *testing.T, cfg Config) string {

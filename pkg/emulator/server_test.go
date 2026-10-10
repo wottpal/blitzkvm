@@ -19,8 +19,9 @@ import (
 
 func TestHTTPBootstrapFlow(t *testing.T) {
 	srv, err := NewServer(Config{
-		ListenAddr: "127.0.0.1:0",
-		AuthMode:   AuthModeUnset,
+		ListenAddr:      "127.0.0.1:0",
+		ICELoopbackOnly: true,
+		AuthMode:        AuthModeUnset,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -97,9 +98,10 @@ func TestHTTPBootstrapFlow(t *testing.T) {
 
 func TestClientConnectsAndRPCWorks(t *testing.T) {
 	srv, err := NewServer(Config{
-		ListenAddr: "127.0.0.1:0",
-		AuthMode:   AuthModePassword,
-		Password:   "secret",
+		ListenAddr:      "127.0.0.1:0",
+		ICELoopbackOnly: true,
+		AuthMode:        AuthModePassword,
+		Password:        "secret",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -131,10 +133,11 @@ func TestClientConnectsAndRPCWorks(t *testing.T) {
 	}
 
 	c, err := client.New(client.Config{
-		BaseURL:      srv.BaseURL(),
-		Password:     "secret",
-		RPCTimeout:   2 * time.Second,
-		NewVideoSink: openh264.NewSink,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		NewVideoSink:    openh264.NewSink,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -271,9 +274,10 @@ func TestClientConnectsAndRPCWorks(t *testing.T) {
 
 func TestClientRPCTimeoutWhenMethodDropped(t *testing.T) {
 	srv, err := NewServer(Config{
-		ListenAddr: "127.0.0.1:0",
-		AuthMode:   AuthModePassword,
-		Password:   "secret",
+		ListenAddr:      "127.0.0.1:0",
+		ICELoopbackOnly: true,
+		AuthMode:        AuthModePassword,
+		Password:        "secret",
 		Faults: FaultConfig{
 			DropRPCMethod: "ping",
 		},
@@ -301,9 +305,10 @@ func TestClientRPCTimeoutWhenMethodDropped(t *testing.T) {
 	waitForBaseURL(t, srv)
 
 	c, err := client.New(client.Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 150 * time.Millisecond,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      150 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -327,9 +332,10 @@ func TestClientRPCTimeoutWhenMethodDropped(t *testing.T) {
 
 func TestClientCallRespectsCallerDeadlineOverride(t *testing.T) {
 	srv, err := NewServer(Config{
-		ListenAddr: "127.0.0.1:0",
-		AuthMode:   AuthModePassword,
-		Password:   "secret",
+		ListenAddr:      "127.0.0.1:0",
+		ICELoopbackOnly: true,
+		AuthMode:        AuthModePassword,
+		Password:        "secret",
 		Faults: FaultConfig{
 			DropRPCMethod: "ping",
 		},
@@ -357,9 +363,10 @@ func TestClientCallRespectsCallerDeadlineOverride(t *testing.T) {
 	waitForBaseURL(t, srv)
 
 	c, err := client.New(client.Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 50 * time.Millisecond,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      50 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -390,9 +397,10 @@ func TestClientCallRespectsCallerDeadlineOverride(t *testing.T) {
 
 func TestKeyboardStateTracksModifiersAndReleases(t *testing.T) {
 	srv, err := NewServer(Config{
-		ListenAddr: "127.0.0.1:0",
-		AuthMode:   AuthModePassword,
-		Password:   "secret",
+		ListenAddr:      "127.0.0.1:0",
+		ICELoopbackOnly: true,
+		AuthMode:        AuthModePassword,
+		Password:        "secret",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -417,9 +425,10 @@ func TestKeyboardStateTracksModifiersAndReleases(t *testing.T) {
 	waitForBaseURL(t, srv)
 
 	c, err := client.New(client.Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -482,9 +491,10 @@ func TestForcedDisconnectFaultClosesPeerConnection(t *testing.T) {
 	}
 
 	srv, err := NewServer(Config{
-		ListenAddr: "127.0.0.1:0",
-		AuthMode:   AuthModePassword,
-		Password:   "secret",
+		ListenAddr:      "127.0.0.1:0",
+		ICELoopbackOnly: true,
+		AuthMode:        AuthModePassword,
+		Password:        "secret",
 		Faults: FaultConfig{
 			DisconnectAfter: 500 * time.Millisecond,
 		},
@@ -512,9 +522,10 @@ func TestForcedDisconnectFaultClosesPeerConnection(t *testing.T) {
 	waitForBaseURL(t, srv)
 
 	c, err := client.New(client.Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)

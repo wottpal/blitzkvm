@@ -11,6 +11,7 @@ final class VideoDecoder {
         var decoded = 0
         var errors = 0
         var keyframes = 0
+        var skipped = 0
         var lastDecodeMs: Double = 0
     }
 
@@ -39,9 +40,28 @@ final class VideoDecoder {
         return stats
     }
 
+    private var queued = 0
+    /// Units allowed to wait for the decoder; beyond that the decoder skips
+    /// to the next keyframe instead of building latency.
+    private let maxQueued = 6
+
     /// Decodes one Annex-B access unit. Safe to call from any thread.
     func decode(_ header: AccessUnitHeader, annexB: Data) {
-        queue.async { self.decodeOnQueue(header, annexB: annexB) }
+        statsLock.lock()
+        let backlog = queued
+        if backlog < maxQueued || header.keyframe { queued += 1 }
+        statsLock.unlock()
+        guard backlog < maxQueued || header.keyframe else {
+            queue.async { self.waitingForKeyframe = true }
+            bump { $0.skipped += 1 }
+            return
+        }
+        queue.async {
+            self.decodeOnQueue(header, annexB: annexB)
+            self.statsLock.lock()
+            self.queued -= 1
+            self.statsLock.unlock()
+        }
     }
 
     func reset() {

@@ -1,7 +1,6 @@
 // Command jetkvm-engine is the helper process of the native macOS app: one
-// instance per device session, speaking pkg/engineipc on stdin/stdout. Logs go
-// to stderr (the app captures them) and, without a terminal, to
-// ~/Library/Logs/jetkvm-desktop/engine.log.
+// instance per device session, speaking pkg/engineipc on stdin/stdout. Logs
+// and crash output go to stderr, which the app writes to its log file.
 package main
 
 import (
@@ -23,11 +22,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	if f, err := logging.OpenLogFile("engine"); err == nil {
-		defer f.Close()
-		logging.SetOutput(f, false)
-		_ = logging.EnableCrashOutput(f)
-	}
+	// Logs (JSON lines) and crash reports go to stderr; the app forwards
+	// them into its own log file. Several helpers run at once, so they must
+	// not share and rotate a file themselves.
+	logging.SetOutput(os.Stderr, false)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

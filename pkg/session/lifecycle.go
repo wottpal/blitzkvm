@@ -91,6 +91,10 @@ func (c *Controller) ReconnectNow() {
 		c.launchRunLocked(parent)
 	} else {
 		c.reconnectNow = true
+		select {
+		case c.wake <- struct{}{}: // cut a retry wait short
+		default:
+		}
 	}
 	c.mu.Unlock()
 	if current != nil {
@@ -136,9 +140,15 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 		delay := backoff(attempt, base, maxDelay)
 		if immediate {
 			delay = 0
+			// The wake token ReconnectNow left must not cut the next
+			// real backoff short.
+			select {
+			case <-c.wake:
+			default:
+			}
 		}
 		attempt++
-		return sleepWithContext(ctx, delay)
+		return c.sleepOrWake(ctx, delay)
 	}
 
 	for ctx.Err() == nil {
@@ -173,17 +183,28 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 		if err := cl.Connect(ctx); err != nil {
 			_ = cl.Close()
 			c.setConnectError(err)
-			if isAuthError(err) || !retry() {
+			if isAuthError(err) || errors.Is(err, client.ErrDeviceMismatch) || !retry() {
 				return
 			}
 			continue
 		}
 		waitCtx, cancel := context.WithTimeout(ctx, hidReadyTimeout)
 		err = cl.WaitForHID(waitCtx)
+		if err == nil {
+			// Before Connected, which is what lets input through.
+			if err = cl.VerifyIdentity(waitCtx); errors.Is(err, client.ErrDeviceMismatch) {
+				cancel()
+				_ = cl.Close()
+				c.setConnectError(err)
+				return
+			}
+		} else {
+			err = fmt.Errorf("HID channel not ready: %w", err)
+		}
 		cancel()
 		if err != nil {
 			_ = cl.Close()
-			c.setConnectError(fmt.Errorf("HID channel not ready: %w", err))
+			c.setConnectError(err)
 			if !retry() {
 				return
 			}
@@ -243,6 +264,15 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 func (c *Controller) bootstrap(ctx context.Context, cl *client.Client) {
 	if deviceID, err := cl.GetDeviceID(ctx); err == nil {
 		c.setStateFor(cl, func(s *Snapshot) { s.DeviceID = deviceID })
+		if deviceID != "" {
+			// Trust on first use: later reconnects of this controller
+			// (DHCP changes, reboots) must reach the same device.
+			c.mu.Lock()
+			if c.cfg.ExpectedDeviceID == "" {
+				c.cfg.ExpectedDeviceID = deviceID
+			}
+			c.mu.Unlock()
+		}
 	}
 	if activeExtension, err := cl.GetActiveExtension(ctx); err == nil {
 		c.setStateFor(cl, func(s *Snapshot) { s.ActiveExtension = activeExtension })
@@ -343,6 +373,13 @@ func (c *Controller) watch(ctx context.Context, cl *client.Client) string {
 				if redirect := extractString(evt.Params, "redirectTo"); redirect != "" {
 					c.followRedirect(redirect)
 				}
+				// Before the client closes, so a Reboot call that loses its
+				// reply to the closing session can tell this apart.
+				c.setStateFor(cl, func(s *Snapshot) {
+					s.Phase = PhaseRebooting
+					s.Status = "device rebooting"
+					s.HIDReady = false
+				})
 				return "rebooting"
 			case "networkState":
 				if host := extractString(evt.Params, "hostname"); host != "" {
@@ -416,6 +453,14 @@ func (c *Controller) watch(ctx context.Context, cl *client.Client) string {
 				}
 			case "connect_error", "video_error":
 				c.setState(func(s *Snapshot) { s.LastError = life.Err })
+			case "video_lost":
+				// The video track died while the session lives on; reconnect
+				// rather than leaving a frozen picture.
+				c.setState(func(s *Snapshot) {
+					s.LastError = life.Err
+					s.VideoReady = false
+				})
+				return "disconnected"
 			case "serial_error":
 				c.setState(func(s *Snapshot) { s.SerialConsoleError = life.Err })
 			}
@@ -500,14 +545,16 @@ func ledMaskFromJSON(params any) byte {
 func (c *Controller) newClient() (*client.Client, error) {
 	c.mu.RLock()
 	cfg := client.Config{
-		BaseURL:        c.cfg.BaseURL,
-		Password:       c.cfg.Password,
-		RPCTimeout:     c.cfg.RPCTimeout,
-		ConnectTimeout: c.cfg.ConnectTimeout,
-		Auth:           c.auth,
-		OfferH265:      c.cfg.OfferH265,
-		OnAccessUnit:   c.cfg.OnAccessUnit,
-		NewVideoSink:   c.cfg.NewVideoSink,
+		BaseURL:          c.cfg.BaseURL,
+		Password:         c.cfg.Password,
+		RPCTimeout:       c.cfg.RPCTimeout,
+		ConnectTimeout:   c.cfg.ConnectTimeout,
+		Auth:             c.auth,
+		ExpectedDeviceID: c.cfg.ExpectedDeviceID,
+		ICELoopbackOnly:  c.cfg.ICELoopbackOnly,
+		OfferH265:        c.cfg.OfferH265,
+		OnAccessUnit:     c.cfg.OnAccessUnit,
+		NewVideoSink:     c.cfg.NewVideoSink,
 	}
 	c.mu.RUnlock()
 	return client.New(cfg)
@@ -519,7 +566,10 @@ func (c *Controller) setConnectError(err error) {
 		s.HIDReady = false
 		s.VideoReady = false
 		s.SerialConsoleReady = false
-		if isAuthError(err) {
+		if errors.Is(err, client.ErrDeviceMismatch) {
+			s.Phase = PhaseFatal
+			s.Status = "a different device answers at this address"
+		} else if isAuthError(err) {
 			s.Phase = PhaseAuthFailed
 			s.Status = "authentication failed"
 			var authErr *auth.Error
@@ -583,6 +633,22 @@ func backoff(attempt int, base, maxDelay time.Duration) time.Duration {
 	}
 	half := d / 2
 	return half + time.Duration(rand.Int64N(int64(d-half)+1))
+}
+
+// sleepOrWake waits for d, or less if ReconnectNow is called meanwhile.
+func (c *Controller) sleepOrWake(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+	case <-c.wake:
+	}
+	return true
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) bool {

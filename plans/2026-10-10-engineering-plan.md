@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Date | 2026-10-10 (v1), revised 2026-10-10 (v2) |
-| Status | Approved direction. Implementation started on branch `native-foundation` (see §17). |
+| Status | Approved direction. Implemented on branch `native-foundation`: Phases 0, 1a, 1b and 2 done, Phase 3 MVP in part (see §19). |
 | Repo | `wottpal/jetkvm-desktop` (private fork), base commit `289df51`, identical to `lkarlslund/jetkvm-desktop` `main` |
 | Target firmware | JetKVM app 0.5.9 / system 0.2.8 (live device `.107`). Upstream `jetkvm/kvm`: `dev` @ `8f6c300` (2026-10-05), `release/0.5.9` @ `36c008f`. **Note:** upstream develops on `dev`; `main` is frozen at 0.4.8. |
 | Method | v1: five parallel deep-dives (video pipeline, UI architecture, protocol and session, build/CI/dependencies, product landscape), then a re-check of key claims against code. v2: independent adversarial review with three parallel reviewers plus a PM interview, then each review finding re-checked against the code before being accepted (§16). |
@@ -205,7 +205,7 @@ R3 gaps:
 | **S2** | CI Go 1.26.2: 23 reachable vulnerabilities. Local 1.27.1: 13. Deps bumped + Go 1.27.2: **0** | [M] govulncheck |
 | **S3** | Password via `JETKVM_PASSWORD` env var by default; re-sent on every reconnect, over plain HTTP unless HTTPS is enabled | [V] `main.go:20,39-41`, `client.go:184` |
 | **S4** | No TLS trust-on-first-use pinning for self-signed devices | [V] |
-| **S5** | Discovery trusts any `/device/status` responder. Fix: `/device` and `/device/status` need no login (F4), so verify `deviceId` before sending a stored password. | [V] |
+| **S5** | Discovery trusts any `/device/status` responder. Fix: pin the `deviceId`. Only `/device/status` is public (F4); `/device`, which carries `deviceId`, needs a login on password-protected firmware. So verify before login where the device allows it (no password, or a still-valid cookie), otherwise over RPC (`getDeviceID`) right after login and before any input. *(Corrected in implementation review: v2 assumed `/device` was public.)* | [V] |
 | **S6** | Prebuilt `.a` libraries: no build script, outside `go.sum` because of `replace` | [V] |
 
 ### 3.7 Build, CI and tests
@@ -255,7 +255,7 @@ This informs the native app's design. None of it will be refactored in Ebiten.
 | **F1** | With preference "auto", the device picks **H.265 if "H265" appears anywhere in the offer**. pion's default codecs include H.265. [V `webrtc.go:191-209`] | While OpenH264 decodes, offer **H.264 only**. The native app gets HEVC by offering it. |
 | **F2** | ICE "disconnected" (~5 s of silence, pion defaults) ends the session; no ICE restart | WAN blips >5 s mean a full reconnect, so make reconnects fast |
 | **F3** | A new session takes over at answer creation, before ICE connects. The old one gets `otherSessionConnected`, its keyboard is cleared, and it closes 1 s later. | Never race WebRTC sessions across addresses. Race `GET /device/status` (no auth), then open one session. |
-| **F4** | `/device/status` and `/metrics` need no login; there is an HTTP `/storage/upload` route | Identity and health probes need no password; virtual media upload over HTTP |
+| **F4** | `/device/status` (`{"isSetup"}` only) and `/metrics` need no login; `/device` (with `deviceId`), logout and password routes are protected (`web.go:198-204`); there is an HTTP `/storage/upload` route | Reachability probes need no password; identity needs a login on password-protected devices; virtual media upload over HTTP |
 | **F5** | BT.601 for modes ≤576 lines | Use the stream's colour info |
 | **F6** | Wheel has no HID-RPC path (0x04 defined but not handled) | Wheel stays JSON-RPC `wheelReport`, which needs B1 fixed |
 | **F7** | JSON-RPC handlers run concurrently, so responses can arrive out of order | Correlate by id only |
@@ -367,7 +367,7 @@ Runs in parallel with Phases 0/1. It gates Phase 2's pass criteria, not Phase 1.
 | ID | Task |
 |---|---|
 | H1/H2 | Upstream workflows disabled; `upstream` fetch-only. **Done.** |
-| H3 | Fork CI `fork-check.yml`: `workflow_dispatch` + PR only (no push trigger; macOS minutes bill 10× on private repos). One `macos-15` job: vet, staticcheck, `go test -race -p 1`, govulncheck, actionlint. |
+| H3 | Fork CI `fork-check.yml`: `workflow_dispatch` + PR only (no push trigger; macOS minutes bill 10× on private repos). One `macos-15` job: vet, generate drift, `go test -race -p 1`, timing-sensitive tests without `-race`, vendored OpenH264 tests, govulncheck, Swift tests. *(Implemented without staticcheck, which cannot read go1.27 export data yet; actionlint is run locally.)* |
 | H5 | File logging (`~/Library/Logs/jetkvm-desktop/` when not on a TTY) + `debug.SetCrashOutput` |
 | E17 | Dependency refresh to govulncheck = 0 (§8); enumer 1.7.2 + regenerate |
 
@@ -453,7 +453,7 @@ The Ebiten app keeps compiling as a manual test client; no polish.
 
 ### Phase 3: Native MVP, the "switch off Jump" app (6–10 weeks)
 
-- Device library: ordered address list (LAN, `jetkvm-<id>.local`, VPN), HTTP-probe racing (F3/F4), `deviceId` verification before sending a stored password, Keychain.
+- Device library: ordered address list (LAN, `jetkvm-<id>.local`, VPN), HTTP-probe racing (F3/F4), `deviceId` pinning per S5 (before login where possible, else right after login and before any input), Keychain.
 - One window per device, native tabbing, 2 concurrent sessions; background windows stay live but don't decode.
 - Display modes: Fit, 1:1 (pan), integer-nearest, sharp-bilinear, fit-window-to-remote, aspect lock, dark letterbox, fullscreen without the menu bar.
 - Input: per-device Cmd↔Ctrl / Option↔Alt profiles (macOS targets pass ⌘ through; Linux maps it); Caps Lock as a toggle with LED sync; precise scroll accumulation.
@@ -700,6 +700,12 @@ The independent review (`plans/2026-10-10-engineering-plan-review.md`, merged in
 | 2026-10-10 | Test rig `.107` on this Mac, behind a guarded sink window |
 | 2026-10-10 | Go engine as a helper process, one per device (v2) |
 | 2026-10-10 | Roadmap R ∥ 0 → 1a → 1b → 2 → 3 → 4 (v2) |
+| 2026-10-10 | Implementation on branch `native-foundation`, not `main`, until the PM has tried the native app (§19) |
+| 2026-10-10 | Identity pinning per corrected S5/F4: pre-login only where the firmware allows, otherwise RPC after login, before input |
+| 2026-10-10 | New devices default to H.264; H.265 is a per-device opt-in until Phase R shows its benefit |
+| 2026-10-10 | NACK every 40 ms, at most 6 per packet; assembler gap deadline from the selected pair's RTT (assumed 100 ms until known) |
+| 2026-10-10 | Escape chord ⌃⌘ releases keyboard capture |
+| 2026-10-10 | Ad-hoc signing until Developer ID details exist (Accessibility grants do not survive rebuilds) |
 
 ## 18. PM to-dos
 
@@ -707,6 +713,50 @@ The independent review (`plans/2026-10-10-engineering-plan-review.md`, merged in
 2. Install Tailscale manually on one JetKVM.
 3. Optional: buy JetRemote for the benchmark.
 4. Provide Developer ID team details for `xyz.scio.jetkvm-mac`.
+
+## 19. Implementation status (2026-10-10)
+
+Branch `native-foundation`, on top of `289df51`. The live device was used **read-only** throughout (`--view-only`; no HID input, settings or reboots).
+
+| Phase | Status | Commit(s) |
+|---|---|---|
+| 0 Housekeeping | Done: go1.27.2, dependency refresh (govulncheck 0), fork CI, file logging + crash output | `07afb11` |
+| 1a Emulator parity | Done, plus the review round below | `2e81584`, review commit |
+| 1b Engine | Done (lifecycle, RPC, video assembler, input, paste, tests) | `2e81584`, review commit |
+| 2 Native spike | Done except the pass criteria that need Phase R measurements | `a777c58`, `36b848c` |
+| 3 Native MVP | In part: device library, Keychain, tabs, background sessions without decode, fit-window-to-remote, power menu, paste progress/cancel, path-change reconnect | `b8b06f5` |
+| R, 4 | Not started (R needs the HDMI rig) | |
+
+**Verified**
+- Go suite passes with and without `-race`; Swift unit tests pass.
+- `make -C macos selftest`: the app connects to the emulator, decodes and presents video, sends injected input that the emulator receives in order, and recovers after the helper is killed mid-run.
+- Emulator loopback: encode→decode p50 ≈ 9.6 ms; VideoToolbox decode ≈ 0.6 ms; SMPTE bars match the BT.709 reference.
+- Live `.107`, read-only: H.264 and H.265 at ~60 fps with 0 decode errors, 1:1 Retina rendering; identity pinning accepts the right `deviceId` and refuses a wrong one before login. (`.107` has no password, so the after-login path is verified on the emulator only.)
+- govulncheck: no reachable vulnerabilities (one in a required module, not called).
+
+**Code review rounds** (three independent reviewers: Go engine, Swift app, emulator/tooling; all findings re-checked before acting)
+- Accepted and fixed, among others:
+  - helper stdout handler spinning a core at EOF;
+  - identity check assumed a public `/device` (S5/F4 corrected; emulator now protects `/device`, logout and password routes);
+  - keepalive timing not reset between key holds (emulator);
+  - lenient RPC parameters (emulator now requires upstream's parameter names; a test calls every client setter);
+  - video starting before DTLS was up;
+  - 7th-key rollover, blocking HID queues, inline macro cancel, firmware JSON shapes, realistic reboot (1 s, then offline);
+  - flaky tests (loopback-only ICE, ordered access-unit capture);
+  - CI: NACK loss test without `-race`, guarded `make layouts`, `make check` = CI.
+- The realistic reboot exposed a client bug, now fixed: `Reboot()` reported "client closed" although the reboot succeeded.
+- A second review of the identity and emulator changes found, and these are fixed with tests that fail without the fix:
+  - a device ID learned on first connect is now pinned for that session's reconnects and helper restarts (trust on first use);
+  - a 401 from a host that is not a JetKVM (no valid `/device/status`) no longer gets the password;
+  - the address probe prefers an address confirming the saved ID over one with unknown identity;
+  - smaller items: a stale reconnect wake token, library edits dropping a learned ID, shared Keychain items deleted with a duplicate entry, app log opened with `O_APPEND` and rotated at runtime.
+- Not adopted: login limiter windowing and an end-to-end 429 test (low value now); recording only inputs the firmware acts on (the log is a test aid).
+
+**Open (next)**
+- Phase R benchmark and the Phase 2 pass criteria that depend on it.
+- Settings parity (Phase 4), virtual media and serial console UI, TLS trust-on-first-use, Developer ID signing.
+- Event-tap reliability needs an Accessibility grant on a signed build.
+- Relative mouse / pointer lock; audio.
 
 ## Appendix A: Key sources
 

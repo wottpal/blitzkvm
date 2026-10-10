@@ -34,6 +34,9 @@ type Config struct {
 	Password               string
 	RPCTimeout             time.Duration
 	ExperimentalUSBNetwork bool
+	// ICELoopbackOnly restricts ICE to loopback (tests against a local
+	// emulator).
+	ICELoopbackOnly bool
 }
 
 type App struct {
@@ -3496,6 +3499,8 @@ func (a *App) closeJigglerEditor() {
 	a.settingsInputFocus = settingsInputNone
 }
 
+// defaultUSBDevices matches the upstream web UI's "default" preset, which
+// includes audio (leaving it out would switch USB audio off persistently).
 func defaultUSBDevices() session.USBDevices {
 	return session.USBDevices{
 		Keyboard:      true,
@@ -3503,6 +3508,7 @@ func defaultUSBDevices() session.USBDevices {
 		RelativeMouse: true,
 		MassStorage:   true,
 		SerialConsole: false,
+		Audio:         true,
 		Network:       false,
 	}
 }
@@ -4094,11 +4100,12 @@ func (a *App) connectTo(target string) {
 	a.stats = client.StatsSnapshot{}
 	a.statsHistory = nil
 	a.ctrl = session.New(session.Config{
-		BaseURL:      baseURL,
-		Password:     password,
-		RPCTimeout:   a.cfg.RPCTimeout,
-		Reconnect:    true,
-		NewVideoSink: openh264.NewSink,
+		BaseURL:         baseURL,
+		Password:        password,
+		RPCTimeout:      a.cfg.RPCTimeout,
+		Reconnect:       true,
+		NewVideoSink:    openh264.NewSink,
+		ICELoopbackOnly: a.cfg.ICELoopbackOnly,
 	})
 	if a.ctx != nil {
 		a.ctrl.Start(a.ctx)

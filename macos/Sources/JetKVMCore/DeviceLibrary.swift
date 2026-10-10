@@ -7,7 +7,8 @@ public struct Device: Codable, Equatable, Identifiable {
     public var id: String
     public var name: String
     public var addresses: [String]
-    /// The device's own ID (GET /device), learned on first connect.
+    /// The device's own ID, learned on first connect (GET /device, or over
+    /// RPC after login on password-protected devices).
     public var deviceID: String?
     public var modifierProfile: String
     public var scalingMode: String
@@ -32,9 +33,10 @@ public struct Device: Codable, Equatable, Identifiable {
     public var profile: ModifierProfile { ModifierProfile(rawValue: modifierProfile) ?? .mac }
     public var scaling: ScalingMode { ScalingMode(rawValue: scalingMode) ?? .fit }
 
-    /// Key under which the password is stored: the device ID when known,
-    /// so the secret follows the device across address changes.
-    public var credentialAccount: String { deviceID ?? addresses.first ?? id }
+    /// Key under which the password is stored: the device ID when known
+    /// (the secret follows the device across address changes), otherwise
+    /// this entry's stable local ID.
+    public var credentialAccount: String { deviceID ?? id }
 
     /// Splits "a, b c" into a clean address list.
     public static func parseAddresses(_ text: String) -> [String] {
@@ -64,7 +66,15 @@ public final class DeviceStore {
         guard let data = try? Data(contentsOf: url) else { devices = []; return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        devices = (try? decoder.decode([Device].self, from: data)) ?? []
+        do {
+            devices = try decoder.decode([Device].self, from: data)
+        } catch {
+            // Never let the next save() overwrite a file we could not read:
+            // keep it aside for recovery.
+            let backup = url.appendingPathExtension("unreadable-\(Int(Date().timeIntervalSince1970))")
+            try? FileManager.default.moveItem(at: url, to: backup)
+            devices = []
+        }
     }
 
     public func save() throws {
@@ -98,12 +108,15 @@ public final class DeviceStore {
     }
 }
 
-/// Response of GET /device (needs no login on JetKVM).
+/// What an address answered. Firmware requires a login for GET /device on
+/// password-protected devices, so `deviceId` is nil there ("a JetKVM, identity
+/// unknown"): the engine then verifies the pinned ID after login, before any
+/// input is sent.
 public struct DeviceIdentity: Decodable, Equatable {
-    public var deviceId: String
+    public var deviceId: String?
     public var authMode: String?
 
-    public init(deviceId: String, authMode: String?) {
+    public init(deviceId: String?, authMode: String?) {
         self.deviceId = deviceId
         self.authMode = authMode
     }
@@ -118,7 +131,10 @@ public enum ProbeError: Error, Equatable {
 /// HTTP — never by opening WebRTC sessions, because a new JetKVM session takes
 /// over the current one immediately. The earliest address in the list wins
 /// among those answering within `preferenceWindow` of the first answer, and
-/// an address whose device ID differs from the saved one is rejected.
+/// an address reporting a device ID other than the saved one is rejected. An
+/// address confirming the saved ID beats one whose identity is unknown
+/// (password-protected): the probe sends no cookies, so when one address
+/// answers as the device, a 401 elsewhere is another device.
 public enum AddressProbe {
     public typealias Fetch = (_ address: String) async -> DeviceIdentity?
 
@@ -130,18 +146,23 @@ public enum AddressProbe {
             for (index, address) in addresses.enumerated() {
                 group.addTask { (index, await fetch(address)) }
             }
-            var answers: [Int: DeviceIdentity] = [:]
+            var confirmed: [Int: DeviceIdentity] = [:]
+            var unknown: [Int: DeviceIdentity] = [:]
             var mismatch: ProbeError?
             var timerStarted = false
             while let (index, identity) = await group.next() {
                 if index == timerIndex { break } // preference window over
                 guard let identity else { continue }
-                if let expected = expectedDeviceID, expected != identity.deviceId {
-                    mismatch = .identityMismatch(expected: expected, found: identity.deviceId)
+                if let expected = expectedDeviceID, let found = identity.deviceId, expected != found {
+                    mismatch = .identityMismatch(expected: expected, found: found)
                     continue
                 }
-                answers[index] = identity
-                if index == 0 { break } // the most preferred address answered
+                if expectedDeviceID != nil && identity.deviceId == nil {
+                    unknown[index] = identity
+                } else {
+                    confirmed[index] = identity
+                    if index == 0 { break } // the most preferred address answered
+                }
                 if !timerStarted {
                     timerStarted = true
                     group.addTask {
@@ -151,6 +172,7 @@ public enum AddressProbe {
                 }
             }
             group.cancelAll()
+            let answers = confirmed.isEmpty ? unknown : confirmed
             if let best = answers.keys.min(), let identity = answers[best] {
                 return .success((addresses[best], identity))
             }
@@ -158,16 +180,32 @@ public enum AddressProbe {
         }
     }
 
-    /// GET http(s)://address/device with a short timeout.
+    /// GET http(s)://address/device with a short timeout. A 401 counts as
+    /// reachable with unknown identity when the public /device/status
+    /// endpoint confirms a JetKVM answers there.
     public static func httpFetch(timeout: TimeInterval = 2) -> Fetch {
         return { address in
-            let base = address.contains("://") ? address : "http://" + address
-            guard let url = URL(string: base.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/device") else { return nil }
-            var request = URLRequest(url: url, timeoutInterval: timeout)
-            request.cachePolicy = .reloadIgnoringLocalCacheData
-            guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-            return try? JSONDecoder().decode(DeviceIdentity.self, from: data)
+            let base = (address.contains("://") ? address : "http://" + address).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard let (data, status) = await get(base + "/device", timeout: timeout) else { return nil }
+            if status == 200 {
+                return try? JSONDecoder().decode(DeviceIdentity.self, from: data)
+            }
+            guard status == 401, let (statusData, code) = await get(base + "/device/status", timeout: timeout), code == 200,
+                  (try? JSONDecoder().decode(DeviceStatus.self, from: statusData)) != nil else { return nil }
+            return DeviceIdentity(deviceId: nil, authMode: "password")
         }
+    }
+
+    private struct DeviceStatus: Decodable {
+        var isSetup: Bool
+    }
+
+    private static func get(_ string: String, timeout: TimeInterval) async -> (Data, Int)? {
+        guard let url = URL(string: string) else { return nil }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return nil }
+        return (data, http.statusCode)
     }
 }

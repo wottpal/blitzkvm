@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -65,12 +66,19 @@ func (sess *session) dispatchRPC(req jsonrpc.Request) (resp jsonrpc.Response, af
 	srv := sess.serverRef
 	st := &srv.state
 	ok := func(result any) jsonrpc.Response { return jsonrpc.NewResponse(req.ID, result) }
-	invalid := func(message string) jsonrpc.Response {
-		return jsonrpc.NewErrorResponse(req.ID, -32602, message, nil)
-	}
 	failed := func(message string) jsonrpc.Response {
 		// Upstream wraps handler errors as -32603 with the text in data.
 		return jsonrpc.NewErrorResponse(req.ID, -32603, "Internal error", message)
+	}
+	// Upstream never answers -32602: parameter errors are handler errors.
+	invalid := failed
+	if spec, found := rpcParams[req.Method]; found {
+		params, _ := req.Params.(map[string]any)
+		for _, name := range spec.required {
+			if _, present := params[name]; !present {
+				return failed("missing parameter: " + name), nil
+			}
+		}
 	}
 
 	switch req.Method {
@@ -165,12 +173,33 @@ func (sess *session) dispatchRPC(req jsonrpc.Request) (resp jsonrpc.Response, af
 		}
 		st.VideoState = "rebooting"
 		return ok(nil), func() {
-			// Simulate the device going away and coming back: willReboot,
-			// then the session drops; the HTTP server keeps serving.
+			// Like hwReboot: willReboot, a 1 s wait before the reply, then
+			// the device is gone (session and HTTP) for RebootDowntime.
 			_ = sess.sendEvent("willReboot", nil)
+			time.Sleep(time.Second)
+			srv.mu.Lock()
+			srv.offlineUntil = time.Now().Add(srv.cfg.RebootDowntime)
+			serveCtx := srv.serveCtx
+			srv.mu.Unlock()
+			if serveCtx == nil {
+				serveCtx = context.Background()
+			}
 			go func() {
-				time.Sleep(200 * time.Millisecond)
+				time.Sleep(100 * time.Millisecond) // the reply goes out first
 				sess.close()
+				// A client may have reconnected during the wait; the
+				// reboot ends that session too.
+				srv.mu.Lock()
+				current := srv.session
+				srv.mu.Unlock()
+				if current != nil {
+					current.close()
+				}
+				select {
+				case <-time.After(srv.cfg.RebootDowntime):
+				case <-serveCtx.Done():
+					return
+				}
 				srv.mu.Lock()
 				srv.state.VideoState = "ready"
 				srv.mu.Unlock()
@@ -620,8 +649,25 @@ func cloneNetworkState(src client.NetworkState) client.NetworkState {
 	return dst
 }
 
-func keysDownState(modifier byte, keys []byte) client.KeysDownState {
-	return client.KeysDownState{Modifier: modifier, Keys: append([]byte(nil), keys...)}
+// keysDownWire is the firmware's KeysDownState JSON: keys as a number array
+// (upstream usbgadget.ByteSlice), not base64 as a plain []byte would be.
+type keysDownWire struct {
+	Modifier byte      `json:"modifier"`
+	Keys     byteSlice `json:"keys"`
+}
+
+type byteSlice []byte
+
+func (b byteSlice) MarshalJSON() ([]byte, error) {
+	values := make([]int, len(b))
+	for i, v := range b {
+		values[i] = int(v)
+	}
+	return json.Marshal(values)
+}
+
+func keysDownState(modifier byte, keys []byte) keysDownWire {
+	return keysDownWire{Modifier: modifier, Keys: append(byteSlice(nil), keys...)}
 }
 
 // TrimBaseURL normalises an emulator listen address into a base URL.
@@ -662,9 +708,10 @@ func (s *Server) applyKeypress(key byte, press bool) {
 				return
 			}
 		}
-		copy(keys, keys[1:])
-		keys[len(keys)-1] = key
-		s.state.KeysDown = keys
+		// A 7th key overflows the 6-key buffer: the host gets an
+		// ErrorRollOver report and the device then tracks no keys down.
+		s.state.KeysDown = make([]byte, 6)
+		s.appendInputLocked("emulator", "rollover", fmt.Sprintf("key=%d", key))
 		return
 	}
 

@@ -15,9 +15,11 @@ import (
 // internal/usbgadget/hid_keyboard.go (release/0.5.9):
 //
 //   - Messages are dispatched to four FIFO queues by type (handshake;
-//     keyboard + macros; pointer; everything else incl. keepalive and macro
-//     cancel). Each queue is processed sequentially, so a running macro blocks
-//     later keyboard messages but not pointer input or a cancel.
+//     keyboard + macros; pointer; everything else incl. keepalive). Each queue
+//     is processed sequentially, so a running macro blocks later keyboard
+//     messages but not pointer input. A full queue blocks the data channel
+//     (and so everything behind it), as upstream. A macro cancel is handled
+//     on arrival, before anything later on its channel is queued.
 //   - A 0x05 key press of a non-modifier key auto-releases after 100 ms unless
 //     0x09 keepalives (expected every 50 ms) extend it. Keepalives arriving
 //     more than 50 ms late, or more than 225 ms after the last valid one, are
@@ -49,6 +51,7 @@ func hidQueueIndex(msgType byte) int {
 }
 
 type hidState struct {
+	ctx       context.Context
 	sess      *session
 	queues    [hidQueueCount]chan hidQueued
 	available atomic.Bool
@@ -68,7 +71,7 @@ type hidQueued struct {
 }
 
 func newHIDState(ctx context.Context, sess *session) *hidState {
-	h := &hidState{sess: sess, autoRelease: map[byte]*time.Timer{}}
+	h := &hidState{ctx: ctx, sess: sess, autoRelease: map[byte]*time.Timer{}}
 	for i := range h.queues {
 		q := make(chan hidQueued, hidQueueDepth)
 		h.queues[i] = q
@@ -93,11 +96,16 @@ func (h *hidState) enqueue(channel string, data []byte) {
 	if len(data) == 0 {
 		return
 	}
+	if data[0] == hidrpc.TypeCancelKeyboardMacro {
+		// Inline, like upstream: a queued cancel could arrive after its
+		// macro ended and cancel the next one.
+		h.sess.serverRef.appendInput(channel, "hidrpc.CancelKeyboardMacro", "")
+		h.cancelMacro()
+		return
+	}
 	select {
 	case h.queues[hidQueueIndex(data[0])] <- hidQueued{channel: channel, data: append([]byte(nil), data...)}:
-	default:
-		log := logging.Subsystem("emulator")
-		log.Warn().Uint8("type", data[0]).Msg("HID queue full, dropping message")
+	case <-h.ctx.Done():
 	}
 }
 
@@ -114,7 +122,8 @@ func (h *hidState) process(ctx context.Context, channel string, data []byte) err
 		if delay := srv.cfg.Faults.HIDHandshakeDelay; delay > 0 {
 			time.Sleep(delay)
 		}
-		reply, _ := hidrpc.Handshake{Version: v.Version}.MarshalBinary()
+		// Upstream always answers with its own version.
+		reply, _ := hidrpc.Handshake{Version: hidrpc.Version}.MarshalBinary()
 		if err := h.sess.sendHID(reply); err != nil {
 			return err
 		}
@@ -262,7 +271,17 @@ func (h *hidState) cancelMacro() {
 	}
 }
 
+// resetKeepAlive mirrors upstream resetKeepAliveTime, called whenever the
+// set of held keys changes: keepalive timing starts over for the new hold.
+func (h *hidState) resetKeepAlive() {
+	h.kaMu.Lock()
+	h.lastKeepAlive = time.Time{}
+	h.lastTimerReset = time.Time{}
+	h.kaMu.Unlock()
+}
+
 func (h *hidState) reportKeysDown() {
+	h.resetKeepAlive()
 	srv := h.sess.serverRef
 	srv.mu.Lock()
 	state := keysDownState(srv.state.KeyboardModifiers, srv.state.KeysDown)
@@ -297,7 +316,8 @@ func (h *hidState) reportMacroState(running bool) {
 		_ = h.sess.sendHID(msg)
 		return
 	}
-	_ = h.sess.sendEvent("keyboardMacroState", map[string]any{"state": running, "isPaste": true})
+	// Upstream's hidrpc.KeyboardMacroState has no JSON tags.
+	_ = h.sess.sendEvent("keyboardMacroState", struct{ State, IsPaste bool }{running, true})
 }
 
 // clearKeyboard mirrors upstream's behaviour on takeover and session close:

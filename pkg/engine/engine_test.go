@@ -19,6 +19,9 @@ type harness struct {
 	w      *engineipc.Writer
 	frames chan frame
 	done   chan error
+	// firstUnit keeps the first access unit, whenever it arrives (waitFor
+	// skips frames it is not looking for).
+	firstUnit chan frame
 }
 
 type frame struct {
@@ -30,7 +33,7 @@ func startEngine(t *testing.T) *harness {
 	t.Helper()
 	appToEngineR, appToEngineW := io.Pipe()
 	engineToAppR, engineToAppW := io.Pipe()
-	h := &harness{t: t, w: engineipc.NewWriter(appToEngineW), frames: make(chan frame, 256), done: make(chan error, 1)}
+	h := &harness{t: t, w: engineipc.NewWriter(appToEngineW), frames: make(chan frame, 256), done: make(chan error, 1), firstUnit: make(chan frame, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		h.done <- engine.Run(ctx, appToEngineR, engineToAppW)
@@ -43,6 +46,12 @@ func startEngine(t *testing.T) *harness {
 			if err != nil {
 				close(h.frames)
 				return
+			}
+			if typ == engineipc.TypeAccessUnit {
+				select {
+				case h.firstUnit <- frame{typ, payload}:
+				default:
+				}
 			}
 			select {
 			case h.frames <- frame{typ, payload}:
@@ -124,7 +133,12 @@ func TestEngineEndToEnd(t *testing.T) {
 		return json.Unmarshal(evt.Snapshot, &snap) == nil && snap.Phase == "connected"
 	})
 
-	au := h.waitFor(10*time.Second, "first access unit", func(f frame) bool { return f.typ == engineipc.TypeAccessUnit })
+	var au frame
+	select {
+	case au = <-h.firstUnit:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no access unit received")
+	}
 	hdr, data, err := engineipc.ParseAccessUnit(au.payload)
 	if err != nil {
 		t.Fatal(err)

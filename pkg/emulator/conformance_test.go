@@ -1,8 +1,12 @@
 package emulator
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +30,7 @@ import (
 func startTestServer(t *testing.T, cfg Config) *Server {
 	t.Helper()
 	cfg.ListenAddr = "127.0.0.1:0"
+	cfg.ICELoopbackOnly = true
 	if cfg.AuthMode == AuthModeUnset {
 		cfg.AuthMode = AuthModeNoPassword
 	}
@@ -55,6 +60,7 @@ func startTestServer(t *testing.T, cfg Config) *Server {
 
 func connectClient(t *testing.T, cfg client.Config) *client.Client {
 	t.Helper()
+	cfg.ICELoopbackOnly = true
 	c, err := client.New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +143,7 @@ func TestPacketLossIsRepairedByNACK(t *testing.T) {
 
 func TestConnectFailsFastWhenDeviceNeverAnswers(t *testing.T) {
 	srv := startTestServer(t, Config{Faults: FaultConfig{SignalingSilent: true}})
-	c, err := client.New(client.Config{BaseURL: srv.BaseURL(), ConnectTimeout: time.Second})
+	c, err := client.New(client.Config{ICELoopbackOnly: true, BaseURL: srv.BaseURL(), ConnectTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +160,7 @@ func TestConnectFailsFastWhenDeviceNeverAnswers(t *testing.T) {
 
 func TestConnectSurfacesOfferRejection(t *testing.T) {
 	srv := startTestServer(t, Config{Faults: FaultConfig{SignalingAnswerError: true}})
-	c, err := client.New(client.Config{BaseURL: srv.BaseURL(), ConnectTimeout: 5 * time.Second})
+	c, err := client.New(client.Config{ICELoopbackOnly: true, BaseURL: srv.BaseURL(), ConnectTimeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +192,7 @@ func TestReconnectReusesSessionCookie(t *testing.T) {
 
 func TestWrongPasswordIsAnAuthError(t *testing.T) {
 	srv := startTestServer(t, Config{AuthMode: AuthModePassword, Password: "secret"})
-	c, err := client.New(client.Config{BaseURL: srv.BaseURL(), Password: "nope"})
+	c, err := client.New(client.Config{ICELoopbackOnly: true, BaseURL: srv.BaseURL(), Password: "nope"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,6 +240,38 @@ func TestDeviceAutoReleasesWithoutKeepAlive(t *testing.T) {
 	if keys := srv.State().KeysDown; keys[0] != 0 {
 		t.Fatalf("key not auto-released after a stalled link: %v", keys)
 	}
+}
+
+// A second hold after a pause must get fresh keepalive timing: stale
+// timestamps from the first hold would make the device ignore keepalives and
+// release the key.
+func TestSecondHoldSurvivesThanksToKeepAlive(t *testing.T) {
+	srv, err := NewServer(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &hidState{sess: &session{serverRef: srv}, autoRelease: map[byte]*time.Timer{}}
+	key := func(press bool) {
+		t.Helper()
+		msg, _ := hidrpc.Keypress{Key: 4, Press: press}.MarshalBinary()
+		if err := h.process(context.Background(), "hidrpc", msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key(true)
+	h.keepAlive(time.Now())
+	key(false)
+	time.Sleep(3 * keepAliveMaxStale) // idle between holds
+
+	key(true)
+	for range 8 { // 400 ms, 4× the auto-release delay
+		time.Sleep(keepAliveRate)
+		h.keepAlive(time.Now())
+	}
+	if keys := srv.State().KeysDown; keys[0] != 4 {
+		t.Fatalf("second hold was auto-released despite keepalives: %v", keys)
+	}
+	key(false)
 }
 
 func TestTypeMacroIsChunkedAndWaitsForCompletion(t *testing.T) {
@@ -335,8 +373,21 @@ func TestH265ReplayReachesAccessUnitConsumer(t *testing.T) {
 	if len(units) < 20 {
 		t.Fatalf("received %d H.265 access units", len(units))
 	}
-	if units[0].Codec != video.CodecH265 || !units[0].Keyframe {
-		t.Fatalf("first unit must be an H.265 keyframe: %+v", units[0].Codec)
+	// The assembler only starts at a keyframe; check that it really is a
+	// decodable start and that later keyframes are recognised too.
+	if units[0].Codec != video.CodecH265 || !video.HasParameterSets(video.CodecH265, units[0].Data) {
+		t.Fatalf("first unit must be an H.265 keyframe with VPS/SPS/PPS: %+v", units[0].Codec)
+	}
+	keyframes := 0
+	for _, au := range units {
+		if au.Keyframe {
+			keyframes++
+		}
+	}
+	// The clip has a keyframe every 15 frames: not one, and not every unit
+	// (which a misclassified NAL type would cause).
+	if maxKeyframes := len(units)/15 + 2; keyframes < 2 || keyframes > maxKeyframes {
+		t.Fatalf("%d keyframes in %d units, want 2..%d", keyframes, len(units), maxKeyframes)
 	}
 }
 
@@ -364,5 +415,195 @@ func TestBurnedTimestampRoundTrips(t *testing.T) {
 	got, ok := BurnedTimestamp(img.Y, img.YStride, 640, 360)
 	if !ok || !got.Equal(at) {
 		t.Fatalf("barcode decoded %v ok=%v, want %v", got, ok, at)
+	}
+}
+
+func TestDeviceInfoNeedsLogin(t *testing.T) {
+	srv := startTestServer(t, Config{AuthMode: AuthModePassword, Password: "secret"})
+	hc := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := hc.Get(srv.BaseURL() + "/device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /device without login = %d, want 401 (protected upstream)", resp.StatusCode)
+	}
+	resp, err = hc.Get(srv.BaseURL() + "/device/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /device/status = %d, want 200 (public)", resp.StatusCode)
+	}
+}
+
+// With a still-valid cookie (or no password) the identity is checked before
+// any login, so the stored password never reaches the wrong device.
+func TestConnectRefusesADifferentDeviceBeforeLogin(t *testing.T) {
+	srv := startTestServer(t, Config{AuthMode: AuthModePassword, Password: "secret"})
+	jar, err := auth.NewClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := connectClient(t, client.Config{BaseURL: srv.BaseURL(), Password: "secret", Auth: jar, ExpectedDeviceID: "emu-jetkvm-001"})
+	if err := first.VerifyIdentity(context.Background()); err != nil {
+		t.Fatalf("right device rejected: %v", err)
+	}
+	_ = first.Close()
+
+	c, err := client.New(client.Config{ICELoopbackOnly: true, BaseURL: srv.BaseURL(), Password: "secret", Auth: jar, ExpectedDeviceID: "some-other-device"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.Connect(context.Background()); !errors.Is(err, client.ErrDeviceMismatch) {
+		t.Fatalf("want ErrDeviceMismatch, got %v", err)
+	}
+	if got := srv.LoginCount(); got != 1 {
+		t.Fatalf("logins = %d, want 1: the password was sent to the wrong device", got)
+	}
+}
+
+// Without a cookie, password-protected firmware answers GET /device only
+// after login, so the check happens over RPC before any input.
+func TestConnectRefusesADifferentDeviceAfterLogin(t *testing.T) {
+	srv := startTestServer(t, Config{AuthMode: AuthModePassword, Password: "secret"})
+	c := connectClient(t, client.Config{BaseURL: srv.BaseURL(), Password: "secret", ExpectedDeviceID: "some-other-device"})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.VerifyIdentity(ctx); !errors.Is(err, client.ErrDeviceMismatch) {
+		t.Fatalf("want ErrDeviceMismatch, got %v", err)
+	}
+}
+
+// Every client setter must send the parameter names the firmware binds
+// (a wrong name fails on the device with "missing parameter").
+func TestClientSendsFirmwareParameterNames(t *testing.T) {
+	srv := startTestServer(t, Config{})
+	c := connectClient(t, client.Config{BaseURL: srv.BaseURL()})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	calls := map[string]func() error{
+		"SetStreamQualityFactor":  func() error { return c.SetStreamQualityFactor(ctx, 1) },
+		"SetKeyboardLayout":       func() error { return c.SetKeyboardLayout(ctx, "en-US") },
+		"SetEDID":                 func() error { return c.SetEDID(ctx, "") },
+		"SetATXPowerAction":       func() error { return c.SetATXPowerAction(ctx, "power-short") },
+		"SetActiveExtension":      func() error { return c.SetActiveExtension(ctx, "") },
+		"SetDCPowerState":         func() error { return c.SetDCPowerState(ctx, false) },
+		"SetDCRestoreState":       func() error { return c.SetDCRestoreState(ctx, 0) },
+		"SetSerialSettings":       func() error { return c.SetSerialSettings(ctx, client.SerialSettings{}) },
+		"SetSerialCommandHistory": func() error { return c.SetSerialCommandHistory(ctx, nil) },
+		"SendCustomCommand":       func() error { return c.SendCustomCommand(ctx, "") },
+		"SetVideoCodecPreference": func() error { return c.SetVideoCodecPreference(ctx, "auto") },
+		"GetPublicIPAddresses":    func() error { _, err := c.GetPublicIPAddresses(ctx, false); return err },
+		"SetBacklightSettings":    func() error { return c.SetBacklightSettings(ctx, client.BacklightSettings{}) },
+		"SetVideoSleepMode":       func() error { return c.SetVideoSleepMode(ctx, 0) },
+		"SetMQTTSettings":         func() error { return c.SetMQTTSettings(ctx, client.MQTTSettings{}) },
+		"TestMQTTConnection":      func() error { _, err := c.TestMQTTConnection(ctx, client.MQTTSettings{}); return err },
+		"SetAutoUpdateState":      func() error { return c.SetAutoUpdateState(ctx, false) },
+		"SetNetworkSettings":      func() error { return c.SetNetworkSettings(ctx, client.NetworkSettings{}) },
+		"SetTLSState":             func() error { return c.SetTLSState(ctx, client.TLSState{}) },
+		"SetUSBDevices":           func() error { return c.SetUSBDevices(ctx, client.USBDevices{Keyboard: true, AbsoluteMouse: true}) },
+		"SetDisplayRotation":      func() error { return c.SetDisplayRotation(ctx, "270") },
+		"SetDevChannelState":      func() error { return c.SetDevChannelState(ctx, false) },
+		"SetLocalLoopbackOnly":    func() error { return c.SetLocalLoopbackOnly(ctx, false) },
+		"SetSSHKeyState":          func() error { return c.SetSSHKeyState(ctx, "") },
+		"SetKeyboardMacros":       func() error { return c.SetKeyboardMacros(ctx, nil) },
+		"SetDeveloperModeState":   func() error { return c.SetDeveloperModeState(ctx, false) },
+		"SetJigglerState":         func() error { return c.SetJigglerState(ctx, false) },
+		"SetJigglerConfig":        func() error { return c.SetJigglerConfig(ctx, client.JigglerConfig{}) },
+		"MountMediaURL":           func() error { return c.MountMediaURL(ctx, "http://192.0.2.1/x.iso", "CDROM") },
+		"UnmountMedia":            func() error { return c.UnmountMedia(ctx) },
+		"DeleteStorageFile":       func() error { return c.DeleteStorageFile(ctx, "none.iso") },
+		"MountStorageFile":        func() error { return c.MountStorageFile(ctx, "none.iso", "CDROM") },
+		"StartStorageFileUpload":  func() error { _, err := c.StartStorageFileUpload(ctx, "x.iso", 1); return err },
+		// Last: it may switch USB emulation off.
+	}
+	defer func() {
+		if err := c.SetUSBEmulationState(ctx, true); err != nil && strings.Contains(err.Error(), "missing parameter") {
+			t.Errorf("SetUSBEmulationState: %v", err)
+		}
+	}()
+	// Reboot is not called (it takes the emulator offline); check its
+	// request shape directly.
+	if raw, _ := json.Marshal(client.RebootRequest{}); !strings.Contains(string(raw), `"force"`) {
+		t.Errorf("reboot request %s lacks \"force\"", raw)
+	}
+	for name, call := range calls {
+		if err := call(); err != nil && strings.Contains(err.Error(), "missing parameter") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestMissingRPCParameterIsAnInternalError(t *testing.T) {
+	srv := startTestServer(t, Config{})
+	c := connectClient(t, client.Config{BaseURL: srv.BaseURL()})
+	err := c.Call(context.Background(), "setStreamQualityFactor", map[string]any{"quality": 0.5}, nil)
+	var rpcErr *client.RPCError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != -32603 || rpcErr.Data != "missing parameter: factor" {
+		t.Fatalf("want -32603 missing parameter: factor, got %v", err)
+	}
+}
+
+func TestSeventhKeyRollsOver(t *testing.T) {
+	srv, err := NewServer(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key := byte(4); key < 11; key++ {
+		srv.applyKeypress(key, true)
+	}
+	if keys := srv.State().KeysDown; !bytes.Equal(keys, make([]byte, 6)) {
+		t.Fatalf("7 keys down = %v, want ErrorRollOver then all released", keys)
+	}
+	rolled := false
+	for _, in := range srv.Inputs() {
+		rolled = rolled || in.Type == "rollover"
+	}
+	if !rolled {
+		t.Fatal("rollover not recorded")
+	}
+}
+
+func TestKeysDownStateUsesFirmwareJSON(t *testing.T) {
+	srv := startTestServer(t, Config{})
+	c := connectClient(t, client.Config{BaseURL: srv.BaseURL()})
+	var raw json.RawMessage
+	if err := c.Call(context.Background(), "getKeyDownState", nil, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"keys":[0,0,0,0,0,0]`) {
+		t.Fatalf("getKeyDownState = %s, want keys as a number array (as firmware)", raw)
+	}
+	if _, err := c.GetKeyDownState(context.Background()); err != nil {
+		t.Fatalf("client cannot decode the firmware shape: %v", err)
+	}
+}
+
+// A pinned device's password must not go to a host that answers 401 but is
+// not a JetKVM (the address now belongs to a router, a camera, ...).
+func TestPasswordNotSentToANonJetKVM(t *testing.T) {
+	var logins atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/auth/login-local" {
+			logins.Add(1)
+		}
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer other.Close()
+	c, err := client.New(client.Config{ICELoopbackOnly: true, BaseURL: other.URL, Password: "secret", ExpectedDeviceID: "emu-jetkvm-001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	err = c.Connect(context.Background())
+	if !errors.Is(err, client.ErrDeviceMismatch) {
+		t.Fatalf("want ErrDeviceMismatch, got %v", err)
+	}
+	if logins.Load() != 0 {
+		t.Fatal("the password was sent to a host that is not a JetKVM")
 	}
 }

@@ -201,6 +201,26 @@ final class DeviceLibraryTests: XCTestCase {
         XCTAssertEqual(try? result.get().address, "vpn")
     }
 
+    func testProbeAcceptsUnknownIdentityBehindLogin() async {
+        // Password-protected firmware answers GET /device only after login.
+        let result = await AddressProbe.choose(addresses: ["lan"], expectedDeviceID: "real") { _ in
+            DeviceIdentity(deviceId: nil, authMode: "password")
+        }
+        XCTAssertEqual(try? result.get().address, "lan")
+        XCTAssertNil(try? result.get().identity.deviceId)
+    }
+
+    func testProbePrefersConfirmedIdentityOverUnknown() async {
+        // The LAN address now answers 401 (another, password-protected
+        // device); the VPN name confirms the saved ID.
+        let result = await AddressProbe.choose(addresses: ["lan", "vpn"], expectedDeviceID: "dev", preferenceWindow: .milliseconds(100)) { address in
+            if address == "lan" { return DeviceIdentity(deviceId: nil, authMode: "password") }
+            try? await Task.sleep(for: .milliseconds(20))
+            return DeviceIdentity(deviceId: "dev", authMode: nil)
+        }
+        XCTAssertEqual(try? result.get().address, "vpn")
+    }
+
     func testProbeRejectsImpostor() async {
         let result = await AddressProbe.choose(addresses: ["evil"], expectedDeviceID: "real") { _ in
             DeviceIdentity(deviceId: "other", authMode: "password")

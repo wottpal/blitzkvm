@@ -56,7 +56,6 @@ func (f *netemFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
 		stats: f.stats,
 		rng:   rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)),
 		drops: drops,
-		seen:  map[uint16]bool{},
 	}, nil
 }
 
@@ -69,10 +68,12 @@ type netemInterceptor struct {
 	rng   *rand.Rand
 	index int
 	drops map[int]bool
-	// seen tracks sequence numbers already sent once, so deterministic drops
-	// only affect the first transmission and NACK retransmissions get through.
-	seen   map[uint16]bool
-	queues map[uint32]chan delayedPacket
+	// highest is the newest sequence number sent (one video stream), so
+	// deterministic drops only affect first transmissions and NACK
+	// retransmissions get through, across sequence-number wrap.
+	started bool
+	highest uint16
+	queues  map[uint32]chan delayedPacket
 }
 
 func (n *netemInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
@@ -141,11 +142,12 @@ func (n *netemInterceptor) Close() error {
 func (n *netemInterceptor) shouldDrop(seq uint16) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.seen[seq] {
-		// Retransmission (NACK response): only random loss applies.
+	if n.started && int16(seq-n.highest) <= 0 {
+		// At or behind the newest packet (modulo wrap): a retransmission
+		// (NACK response). Only random loss applies.
 		return n.cfg.LossRate > 0 && n.rng.Float64() < n.cfg.LossRate
 	}
-	n.seen[seq] = true
+	n.started, n.highest = true, seq
 	idx := n.index
 	n.index++
 	if n.drops[idx] {

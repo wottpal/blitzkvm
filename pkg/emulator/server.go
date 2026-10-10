@@ -56,8 +56,14 @@ type Config struct {
 	// TakeoverCloseDelay is how long a replaced session survives after
 	// otherSessionConnected. Default 1 s, like the device.
 	TakeoverCloseDelay time.Duration
-	Netem              NetemConfig
-	Faults             FaultConfig
+	// RebootDowntime is how long the device is unreachable after a reboot
+	// RPC (every HTTP connection is dropped). Default 20 s, about a real
+	// boot.
+	RebootDowntime time.Duration
+	Netem          NetemConfig
+	Faults         FaultConfig
+	// ICELoopbackOnly restricts ICE to 127.0.0.1 (tests).
+	ICELoopbackOnly bool
 }
 
 type FaultConfig struct {
@@ -156,6 +162,8 @@ type Server struct {
 	netemStats NetemStats
 
 	mu           sync.Mutex
+	serveCtx     context.Context // ends with ListenAndServe
+	offlineUntil time.Time       // rebooting: unreachable until then
 	session      *session
 	sessionCount int
 	loginCount   int
@@ -210,6 +218,9 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.DeviceVersion == "" {
 		cfg.DeviceVersion = DefaultDeviceVersion
 	}
+	if cfg.RebootDowntime == 0 {
+		cfg.RebootDowntime = 20 * time.Second
+	}
 	if cfg.TakeoverCloseDelay == 0 {
 		cfg.TakeoverCloseDelay = time.Second
 	}
@@ -243,7 +254,24 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("/webrtc/signaling/client", s.handleSignalingClient)
 	mux.HandleFunc("/healthz", s.handleHealth)
 
-	s.httpServer = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		offline := time.Now().Before(s.offlineUntil)
+		s.mu.Unlock()
+		if offline {
+			// Rebooting: drop the connection as an unreachable host would.
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+					return
+				}
+			}
+			http.Error(w, "rebooting", http.StatusServiceUnavailable)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	s.httpServer = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	return s, nil
 }
 
@@ -368,6 +396,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.listener = ln
+	s.serveCtx = ctx
 	s.mu.Unlock()
 
 	errCh := make(chan error, 1)
@@ -504,6 +533,14 @@ func (s *Server) SendWillReboot(redirectTo string) {
 }
 
 // DisconnectSession closes the active WebRTC session as a network drop would.
+// SetDeviceID changes the device identity, as if another JetKVM now
+// answered at this address.
+func (s *Server) SetDeviceID(id string) {
+	s.mu.Lock()
+	s.state.DeviceID = id
+	s.mu.Unlock()
+}
+
 func (s *Server) DisconnectSession() {
 	s.mu.Lock()
 	current := s.session
@@ -596,7 +633,9 @@ func (s *Server) authorized(r *http.Request) bool {
 	s.mu.Lock()
 	mode, token := s.cfg.AuthMode, s.token
 	s.mu.Unlock()
-	if mode == AuthModeNoPassword || mode == AuthModeUnset {
+	// Like upstream protectedMiddleware: only noPassword mode is open; a
+	// device that is not set up yet has no token, so protected routes 401.
+	if mode == AuthModeNoPassword {
 		return true
 	}
 	cookie, err := r.Cookie("authToken")
@@ -695,14 +734,18 @@ func (s *Server) handleDeviceStatus(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]bool{"isSetup": isSetup})
 }
 
-// handleDevice serves GET /device. Like upstream it needs no login, which lets
-// clients verify a device's identity before sending a stored password.
+// handleDevice serves GET /device. Like upstream (a protected route) it needs
+// a login in password mode; only /device/status is public.
 func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	if s.handlePreflight(w, r) {
 		return
 	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorized(r) {
+		writeJSONError(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
 	s.mu.Lock()
@@ -764,6 +807,11 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if s.handlePreflight(w, r) {
 		return
 	}
+	// Protected upstream, like every route but login and /device/status.
+	if !s.authorized(r) {
+		writeJSONError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -777,6 +825,10 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePasswordLocal(w http.ResponseWriter, r *http.Request) {
 	if s.handlePreflight(w, r) {
+		return
+	}
+	if !s.authorized(r) {
+		writeJSONError(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
 	switch r.Method {
@@ -831,6 +883,10 @@ func (s *Server) handlePasswordLocal(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeletePassword(w http.ResponseWriter, r *http.Request) {
 	if s.handlePreflight(w, r) {
+		return
+	}
+	if !s.authorized(r) {
+		writeJSONError(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
 	if r.Method != http.MethodDelete {
@@ -969,7 +1025,11 @@ func (s *Server) newPeerConnection() (*webrtc.PeerConnection, error) {
 	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, registry); err != nil {
 		return nil, err
 	}
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithInterceptorRegistry(registry))
+	se := webrtc.SettingEngine{}
+	if s.cfg.ICELoopbackOnly {
+		client.RestrictICEToLoopback(&se)
+	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(mediaEngine), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(se))
 	return api.NewPeerConnection(webrtc.Configuration{})
 }
 
@@ -1164,7 +1224,7 @@ func (sess *session) attachDataChannel(dc *webrtc.DataChannel) {
 				_ = sess.sendEvent("atxState", atx)
 			}
 			_ = sess.sendEvent("usbState", "configured")
-			_ = sess.sendEvent("failsafeMode", map[string]any{"active": false, "reason": ""})
+			// Upstream sends failsafeMode only while failsafe is active.
 		})
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			if !msg.IsString {
@@ -1190,11 +1250,13 @@ func (sess *session) attachDataChannel(dc *webrtc.DataChannel) {
 	}
 }
 
+// waitConnected waits for the peer connection (ICE and DTLS) to be up, so
+// SRTP packets written afterwards are not dropped.
 func (sess *session) waitConnected(ctx context.Context) bool {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if sess.pc.ICEConnectionState() == webrtc.ICEConnectionStateConnected {
+		if sess.pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
 			return true
 		}
 		select {

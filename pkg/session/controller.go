@@ -49,6 +49,12 @@ type Config struct {
 	Reconnect      bool
 	ReconnectBase  time.Duration
 	ReconnectMax   time.Duration
+	// ExpectedDeviceID makes every connect verify the device's identity
+	// before any input is sent (see client.Config.ExpectedDeviceID).
+	ExpectedDeviceID string
+	// ICELoopbackOnly restricts ICE to loopback (tests against a local
+	// emulator).
+	ICELoopbackOnly bool
 	// OfferH265 lets the device stream H.265; only for consumers that can
 	// decode it (see client.Config.OfferH265).
 	OfferH265 bool
@@ -110,9 +116,12 @@ type Controller struct {
 	runGen       uint64
 	runDone      chan struct{}
 	reconnectNow bool
+	// wake interrupts a retry wait (ReconnectNow).
+	wake chan struct{}
 
 	pasteMu     sync.Mutex
 	pasteCancel context.CancelFunc
+	pasteGen    uint64
 }
 
 const (
@@ -215,6 +224,7 @@ func New(cfg Config) *Controller {
 	return &Controller{
 		cfg:  cfg,
 		auth: authClient,
+		wake: make(chan struct{}, 1),
 		snapshot: Snapshot{
 			Phase:   PhaseIdle,
 			Status:  "idle",
@@ -242,7 +252,13 @@ func (c *Controller) Reboot() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.cfg.MutationTimeout)
 	defer cancel()
-	return current.Reboot(ctx)
+	err := current.Reboot(ctx)
+	if errors.Is(err, client.ErrClosed) && c.Snapshot().Phase == PhaseRebooting {
+		// The device announced the reboot (willReboot) and the session
+		// ended before its reply, as firmware does.
+		return nil
+	}
+	return err
 }
 
 func (c *Controller) TryUpdate() error {
@@ -1798,11 +1814,16 @@ func (c *Controller) ExecutePaste(text string, delay uint16) ([]rune, error) {
 		c.pasteCancel()
 	}
 	c.pasteCancel = cancel
+	c.pasteGen++
+	gen := c.pasteGen
 	c.pasteMu.Unlock()
 	defer func() {
 		cancel()
 		c.pasteMu.Lock()
-		c.pasteCancel = nil
+		// Only clear our own registration: a newer paste may have replaced it.
+		if c.pasteGen == gen {
+			c.pasteCancel = nil
+		}
 		c.pasteMu.Unlock()
 	}()
 	// Chunked (≤128 steps per message), each chunk waits for the device to

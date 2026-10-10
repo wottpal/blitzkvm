@@ -865,7 +865,7 @@ func TestAppPasswordRetryFlowConnects(t *testing.T) {
 	srv, ctx, cancel := startAppEmulator(t)
 	defer cancel()
 
-	app, err := New(Config{BaseURL: srv.BaseURL(), RPCTimeout: 2 * time.Second})
+	app, err := New(Config{BaseURL: srv.BaseURL(), RPCTimeout: 2 * time.Second, ICELoopbackOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -903,9 +903,10 @@ func TestAppCLIConfigPasswordConnectsWithoutPrompt(t *testing.T) {
 	defer cancel()
 
 	app, err := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -928,7 +929,7 @@ func TestAppWrongPasswordReturnsToPasswordPromptWithError(t *testing.T) {
 	srv, ctx, cancel := startAppEmulator(t)
 	defer cancel()
 
-	app, err := New(Config{BaseURL: srv.BaseURL(), RPCTimeout: 2 * time.Second})
+	app, err := New(Config{BaseURL: srv.BaseURL(), RPCTimeout: 2 * time.Second, ICELoopbackOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -968,9 +969,10 @@ func TestLoadATXSection(t *testing.T) {
 	srv.SetATXState(true, true)
 
 	app, err := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1006,9 +1008,10 @@ func TestLoadSerialExtensionSection(t *testing.T) {
 	srv.SetActiveExtension("serial-console")
 
 	app, err := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1058,9 +1061,10 @@ func TestDefaultSerialSettingsFallback(t *testing.T) {
 func startAppEmulator(t *testing.T) (*emulator.Server, context.Context, context.CancelFunc) {
 	t.Helper()
 	srv, err := emulator.NewServer(emulator.Config{
-		ListenAddr: "127.0.0.1:0",
-		AuthMode:   emulator.AuthModePassword,
-		Password:   "secret",
+		ListenAddr:      "127.0.0.1:0",
+		AuthMode:        emulator.AuthModePassword,
+		Password:        "secret",
+		ICELoopbackOnly: true,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -94,6 +94,22 @@ func (c *Client) GetDeviceInfo(ctx context.Context, baseURL string) (DeviceInfo,
 	}, nil
 }
 
+// GetDeviceStatus fetches the public GET /device/status ({"isSetup":bool}).
+// Only a JetKVM answers it that way, so it tells a password-protected
+// JetKVM apart from another host that answers 401.
+func (c *Client) GetDeviceStatus(ctx context.Context, baseURL string) (isSetup bool, err error) {
+	var payload struct {
+		IsSetup *bool `json:"isSetup"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, baseURL, "/device/status", nil, &payload); err != nil {
+		return false, err
+	}
+	if payload.IsSetup == nil {
+		return false, fmt.Errorf("GET /device/status: no isSetup field")
+	}
+	return *payload.IsSetup, nil
+}
+
 func (c *Client) Login(ctx context.Context, baseURL, password string) error {
 	if password == "" {
 		return nil

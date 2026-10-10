@@ -19,6 +19,11 @@ final class DevicesModel: ObservableObject {
     }
 
     func save(_ device: Device, password: String?) {
+        var device = device
+        // The editor's copy may predate a device ID learned meanwhile.
+        if device.deviceID == nil, let saved = store.device(id: device.id) {
+            device.deviceID = saved.deviceID
+        }
         store.upsert(device)
         try? store.save()
         if let password, !password.isEmpty {
@@ -30,7 +35,10 @@ final class DevicesModel: ObservableObject {
     func delete(_ device: Device) {
         store.remove(id: device.id)
         try? store.save()
-        Keychain.deletePassword(account: device.credentialAccount)
+        // Another entry for the same device shares the Keychain item.
+        if !store.devices.contains(where: { $0.credentialAccount == device.credentialAccount }) {
+            Keychain.deletePassword(account: device.credentialAccount)
+        }
         reload()
     }
 }

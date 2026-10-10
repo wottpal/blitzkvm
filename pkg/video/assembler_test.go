@@ -8,30 +8,46 @@ import (
 	"github.com/pion/rtp"
 )
 
-// frame builds the RTP packets of one H.264 access unit: a single-NAL packet
-// (IDR or non-IDR slice) or an FU-A fragmented NAL split into n packets.
+// frame builds the RTP packets of one H.264 access unit. Keyframes start
+// with a STAP-A carrying SPS and PPS, as real encoders send them. A frame of
+// n packets uses FU-A fragmentation for its slice.
 func frame(seq uint16, ts uint32, idr bool, n int) []*rtp.Packet {
+	var pkts []*rtp.Packet
+	add := func(payload []byte) {
+		pkts = append(pkts, &rtp.Packet{Header: rtp.Header{SequenceNumber: seq + uint16(len(pkts)), Timestamp: ts}, Payload: payload})
+	}
 	nalType := byte(1)
 	if idr {
 		nalType = 5
+		sps, pps := []byte{0x67, 0x64, 0x00, 0x1f}, []byte{0x68, 0xee, 0x3c}
+		stap := []byte{24, 0, byte(len(sps))}
+		stap = append(stap, sps...)
+		stap = append(stap, 0, byte(len(pps)))
+		stap = append(stap, pps...)
+		if n == 1 {
+			stap = append(stap, 0, 3, 0x60|nalType, 0xaa, 0xbb)
+			add(stap)
+			pkts[0].Marker = true
+			return pkts
+		}
+		add(stap)
+		n--
 	}
 	if n == 1 {
-		return []*rtp.Packet{{Header: rtp.Header{SequenceNumber: seq, Timestamp: ts, Marker: true}, Payload: []byte{0x60 | nalType, 0xaa, 0xbb}}}
-	}
-	pkts := make([]*rtp.Packet, 0, n)
-	for i := 0; i < n; i++ {
-		fuHeader := nalType
-		if i == 0 {
-			fuHeader |= 0x80 // start
+		add([]byte{0x60 | nalType, 0xaa, 0xbb})
+	} else {
+		for i := 0; i < n; i++ {
+			fuHeader := nalType
+			if i == 0 {
+				fuHeader |= 0x80 // start
+			}
+			if i == n-1 {
+				fuHeader |= 0x40 // end
+			}
+			add([]byte{0x60 | 28, fuHeader, byte(i), 0xcc})
 		}
-		if i == n-1 {
-			fuHeader |= 0x40 // end
-		}
-		pkts = append(pkts, &rtp.Packet{
-			Header:  rtp.Header{SequenceNumber: seq + uint16(i), Timestamp: ts, Marker: i == n-1},
-			Payload: []byte{0x60 | 28, fuHeader, byte(i), 0xcc},
-		})
 	}
+	pkts[len(pkts)-1].Marker = true
 	return pkts
 }
 
@@ -197,5 +213,68 @@ func TestIsKeyframe(t *testing.T) {
 	h265P := []byte{0, 0, 1, 0x02, 1, 0xd0}                        // TRAIL_R (1)
 	if !IsKeyframe(CodecH265, h265IDR) || IsKeyframe(CodecH265, h265P) {
 		t.Fatal("H.265 keyframe detection wrong")
+	}
+}
+
+func TestAssemblerNeedsParameterSetsBeforeFirstKeyframe(t *testing.T) {
+	var out sink
+	a := NewAssembler(CodecH264, out.deliver, out.request)
+	now := time.Unix(0, 0)
+	// A lone IDR slice (its SPS/PPS were sent before we joined).
+	a.Push(&rtp.Packet{Header: rtp.Header{SequenceNumber: 1, Timestamp: 1000, Marker: true}, Payload: []byte{0x65, 0x88}}, now)
+	if out.count() != 0 {
+		t.Fatal("emitted an IDR without parameter sets as the first keyframe")
+	}
+	for _, p := range frame(2, 2000, true, 2) {
+		a.Push(p, now)
+	}
+	if out.count() != 1 || !HasParameterSets(CodecH264, out.units[0].Data) {
+		t.Fatalf("complete keyframe not emitted: %d", out.count())
+	}
+	// Once parameter sets were seen, a later lone IDR is fine.
+	a.Push(&rtp.Packet{Header: rtp.Header{SequenceNumber: 4, Timestamp: 3000, Marker: true}, Payload: []byte{0x65, 0x99}}, now)
+	if out.count() != 2 {
+		t.Fatalf("later IDR rejected: %d", out.count())
+	}
+}
+
+func TestAssemblerDeliversInOrderUnderConcurrentTick(t *testing.T) {
+	var mu sync.Mutex
+	var order []uint32
+	a := NewAssembler(CodecH264, func(au AccessUnit) {
+		time.Sleep(time.Millisecond) // a slow consumer widens any race window
+		mu.Lock()
+		order = append(order, au.RTPTimestamp)
+		mu.Unlock()
+	}, nil)
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				a.Tick(time.Now())
+			}
+		}
+	}()
+	seq := uint16(0)
+	for i := 0; i < 200; i++ {
+		pkts := frame(seq, uint32(i*3000), i%30 == 0, 2)
+		for _, p := range pkts {
+			a.Push(p, time.Now())
+		}
+		seq += uint16(len(pkts))
+	}
+	close(stop)
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(order); i++ {
+		if order[i] <= order[i-1] {
+			t.Fatalf("out of order at %d: %v", i, order[max(0, i-3):i+1])
+		}
+	}
+	if len(order) != 200 {
+		t.Fatalf("delivered %d of 200 frames", len(order))
 	}
 }
