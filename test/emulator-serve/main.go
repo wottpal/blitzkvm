@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
+	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -13,6 +16,7 @@ import (
 
 func main() {
 	cfg := emulator.Config{}
+	logInputs := false
 
 	serveCmd := &cobra.Command{
 		Use:   "serve",
@@ -32,6 +36,28 @@ func main() {
 
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
+			if logInputs {
+				go func() {
+					// Print every input the device receives as a JSON line,
+					// for end-to-end tests of clients.
+					seen := 0
+					ticker := time.NewTicker(20 * time.Millisecond)
+					defer ticker.Stop()
+					enc := json.NewEncoder(os.Stdout)
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							inputs := srv.Inputs()
+							for _, in := range inputs[seen:] {
+								_ = enc.Encode(in)
+							}
+							seen = len(inputs)
+						}
+					}
+				}()
+			}
 			return srv.ListenAndServe(ctx)
 		},
 	}
@@ -51,6 +77,7 @@ func main() {
 	serveCmd.Flags().StringVar(&cfg.ReplayH265, "replay-h265", "", "Annex-B H.265 clip with AUDs, streamed when a client offers H.265")
 	serveCmd.Flags().Float64Var(&cfg.Netem.LossRate, "loss", 0, "Probability (0..1) of dropping each outgoing RTP packet")
 	serveCmd.Flags().DurationVar(&cfg.Netem.Latency, "latency", 0, "One-way delay added to outgoing RTP packets")
+	serveCmd.Flags().BoolVar(&logInputs, "log-inputs", false, "Print every received input as a JSON line on stdout")
 
 	rootCmd := &cobra.Command{
 		Use:   "emulator-serve",

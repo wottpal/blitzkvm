@@ -25,6 +25,7 @@ import (
 	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/session"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/ui"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
 )
 
@@ -4093,10 +4094,11 @@ func (a *App) connectTo(target string) {
 	a.stats = client.StatsSnapshot{}
 	a.statsHistory = nil
 	a.ctrl = session.New(session.Config{
-		BaseURL:    baseURL,
-		Password:   password,
-		RPCTimeout: a.cfg.RPCTimeout,
-		Reconnect:  true,
+		BaseURL:      baseURL,
+		Password:     password,
+		RPCTimeout:   a.cfg.RPCTimeout,
+		Reconnect:    true,
+		NewVideoSink: openh264.NewSink,
 	})
 	if a.ctx != nil {
 		a.ctrl.Start(a.ctx)

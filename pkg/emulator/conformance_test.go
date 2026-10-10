@@ -18,6 +18,7 @@ import (
 	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/auth"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/hidrpc"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/video"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
 )
 
 // End-to-end checks of the engine against firmware-0.5.9 behaviour.
@@ -342,7 +343,7 @@ func TestH265ReplayReachesAccessUnitConsumer(t *testing.T) {
 func TestH264HighProfileReplayDecodes(t *testing.T) {
 	clip := makeClip(t, "h264")
 	srv := startTestServer(t, Config{FPS: 30, ReplayH264: clip})
-	c := connectClient(t, client.Config{BaseURL: srv.BaseURL()})
+	c := connectClient(t, client.Config{BaseURL: srv.BaseURL(), NewVideoSink: openh264.NewSink})
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if img, _ := c.LatestFrameInfo(); img != nil {

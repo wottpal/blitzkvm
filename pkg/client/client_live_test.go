@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
 	"os"
 	"sync"
 	"testing"
@@ -17,9 +18,10 @@ func TestLiveDeviceConnectsAndStreams(t *testing.T) {
 	password := os.Getenv("JETKVM_PASSWORD")
 
 	c, err := New(Config{
-		BaseURL:    baseURL,
-		Password:   password,
-		RPCTimeout: 5 * time.Second,
+		BaseURL:      baseURL,
+		Password:     password,
+		RPCTimeout:   5 * time.Second,
+		NewVideoSink: openh264.NewSink,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -115,18 +117,13 @@ func TestLiveDeviceConnectsAndStreams(t *testing.T) {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		stream := c.VideoStream()
-		if stream != nil && stream.Latest() != nil {
+		if img, _ := c.LatestFrameInfo(); img != nil {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-
-	if stream := c.VideoStream(); stream != nil && stream.Err() != nil {
-		t.Logf("video error: %v", stream.Err())
-	}
-	if stream := c.VideoStream(); stream == nil || stream.Latest() == nil {
-		t.Fatal("expected at least one decoded video frame from live device")
+	if img, _ := c.LatestFrameInfo(); img == nil {
+		t.Fatalf("expected at least one decoded video frame from live device (stats %+v)", c.Stats())
 	}
 
 	if err := c.SendKeypress(4, true); err != nil {

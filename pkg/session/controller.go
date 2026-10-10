@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -53,6 +54,8 @@ type Config struct {
 	OfferH265 bool
 	// OnAccessUnit forwards video access units instead of decoding them.
 	OnAccessUnit func(video.AccessUnit)
+	// NewVideoSink creates the video decoder (see client.Config).
+	NewVideoSink func(ctx context.Context, codec video.Codec) (video.Sink, error)
 }
 
 type Snapshot struct {
@@ -1942,4 +1945,23 @@ func extractBool(v any, key string) bool {
 		}
 	}
 	return false
+}
+
+// Call forwards a raw JSON-RPC call to the device. It powers settings UIs
+// that are generated from the upstream schema instead of hand-written
+// wrappers. result is nil for void methods.
+func (c *Controller) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+	current := c.clientIfConnected()
+	if current == nil {
+		return nil, errors.New("client not connected")
+	}
+	var p any
+	if len(params) > 0 {
+		p = params
+	}
+	var result json.RawMessage
+	if err := current.Call(ctx, method, p, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }

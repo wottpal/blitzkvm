@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
 	"os"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ func TestLiveControllerConnectsAndForwardsSafeInput(t *testing.T) {
 		Reconnect:     true,
 		ReconnectBase: 200 * time.Millisecond,
 		ReconnectMax:  time.Second,
+		NewVideoSink:  openh264.NewSink,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

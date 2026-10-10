@@ -13,6 +13,7 @@ import (
 	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/emulator"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/auth"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
 )
 
@@ -104,10 +105,11 @@ func TestControllerReceivesVideoAndForwardsInput(t *testing.T) {
 	defer cancel()
 
 	controller := New(Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
-		Reconnect:  true,
+		BaseURL:      srv.BaseURL(),
+		Password:     "secret",
+		RPCTimeout:   2 * time.Second,
+		Reconnect:    true,
+		NewVideoSink: openh264.NewSink,
 	})
 	controller.Start(ctx)
 	defer controller.Stop()

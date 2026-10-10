@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
 	"net/http"
 	"runtime"
 	"strings"
@@ -130,9 +131,10 @@ func TestClientConnectsAndRPCWorks(t *testing.T) {
 	}
 
 	c, err := client.New(client.Config{
-		BaseURL:    srv.BaseURL(),
-		Password:   "secret",
-		RPCTimeout: 2 * time.Second,
+		BaseURL:      srv.BaseURL(),
+		Password:     "secret",
+		RPCTimeout:   2 * time.Second,
+		NewVideoSink: openh264.NewSink,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -200,13 +202,12 @@ func TestClientConnectsAndRPCWorks(t *testing.T) {
 
 	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		stream := c.VideoStream()
-		if stream != nil && stream.Latest() != nil {
+		if img, _ := c.LatestFrameInfo(); img != nil {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	if c.VideoStream() == nil || c.VideoStream().Latest() == nil {
+	if img, _ := c.LatestFrameInfo(); img == nil {
 		t.Fatal("expected at least one decoded video frame")
 	}
 

@@ -507,6 +507,7 @@ func (c *Controller) newClient() (*client.Client, error) {
 		Auth:           c.auth,
 		OfferH265:      c.cfg.OfferH265,
 		OnAccessUnit:   c.cfg.OnAccessUnit,
+		NewVideoSink:   c.cfg.NewVideoSink,
 	}
 	c.mu.RUnlock()
 	return client.New(cfg)

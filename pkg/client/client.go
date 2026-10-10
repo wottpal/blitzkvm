@@ -59,9 +59,13 @@ type Config struct {
 	// contains it (codec preference "auto"), so only enable this when the
 	// consumer can decode H.265.
 	OfferH265 bool
-	// OnAccessUnit receives complete video access units. When nil the client
-	// decodes H.264 with OpenH264 into VideoStream().
+	// OnAccessUnit receives complete video access units (e.g. to forward
+	// them to a hardware decoder in another process).
 	OnAccessUnit func(video.AccessUnit)
+	// NewVideoSink creates a sink (typically a decoder) for the negotiated
+	// codec; used when OnAccessUnit is nil. If both are nil, video is
+	// assembled and counted but not decoded.
+	NewVideoSink func(ctx context.Context, codec video.Codec) (video.Sink, error)
 }
 
 //go:generate go tool github.com/dmarkham/enumer -type=SignalingMode -linecomment -text -output client_enums.go
@@ -140,10 +144,11 @@ type Client struct {
 	hidReady     chan struct{}
 	hidReadyOnce sync.Once
 
-	videoMu     sync.RWMutex
-	videoStream *video.Stream
-	assembler   *video.Assembler
-	videoCodec  string
+	videoMu    sync.RWMutex
+	videoSink  video.Sink
+	frames     video.FrameSource
+	assembler  *video.Assembler
+	videoCodec string
 
 	signalMu   sync.Mutex
 	signalConn *websocket.Conn
@@ -582,22 +587,22 @@ func (c *Client) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: err.Error()})
 		return
 	}
-	deliver := c.cfg.OnAccessUnit
-	var stream *video.Stream
-	if deliver == nil {
-		if codec != video.CodecH264 {
-			c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: "the built-in decoder only supports H.264"})
-			return
-		}
-		stream, err = video.NewDecodingStream(c.ctx)
+	var sink video.Sink
+	switch {
+	case c.cfg.OnAccessUnit != nil:
+		sink = video.SinkFunc(c.cfg.OnAccessUnit)
+	case c.cfg.NewVideoSink != nil:
+		sink, err = c.cfg.NewVideoSink(c.ctx, codec)
 		if err != nil {
 			c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: err.Error()})
 			return
 		}
-		deliver = stream.Push
+	default:
+		sink = video.SinkFunc(func(video.AccessUnit) {})
 	}
+	frames, _ := sink.(video.FrameSource)
 	ssrc := uint32(track.SSRC())
-	asm := video.NewAssembler(codec, deliver, func() {
+	asm := video.NewAssembler(codec, sink.Push, func() {
 		// JetKVM 0.5.9 ignores PLI/FIR (it sends an IDR every 0.5 s anyway),
 		// but asking is harmless and future-proof.
 		if pc := c.peer(); pc != nil {
@@ -605,7 +610,8 @@ func (c *Client) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		}
 	})
 	c.videoMu.Lock()
-	c.videoStream = stream
+	c.videoSink = sink
+	c.frames = frames
 	c.assembler = asm
 	c.videoCodec = codec.String()
 	c.videoMu.Unlock()
@@ -613,9 +619,7 @@ func (c *Client) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 
 	go func() {
 		err := video.Receive(c.ctx, track, asm, func() time.Duration { return time.Duration(c.rttNanos.Load()) })
-		if stream != nil {
-			stream.Close()
-		}
+		sink.Close()
 		if err != nil && c.ctx.Err() == nil {
 			c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: err.Error()})
 		}
@@ -655,10 +659,10 @@ func (c *Client) Close() error {
 			err = pc.Close()
 		}
 		c.videoMu.Lock()
-		stream := c.videoStream
+		sink := c.videoSink
 		c.videoMu.Unlock()
-		if stream != nil {
-			stream.Close()
+		if sink != nil {
+			sink.Close()
 		}
 		c.events.close()
 		c.lifecycle.close()
@@ -1021,12 +1025,6 @@ func (c *Client) SendSerialRaw(text string) error {
 	return serial.SendText(text)
 }
 
-func (c *Client) VideoStream() *video.Stream {
-	c.videoMu.RLock()
-	defer c.videoMu.RUnlock()
-	return c.videoStream
-}
-
 func (c *Client) openDataChannels(pc *webrtc.PeerConnection) error {
 	set := &channels{}
 	var err error
@@ -1155,12 +1153,16 @@ func (c *Client) HTTPClient() *http.Client {
 	return c.authClient.HTTPClient()
 }
 
+// LatestFrameInfo returns the newest decoded picture, if the video sink
+// keeps one (see Config.NewVideoSink).
 func (c *Client) LatestFrameInfo() (image.Image, time.Time) {
-	stream := c.VideoStream()
-	if stream == nil {
+	c.videoMu.RLock()
+	frames := c.frames
+	c.videoMu.RUnlock()
+	if frames == nil {
 		return nil, time.Time{}
 	}
-	frame := stream.Latest()
+	frame := frames.Latest()
 	if frame == nil {
 		return nil, time.Time{}
 	}
@@ -1193,12 +1195,12 @@ func (c *Client) Stats() StatsSnapshot {
 		as := c.assembler.Stats()
 		stats.FramesDropped = as.DroppedFrames
 		stats.KeyframeWaits = as.KeyframeWaits
-		if c.videoStream == nil {
+		if c.frames == nil {
 			stats.VideoReady = as.Frames > 0
 		}
 	}
-	if c.videoStream != nil {
-		stats.FramesDecoded = uint32(c.videoStream.Stats().Decoded)
+	if c.frames != nil {
+		stats.FramesDecoded = uint32(c.frames.DecodedFrames())
 	}
 	stats.VideoCodec = c.videoCodec
 	c.videoMu.RUnlock()
@@ -1236,8 +1238,8 @@ func (c *Client) collectStats(now time.Time) {
 	var snap StatsSnapshot
 	var framesDecoded uint32
 	c.videoMu.RLock()
-	if c.videoStream != nil {
-		framesDecoded = uint32(c.videoStream.Stats().Decoded)
+	if c.frames != nil {
+		framesDecoded = uint32(c.frames.DecodedFrames())
 	} else if c.assembler != nil {
 		framesDecoded = uint32(c.assembler.Stats().Frames)
 	}
