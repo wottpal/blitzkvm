@@ -7,9 +7,11 @@ import JetKVMCore
 /// Keyboard capture (on while the device window is key, toggled with ⌃⌘):
 /// every key, including ⌘-shortcuts that would otherwise hit this app's menus,
 /// goes to the remote. With Accessibility permission an event tap also takes
-/// system shortcuts (⌘Tab, ⌘Space, Mission Control). Secure Event Input
-/// (password fields, some password managers) silently disables taps, so it is
-/// detected and reported.
+/// system shortcuts (⌘Tab, ⌘Space, Mission Control) and other apps' global
+/// hotkeys (Raycast, Alfred). The tap sits where HID events enter the window
+/// server, ahead of every hotkey and other apps' session taps. Secure Event
+/// Input (password fields, some password managers) silently disables taps,
+/// so it is detected and reported.
 final class InputController {
     var send: (Data) -> Void = { _ in }
     var onCaptureChange: ((Bool) -> Void)?
@@ -39,7 +41,12 @@ final class InputController {
             releaseAll()
             removeEventTap()
         } else {
-            installEventTapIfTrusted()
+            if !Self.accessibilityTrusted(prompt: false) && !UserDefaults.standard.bool(forKey: Self.askedKey) {
+                // Ask once; afterwards the hint and the Device menu say how.
+                UserDefaults.standard.set(true, forKey: Self.askedKey)
+                _ = Self.accessibilityTrusted(prompt: true)
+            }
+            ensureEventTap()
         }
         onCaptureChange?(on)
     }
@@ -50,22 +57,43 @@ final class InputController {
 
     var eventTapActive: Bool { eventTap != nil && CGEvent.tapIsEnabled(tap: eventTap!) }
 
+    private static let askedKey = "askedForAccessibility"
+
     static func accessibilityTrusted(prompt: Bool) -> Bool {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
     }
 
-    private func installEventTapIfTrusted() {
-        guard eventTap == nil, Self.accessibilityTrusted(prompt: false) else { return }
+    /// Installs the system-shortcut tap while captured, as soon as
+    /// Accessibility is granted (called again every second, so a grant takes
+    /// effect without re-capturing).
+    func ensureEventTap() {
+        guard captured, eventTap == nil else { return }
+        guard Self.accessibilityTrusted(prompt: false) else {
+            logTapState("off: Accessibility not granted")
+            return
+        }
         let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
         let userInfo = Unmanaged.passUnretained(self).toOpaque()
-        guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
-                                          eventsOfInterest: mask, callback: inputTapCallback, userInfo: userInfo) else { return }
+        guard let tap = CGEvent.tapCreate(tap: .cghidEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                          eventsOfInterest: mask, callback: inputTapCallback, userInfo: userInfo) else {
+            logTapState("off: the event tap could not be created")
+            return
+        }
+        logTapState("on")
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         eventTap = tap
         tapSource = source
+    }
+
+    private var lastTapState = ""
+
+    private func logTapState(_ state: String) {
+        guard state != lastTapState else { return }
+        lastTapState = state
+        AppLog.log("system shortcut capture \(state)")
     }
 
     private func removeEventTap() {

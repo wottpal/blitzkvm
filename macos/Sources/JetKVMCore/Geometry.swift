@@ -13,6 +13,12 @@ public enum ScalingMode: String, CaseIterable {
     /// Largest whole multiple of physical pixels that fits, always drawn
     /// with exact (nearest-neighbor) pixels.
     case integer
+    /// The remote display takes the window's size (RemoteDisplay): one remote
+    /// pixel per point like actualSize, filling the window. Scaled to fit
+    /// until the remote has followed a resize, and beyond the device's limits.
+    /// Opt-in: every new size is a new display to a Mac target, which then
+    /// is no longer its main display (plan section 22).
+    case matchWindow
 }
 
 public struct VideoLayout: Equatable {
@@ -55,6 +61,14 @@ public struct VideoLayout: Equatable {
             scale = fitScale
         case .actualSize:
             scale = max(pointScale, 0.25)
+        case .matchWindow:
+            // Matched: the view is the remote size plus less than one size
+            // step (RemoteDisplay rounds down to whole steps).
+            let natural = max(pointScale, 0.25)
+            let slackW = drawableWidth - vw * natural, slackH = drawableHeight - vh * natural
+            let matched = slackW >= 0 && slackH >= 0 && slackW < Double(RemoteDisplay.widthStep) * natural
+                && slackH < Double(RemoteDisplay.heightStep) * natural
+            scale = matched ? natural : fitScale
         case .pixelExact:
             scale = 1
         case .integer:

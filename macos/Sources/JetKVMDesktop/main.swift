@@ -399,9 +399,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         main.addItem(deviceItem)
 
         let view = NSMenu(title: "View")
-        for (title, mode, key) in [("Actual Size", ScalingMode.actualSize, "1"), ("Scale to Fit Window", ScalingMode.fit, "2"),
-                                   ("Pixel for Pixel", ScalingMode.pixelExact, "3"), ("Largest Whole Multiple", ScalingMode.integer, "4")] {
-            let i = item(title, #selector(setScaling(_:)), key: key)
+        for (index, mode) in ScalingMode.allCases.enumerated() {
+            let i = item(mode.menuTitle, #selector(setScaling(_:)), key: "\(index + 1)")
             i.representedObject = mode.rawValue
             view.addItem(i)
         }
@@ -447,7 +446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     @objc private func setScaling(_ sender: NSMenuItem) {
-        if let raw = sender.representedObject as? String, let m = ScalingMode(rawValue: raw) { current?.setScaling(m) }
+        if let raw = sender.representedObject as? String, let m = ScalingMode(rawValue: raw) { current?.pickScaling(m) }
     }
     @objc private func toggleExactPixels() { current?.updatePreferences { $0.exactPixels.toggle() } }
 

@@ -191,21 +191,32 @@ final class DevicesWindowController: NSWindowController {
 }
 
 extension ScalingMode {
+    /// Device library picker.
     var title: String {
         switch self {
+        case .matchWindow: return "Match Window (changes the remote's resolution; for single-display computers)"
         case .actualSize: return "Actual Size (same size as on the remote)"
+        default: return menuTitle
+        }
+    }
+
+    /// View menu.
+    var menuTitle: String {
+        switch self {
+        case .matchWindow: return "Match Window"
+        case .actualSize: return "Actual Size"
         case .fit: return "Scale to Fit Window"
         case .pixelExact: return "Pixel for Pixel"
         case .integer: return "Largest Whole Multiple"
         }
     }
 
+    /// Status bar popup.
     var shortTitle: String {
         switch self {
-        case .actualSize: return "Actual Size"
         case .fit: return "Fit"
-        case .pixelExact: return "Pixel for Pixel"
         case .integer: return "Whole Multiple"
+        default: return menuTitle
         }
     }
 }

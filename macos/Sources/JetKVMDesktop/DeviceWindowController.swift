@@ -64,6 +64,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// and switch to the first that answers.
     var reprobeAddresses = false
     private var reprobeTimer: Timer?
+    private lazy var displayFollower = makeDisplayFollower()
 
     static let statusBarHeight: CGFloat = 22
 
@@ -106,14 +107,18 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private func captureChanged(_ captured: Bool) {
         if captured && !keyboardHintShown {
             keyboardHintShown = true
-            hud.show("Keyboard goes to \(device.name)  ·  press ⌃⌘ to release", for: 2.5)
+            if input.eventTapActive {
+                hud.show("Keyboard goes to \(device.name)  ·  press ⌃⌘ to release", for: 2.5)
+            } else {
+                hud.show("Keyboard goes to \(device.name)  ·  ⌃⌘ releases  ·  ⌘Space, ⌘Tab stay here until you allow Accessibility (Device menu)", for: 5)
+            }
         }
         refreshStatus()
     }
 
     @objc private func viewControlChanged() {
         if let raw = viewControl.selectedItem?.representedObject as? String, let mode = ScalingMode(rawValue: raw) {
-            setScaling(mode)
+            pickScaling(mode)
         }
     }
 
@@ -149,21 +154,85 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         onPreferencesChanged?(self)
     }
 
-    /// Changing the view mode resizes the window to suit it.
+    /// A view mode picked from a menu. Match Window is explained once first:
+    /// it changes the remote computer's display.
+    func pickScaling(_ mode: ScalingMode) {
+        let explained = "matchWindowExplained"
+        if mode == .matchWindow && device.scaling != .matchWindow && !UserDefaults.standard.bool(forKey: explained) {
+            let alert = NSAlert()
+            alert.messageText = "Match Window changes the remote computer's display resolution"
+            alert.informativeText = "Each resize makes the JetKVM offer a display of the window's size, and the remote computer re-detects its display; the picture pauses for a few seconds. A Mac with another monitor treats every new size as a new display: it is no longer the main display, its desktop is empty, and the JetKVM's pointer cannot reach it. Use Match Window when the JetKVM is the computer's only display."
+            alert.addButton(withTitle: "Use Match Window")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                applyPreferences() // the status bar menu shows the mode again
+                return
+            }
+            UserDefaults.standard.set(true, forKey: explained)
+        }
+        setScaling(mode)
+    }
+
+    /// Changing the view mode resizes the window to suit it, or (Match
+    /// Window) the remote display to suit the window.
     func setScaling(_ mode: ScalingMode) {
         updatePreferences { $0.scaling = mode }
         if mode == .actualSize || mode == .pixelExact {
             userSizedWindow = false
             fitWindowToRemote()
         }
+        matchRemoteToWindow()
     }
 
     /// First frame, or the remote changed resolution: show it at its natural
-    /// size unless the user sized the window.
+    /// size unless the user sized the window. With Match Window, a remote
+    /// that took the window's size (rounded down to whole size steps) gets
+    /// the window snapped to it, and any other size is matched to the window.
     private func videoSizeChanged() {
         window?.invalidateCursorRects(for: videoView)
-        guard !userSizedWindow, let window, !window.styleMask.contains(.fullScreen) else { return }
-        fitWindowToRemote()
+        defer { matchRemoteToWindow() }
+        guard let window, !window.styleMask.contains(.fullScreen), let size = videoView.currentVideoSize else { return }
+        if !userSizedWindow {
+            fitWindowToRemote()
+        } else if followsWindow, displayFollower.requested == RemoteDisplay.Size(width: Int(size.width), height: Int(size.height)),
+                  (0..<CGFloat(RemoteDisplay.widthStep)).contains(videoView.bounds.width - size.width),
+                  (0..<CGFloat(RemoteDisplay.heightStep)).contains(videoView.bounds.height - size.height) {
+            var frame = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: size.width, height: size.height + Self.statusBarHeight))
+            frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+            window.setFrame(frame, display: true)
+        }
+    }
+
+    // MARK: Match Window
+
+    /// The remote display follows the window (not in view-only sessions:
+    /// it changes the device's EDID).
+    private var followsWindow: Bool { device.scaling == .matchWindow && !input.viewOnly }
+
+    private func makeDisplayFollower() -> DisplayFollower {
+        let follower = DisplayFollower(engine: engine)
+        follower.currentSize = { [weak self] in
+            self?.videoView.currentVideoSize.map { RemoteDisplay.Size(width: Int($0.width), height: Int($0.height)) }
+        }
+        follower.onResize = { [weak self] size in
+            guard let self else { return }
+            self.hud.show("Resizing \(self.device.name)'s display to \(size)", for: 3)
+        }
+        follower.onError = { [weak self] in self?.refreshStatus(extra: $0) }
+        return follower
+    }
+
+    /// Asks the device for a display mode of the video area's size once
+    /// resizing settles (also after full screen and zoom).
+    private func matchRemoteToWindow() {
+        guard followsWindow, snapshot.Phase == "connected", let window, !window.inLiveResize,
+              let current = videoView.currentVideoSize else { return }
+        let size = RemoteDisplay.size(fitting: Double(videoView.bounds.width), Double(videoView.bounds.height))
+        if size != RemoteDisplay.Size(width: Int(current.width), height: Int(current.height)) {
+            // The window drives the remote from now on.
+            userSizedWindow = true
+        }
+        displayFollower.request(size)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -251,7 +320,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         try engine.start()
         engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256, autoQuality: device.adaptiveQuality && !input.viewOnly,
                        qualityLevel: input.viewOnly ? nil : device.qualityLevel)
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshStatus() }
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.input.ensureEventTap()
+            self?.refreshStatus()
+        }
         startPathMonitor()
         startReprobing()
     }
@@ -302,6 +374,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     func shutdown() {
         guard !isShutDown else { return }
         isShutDown = true
+        displayFollower.cancel()
         input.setCaptured(false)
         statusTimer?.invalidate()
         reprobeTimer?.invalidate()
@@ -372,6 +445,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func windowDidEndLiveResize(_ notification: Notification) {
         userSizedWindow = true
+        matchRemoteToWindow()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        matchRemoteToWindow()
     }
 
     /// Sets the content size and keeps it (no automatic fit to the remote).
@@ -441,6 +519,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         if snapshot.Phase == "connected" && !wasConnected {
             wasConnected = true
+            matchRemoteToWindow()
             if let accepted = unverifiedPassword {
                 unverifiedPassword = nil
                 onPasswordAccepted?(self, accepted)
@@ -575,7 +654,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         if input.viewOnly {
             parts.append("view only")
         } else if input.captured {
-            let captured = input.eventTapActive ? "captured incl. system shortcuts" : "captured"
+            let captured = input.eventTapActive ? "captured incl. system shortcuts" : "captured (system shortcuts stay local: allow Accessibility)"
             parts.append("input \(captured) (⌃⌘ releases)")
             if input.secureInputActive { parts.append("⚠︎ Secure Input is on: system shortcuts stay local") }
         } else {
@@ -606,10 +685,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         refreshStatus()
     }
 
-    /// In full screen the menu bar must not slide in when the pointer
-    /// reaches the top edge of the remote screen.
+    /// In full screen the menu bar (and with it the window's title bar and
+    /// buttons) slides in when the pointer rests at the top edge, so full
+    /// screen can be left with the mouse. The Dock stays hidden: the bottom
+    /// edge belongs to the remote.
     func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
-        [.fullScreen, .hideDock, .hideMenuBar]
+        [.fullScreen, .hideDock, .autoHideMenuBar]
     }
 
     func windowWillClose(_ notification: Notification) {

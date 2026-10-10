@@ -152,6 +152,17 @@ final class GeometryTests: XCTestCase {
         XCTAssertEqual(exact?.width, 960)
     }
 
+    func testMatchWindowIsActualSizeOnceMatchedAndFitsOtherwise() {
+        // Remote took the view's size, rounded down: one pixel per point.
+        let matched = VideoLayout.compute(videoWidth: 1504, videoHeight: 944, drawableWidth: 3022, drawableHeight: 1894, mode: .matchWindow, pointScale: 2)
+        XCTAssertEqual([matched.x, matched.y, matched.width, matched.height], [7, 3, 3008, 1888])
+        // Not yet (or beyond the device's limits): fills the view.
+        let pending = VideoLayout.compute(videoWidth: 1920, videoHeight: 1080, drawableWidth: 3008, drawableHeight: 1692, mode: .matchWindow, pointScale: 2)
+        XCTAssertEqual([pending.width, pending.height], [3008, 1692])
+        let larger = VideoLayout.compute(videoWidth: 1920, videoHeight: 1040, drawableWidth: 4800, drawableHeight: 2600, mode: .matchWindow, pointScale: 2)
+        XCTAssertEqual([larger.width, larger.height], [4800, 2600])
+    }
+
     func testIntegerScaleUsesWholeMultiples() {
         let layout = VideoLayout.compute(videoWidth: 1280, videoHeight: 720, drawableWidth: 3000, drawableHeight: 2000, mode: .integer)
         XCTAssertEqual(layout.width, 2560)
@@ -321,5 +332,55 @@ final class DeviceLibraryTests: XCTestCase {
         settings["BaudRate"] = .number(115200)
         XCTAssertEqual(settings["BaudRate"]?.numberValue, 115200)
         XCTAssertEqual(settings["Parity"]?.stringValue, "none")
+    }
+}
+
+final class RemoteDisplayTests: XCTestCase {
+    /// JetKVM 0.5.9's default EDID, as getEDID returns it.
+    static let defaultEDID = "00FFFFFFFFFFFF0028B4010001EEFFC0302301038047287856EE91A3544C99260F5054000000D1C081C0318001010101010101010101023A801871382D40582C4500C48E2100001E773300A050D02B2030203500122C2100001A000000FD00174C0F5111000A202020202020000000FC004A65744B564D2076310A20202001D5020322D1431004012309070783010000E200CFE40D100401E305000065030C001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000CF"
+
+    func testSizeFollowsTheViewInWholeSteps() {
+        typealias S = RemoteDisplay.Size
+        XCTAssertEqual(RemoteDisplay.size(fitting: 1504, 944), S(width: 1504, height: 944))
+        XCTAssertEqual(RemoteDisplay.size(fitting: 1511, 947), S(width: 1504, height: 944))
+        // Beyond the limits: the closest size of the same shape.
+        XCTAssertEqual(RemoteDisplay.size(fitting: 2400, 1300), S(width: 1920, height: 1040))
+        XCTAssertEqual(RemoteDisplay.size(fitting: 500, 300), S(width: 656, height: 400))
+        XCTAssertEqual(RemoteDisplay.size(fitting: 3000, 300), S(width: 1920, height: 400))
+    }
+
+    /// Timings measured to stream cleanly on a JetKVM with a Mac host
+    /// (width, height, h blank, v blank, v sync, pixel clock kHz).
+    func testTimingsMatchTheOnesVerifiedOnTheDevice() {
+        let verified = [
+            (1504, 944, 1168, 27, 10, 155670), (1024, 600, 2768, 19, 10, 140830),
+            (1920, 1080, 512, 31, 5, 162120), (1920, 1200, 272, 35, 6, 162430),
+            (960, 540, 2640, 98, 5, 137810), (800, 500, 2200, 212, 6, 128160),
+            (640, 400, 1760, 389, 6, 113620),
+        ]
+        for (w, h, hBlank, vBlank, vSync, clock) in verified {
+            let t = RemoteDisplay.timing(for: .init(width: w, height: h))
+            XCTAssertEqual([t.hBlank, t.vBlank, t.vSync, t.pixelClockKHz], [hBlank, vBlank, vSync, clock], "\(w)×\(h)")
+            XCTAssertLessThanOrEqual(t.hTotal * 4, w * 15, "line at most 3.75 widths")
+            XCTAssertLessThanOrEqual(t.pixelClockKHz, 165_000)
+        }
+    }
+
+    func testEDIDAdvertisesOnlyTheNewModeAndKeepsTheDisplay() throws {
+        let base = try XCTUnwrap(RemoteDisplay.bytes(hex: Self.defaultEDID))
+        let edid = try RemoteDisplay.edid(base, advertising: .init(width: 1504, height: 944))
+        // The exact bytes the device and a Mac host accepted.
+        XCTAssertEqual(RemoteDisplay.hex(edid), "00FFFFFFFFFFFF0028B4010001EEFFC0302301038028197856EE91A3544C99260F505400000001010101010101010101010101010101CF3CE09054B01B3030203A008EFA1000001A000000FD00174C0F5111000A202020202020000000FC004A65744B564D2076310A202020000000100000000000000000000000000000016102031ED02309070783010000E200CFE40D100401E305000065030C001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002C")
+        XCTAssertEqual(RemoteDisplay.preferredSize(edid), .init(width: 1504, height: 944))
+        XCTAssertEqual(Array(edid[8..<18]), Array(base[8..<18]), "same vendor, product, serial, date")
+        for block in 0..<2 {
+            XCTAssertEqual(edid[block * 128 ..< block * 128 + 128].reduce(0) { ($0 + Int($1)) & 0xFF }, 0)
+        }
+        // Applying it again (the next resize starts from the device's EDID)
+        // only changes the timing.
+        XCTAssertEqual(try RemoteDisplay.edid(edid, advertising: .init(width: 1504, height: 944)), edid)
+        let other = try RemoteDisplay.edid(edid, advertising: .init(width: 1920, height: 1200))
+        XCTAssertEqual(try RemoteDisplay.edid(base, advertising: .init(width: 1920, height: 1200)), other)
+        XCTAssertThrowsError(try RemoteDisplay.edid([1, 2, 3], advertising: .init(width: 1504, height: 944)))
     }
 }
