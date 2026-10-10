@@ -253,9 +253,18 @@ final class EngineProcess {
 
     // MARK: Sending
 
-    func connect(baseURL: String, password: String?, deviceID: String?, certSHA256: String?, offerH265: Bool) {
+    /// Offers H.265: JetKVM then streams it (it picks H.265 whenever the
+    /// offer contains it), and it measured sharper than H.264 at every bitrate
+    /// on the device's encoder; every Apple-silicon Mac decodes it in
+    /// hardware. The offer still lists H.264 for firmware without H.265.
+    /// `--h264` (self-tests only) offers H.264 alone, for the emulator's live
+    /// test pattern, which only its H.264 encoder can produce.
+    static var offerH265 = true
+
+    func connect(baseURL: String, password: String?, deviceID: String?, certSHA256: String?, autoQuality: Bool, qualityLevel: String?) {
         let command = EngineCommand(cmd: "connect", baseURL: baseURL, password: password, deviceID: deviceID,
-                                    certSHA256: certSHA256, offerH265: offerH265)
+                                    certSHA256: certSHA256, offerH265: Self.offerH265, autoQuality: autoQuality,
+                                    qualityLevel: autoQuality ? nil : qualityLevel)
         lastConnect = command
         send(command: command)
     }
@@ -269,6 +278,19 @@ final class EngineProcess {
     /// Pins a certificate authority learned on first connect (see pin(deviceID:)).
     func pin(certSHA256: String) {
         lastConnect?.certSHA256 = certSHA256
+    }
+
+    /// Turns automatic quality on or off, also for a restarted helper.
+    func setAutoQuality(_ on: Bool) {
+        lastConnect?.autoQuality = on
+        send(command: EngineCommand(cmd: "setAutoQuality", autoQuality: on))
+    }
+
+    /// Fixes the quality level (automatic off), also for a restarted helper.
+    func setQualityLevel(_ name: String) {
+        lastConnect?.autoQuality = false
+        lastConnect?.qualityLevel = name
+        send(command: EngineCommand(cmd: "setQualityLevel", qualityLevel: name))
     }
 
     /// Sends a command and waits for its completion. Returns the RPC result

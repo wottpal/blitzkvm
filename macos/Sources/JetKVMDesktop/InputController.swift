@@ -17,7 +17,6 @@ final class InputController {
     var invertScroll = false
     /// When set, nothing is ever sent and capture never engages.
     var viewOnly = false
-
     private(set) var captured = false
     private var pressedUsages = Set<UInt8>()
     private var lastButtons: UInt8 = 0

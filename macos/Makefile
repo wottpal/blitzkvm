@@ -45,6 +45,7 @@ app: engine swift
 	cp "$$(swift build -c release --arch arm64 --show-bin-path)/JetKVMDesktop" "$(APP)/Contents/MacOS/JetKVMDesktop"
 	cp build/jetkvm-engine "$(APP)/Contents/Helpers/jetkvm-engine"
 	sed "s/@BUILD@/$(BUILD_NUMBER)/" Support/Info.plist.in > "$(APP)/Contents/Info.plist"
+	cp Support/AppIcon.icns "$(APP)/Contents/Resources/AppIcon.icns"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.jetkvm-mac.engine "$(APP)/Contents/Helpers/jetkvm-engine"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.jetkvm-mac "$(APP)"
 	codesign --verify --strict --deep "$(APP)"
@@ -61,13 +62,22 @@ selftest: app
 	cd .. && go build -o macos/build/emulator-serve ./test/emulator-serve
 	./build/emulator-serve serve --listen $(EMULATOR_ADDR) --width 1280 --height 720 --fps 30 --log-inputs > build/emulator-inputs.jsonl & echo $$! > build/emulator.pid; \
 	sleep 1; \
-	"$(APP)/Contents/MacOS/JetKVMDesktop" --device $(EMULATOR_ADDR) --selftest 8 --crash-engine-after 4 --inject-input --snapshot "$(CURDIR)/build/selftest.png"; status=$$?; \
+	"$(APP)/Contents/MacOS/JetKVMDesktop" --device $(EMULATOR_ADDR) --selftest 8 --crash-engine-after 4 --inject-input --h264 --snapshot "$(CURDIR)/build/selftest.png"; status=$$?; \
 	kill $$(cat build/emulator.pid); rm -f build/emulator.pid; \
 	test $$status -eq 0 || exit $$status; \
 	grep -q '"Type":"hidrpc.Keypress","Data":"{Key:4 Press:true}"' build/emulator-inputs.jsonl || { echo "key A not received"; exit 1; }; \
 	grep -q '"Data":"{Key:225 Press:true}"' build/emulator-inputs.jsonl || { echo "Shift not received"; exit 1; }; \
 	grep -q '"Type":"hidrpc.Pointer","Data":"{X:16384 Y:16384 Buttons:1}"' build/emulator-inputs.jsonl || { echo "click not received"; exit 1; }; \
-	echo "selftest passed: video, input and engine recovery verified"
+	if command -v ffmpeg >/dev/null; then \
+		ffmpeg -v error -y -f lavfi -i testsrc2=size=1920x1080:rate=30 -t 4 -pix_fmt yuv420p -c:v libx265 -x265-params bframes=0:keyint=15:log-level=error \
+			-bsf:v hevc_metadata=aud=insert -f hevc build/selftest.h265 || exit 1; \
+		./build/emulator-serve serve --listen $(EMULATOR_ADDR) --width 1920 --height 1080 --fps 30 --replay-h265 build/selftest.h265 > /dev/null 2>&1 & pid=$$!; \
+		sleep 1; \
+		"$(APP)/Contents/MacOS/JetKVMDesktop" --device $(EMULATOR_ADDR) --selftest 4 --view-only > build/selftest-h265.json; status=$$?; \
+		kill $$pid; \
+		test $$status -eq 0 && grep -q '"codec" : "H.265"' build/selftest-h265.json || { cat build/selftest-h265.json; echo "H.265 decode failed"; exit 1; }; \
+	else echo "ffmpeg not installed: H.265 pass skipped"; fi; \
+	echo "selftest passed: video (H.264 live pattern, H.265 clip), keyboard and pointer input, and engine recovery verified"
 
 install: app
 	rm -rf "/Applications/JetKVM Desktop.app"
@@ -96,7 +106,7 @@ selftest-extras: app
 		port=$$([ $$scheme = https ] && echo 18443 || echo 18081); \
 		./build/emulator-serve serve --listen 127.0.0.1:$$port $$([ $$scheme = https ] && echo --tls) --log-inputs > build/emulator-extras.jsonl & pid=$$!; \
 		sleep 1; \
-		"$(APP)/Contents/MacOS/JetKVMDesktop" --device $$scheme://127.0.0.1:$$port --selftest 15 --exercise-extras --view-only > build/selftest-extras-$$scheme.json; status=$$?; \
+		"$(APP)/Contents/MacOS/JetKVMDesktop" --device $$scheme://127.0.0.1:$$port --selftest 15 --exercise-extras --view-only --h264 > build/selftest-extras-$$scheme.json; status=$$?; \
 		kill $$pid; \
 		cat build/selftest-extras-$$scheme.json; \
 		test $$status -eq 0 || { echo "selftest-extras ($$scheme) failed"; exit 1; }; \

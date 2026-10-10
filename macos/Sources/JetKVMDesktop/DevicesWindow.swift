@@ -8,6 +8,8 @@ final class DevicesModel: ObservableObject {
     @Published private(set) var devices: [Device] = []
     let store: DeviceStore
     var onConnect: (Device) -> Void = { _ in }
+    /// A device was edited and saved (open windows take the preferences).
+    var onSaved: (Device) -> Void = { _ in }
 
     init(store: DeviceStore) {
         self.store = store
@@ -26,6 +28,7 @@ final class DevicesModel: ObservableObject {
         }
         store.upsert(device)
         try? store.save()
+        onSaved(store.device(id: device.id) ?? device)
         if let password, !password.isEmpty {
             Keychain.setPassword(password, account: device.credentialAccount)
         }
@@ -149,12 +152,10 @@ struct DeviceEditor: View {
                 Text("Mac (⌘ stays ⌘)").tag(ModifierProfile.mac.rawValue)
                 Text("Linux / Windows (⌘ ↔ Ctrl)").tag(ModifierProfile.pc.rawValue)
             }
-            Picker("Scaling", selection: $device.scalingMode) {
-                Text("Fit to window").tag(ScalingMode.fit.rawValue)
-                Text("Actual size (1:1)").tag(ScalingMode.actualSize.rawValue)
-                Text("Integer scale").tag(ScalingMode.integer.rawValue)
+            Picker("Display", selection: $device.scaling) {
+                ForEach(ScalingMode.allCases, id: \.self) { Text($0.title).tag($0) }
             }
-            Toggle("Use H.265 when available", isOn: $device.offerH265)
+            Toggle("Adapt stream quality to the network", isOn: $device.adaptiveQuality)
             Toggle("Invert scrolling", isOn: $device.invertScroll)
             HStack {
                 Spacer()
@@ -187,4 +188,24 @@ final class DevicesWindowController: NSWindowController {
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+}
+
+extension ScalingMode {
+    var title: String {
+        switch self {
+        case .actualSize: return "Actual Size (same size as on the remote)"
+        case .fit: return "Scale to Fit Window"
+        case .pixelExact: return "Pixel for Pixel"
+        case .integer: return "Largest Whole Multiple"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .actualSize: return "Actual Size"
+        case .fit: return "Fit"
+        case .pixelExact: return "Pixel for Pixel"
+        case .integer: return "Whole Multiple"
+        }
+    }
 }

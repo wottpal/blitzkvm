@@ -14,27 +14,47 @@ public struct Device: Codable, Equatable, Identifiable {
     /// (SHA-256 hex), learned on first connect.
     public var certificateSHA256: String?
     public var modifierProfile: String
-    public var scalingMode: String
-    public var offerH265: Bool
+    /// ScalingMode; nil means the default. (Replaces the earlier
+    /// "scalingMode" key, whose default was a fit that made text small.)
+    public var viewMode: String?
+    /// Nearest-neighbor at whole-number scales instead of FSR upscaling.
+    public var exactPixelScaling: Bool?
+    /// Stream quality follows the network; nil means on.
+    public var autoQuality: Bool?
+    /// The fixed quality level used while automatic quality is off.
+    public var qualityLevel: String?
     public var invertScroll: Bool
     public var lastConnected: Date?
 
     public init(id: String = UUID().uuidString, name: String, addresses: [String], deviceID: String? = nil,
-                modifierProfile: ModifierProfile = .mac, scalingMode: ScalingMode = .fit, offerH265: Bool = false,
+                modifierProfile: ModifierProfile = .mac, scaling: ScalingMode = .actualSize,
                 invertScroll: Bool = false, lastConnected: Date? = nil) {
         self.id = id
         self.name = name
         self.addresses = addresses
         self.deviceID = deviceID
         self.modifierProfile = modifierProfile.rawValue
-        self.scalingMode = scalingMode.rawValue
-        self.offerH265 = offerH265
+        self.viewMode = scaling.rawValue
         self.invertScroll = invertScroll
         self.lastConnected = lastConnected
     }
 
     public var profile: ModifierProfile { ModifierProfile(rawValue: modifierProfile) ?? .mac }
-    public var scaling: ScalingMode { ScalingMode(rawValue: scalingMode) ?? .fit }
+
+    public var scaling: ScalingMode {
+        get { viewMode.flatMap(ScalingMode.init(rawValue:)) ?? .actualSize }
+        set { viewMode = newValue.rawValue }
+    }
+
+    public var exactPixels: Bool {
+        get { exactPixelScaling ?? false }
+        set { exactPixelScaling = newValue }
+    }
+
+    public var adaptiveQuality: Bool {
+        get { autoQuality ?? true }
+        set { autoQuality = newValue }
+    }
 
     /// Key under which the password is stored: the device ID when known
     /// (the secret follows the device across address changes), otherwise
@@ -187,16 +207,16 @@ public enum AddressProbe {
     /// reachable with unknown identity when the public /device/status
     /// endpoint confirms a JetKVM answers there. https devices must present
     /// the pinned certificate authority (any, before the first connect).
-    public static func httpFetch(timeout: TimeInterval = 2, certSHA256: String? = nil) -> Fetch {
+    public static func httpFetch(timeout: TimeInterval = 2, certSHA256: String? = nil, log: ((String) -> Void)? = nil) -> Fetch {
         return { address in
             let base = (address.contains("://") ? address : "http://" + address).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             let session = URLSession(configuration: .ephemeral, delegate: PinningDelegate(pin: certSHA256), delegateQueue: nil)
             defer { session.finishTasksAndInvalidate() }
-            guard let (data, status) = await get(base + "/device", timeout: timeout, session: session) else { return nil }
+            guard let (data, status) = await get(base + "/device", timeout: timeout, session: session, log: log) else { return nil }
             if status == 200 {
                 return try? JSONDecoder().decode(DeviceIdentity.self, from: data)
             }
-            guard status == 401, let (statusData, code) = await get(base + "/device/status", timeout: timeout, session: session), code == 200,
+            guard status == 401, let (statusData, code) = await get(base + "/device/status", timeout: timeout, session: session, log: log), code == 200,
                   (try? JSONDecoder().decode(DeviceStatus.self, from: statusData)) != nil else { return nil }
             return DeviceIdentity(deviceId: nil, authMode: "password")
         }
@@ -206,12 +226,17 @@ public enum AddressProbe {
         var isSetup: Bool
     }
 
-    private static func get(_ string: String, timeout: TimeInterval, session: URLSession) async -> (Data, Int)? {
+    private static func get(_ string: String, timeout: TimeInterval, session: URLSession, log: ((String) -> Void)?) async -> (Data, Int)? {
         guard let url = URL(string: string) else { return nil }
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        guard let (data, response) = try? await session.data(for: request),
-              let http = response as? HTTPURLResponse else { return nil }
-        return (data, http.statusCode)
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return nil }
+            return (data, http.statusCode)
+        } catch {
+            log?("probe \(string): \(error.localizedDescription) (\((error as NSError).domain) \((error as NSError).code))")
+            return nil
+        }
     }
 }

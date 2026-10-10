@@ -10,6 +10,8 @@
 	<string>JetKVM Desktop</string>
 	<key>CFBundleExecutable</key>
 	<string>JetKVMDesktop</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -22,6 +24,15 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- JetKVMs answer plain http on the LAN, .local and VPN names; the
+		     engine pins identity and certificates itself. (No
+		     NSAllowsLocalNetworking: its presence makes macOS ignore
+		     NSAllowsArbitraryLoads.) -->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>JetKVM Desktop connects to your JetKVM devices on the local network.</string>
 	<key>LSApplicationCategoryType</key>

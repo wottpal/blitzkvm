@@ -6,17 +6,25 @@ import Network
 /// One window per device: video, input capture, status line.
 final class DeviceWindowController: NSWindowController, NSWindowDelegate, EngineProcessDelegate {
     private(set) var device: Device
-    let address: String
+    private(set) var address: String
     let engine: EngineProcess
     let decoder = VideoDecoder()
     let input = InputController()
     private(set) var videoView: CaptureVideoView!
     private let statusLabel = NSTextField(labelWithString: "Starting…")
+    private let hud = HintView()
+    private let viewControl = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var keyboardHintShown = false
     private(set) var snapshot = SessionSnapshot(Phase: "idle", Status: "starting")
     private(set) var lastStats: [String: Any] = [:]
     private var codecName = "–"
+    /// The codec of the last access unit ("H.265", "H.264" or "–").
+    var currentCodec: String {
+        codecLock.lock()
+        defer { codecLock.unlock() }
+        return codecName
+    }
     private var password: String?
-    private(set) var offerH265: Bool
     var onFrameDecoded: ((CVPixelBuffer, AccessUnitHeader) -> Void)?
     var onRestart: ((String) -> Void)?
     /// Called when a session connects (to persist device ID, last use).
@@ -33,6 +41,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     var credentialProvider: ((Device) -> String?)?
     /// Called when the window closes for good.
     var onClose: ((DeviceWindowController) -> Void)?
+    /// A per-device preference changed (view, mouse, codec…): persist it.
+    var onPreferencesChanged: ((DeviceWindowController) -> Void)?
     private var unverifiedPassword: String?
     private let codecLock = NSLock()
     private var statusTimer: Timer?
@@ -46,6 +56,14 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private var mediaWindow: VirtualMediaWindowController?
     private var serialWindow: SerialConsoleWindowController?
     private var fatalAlertShown = false
+    /// The window follows the remote screen's size until the user resizes
+    /// it by hand.
+    private var userSizedWindow = false
+    private let videoSize = Locked(CGSize.zero)
+    /// Set when the first probe found no address: keep probing all of them
+    /// and switch to the first that answers.
+    var reprobeAddresses = false
+    private var reprobeTimer: Timer?
 
     static let statusBarHeight: CGFloat = 22
 
@@ -53,7 +71,6 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         self.device = device
         self.address = address
         self.password = password
-        self.offerH265 = device.offerH265
         self.engine = EngineProcess(executableURL: engineURL)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 760),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -72,12 +89,81 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             guard let self else { return }
             self.videoView.display(buffer)
             self.onFrameDecoded?(buffer, header)
+            let size = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
+            let changed = self.videoSize.withLock { current -> Bool in
+                guard current != size else { return false }
+                current = size
+                return true
+            }
+            if changed { DispatchQueue.main.async { self.videoSizeChanged() } }
         }
         input.send = { [weak self] frame in self?.engine.write(frame) }
-        input.onCaptureChange = { [weak self] _ in self?.refreshStatus() }
+        input.onCaptureChange = { [weak self] in self?.captureChanged($0) }
+        applyPreferences()
+    }
+
+    /// Says how to get the keyboard back the first time capture engages.
+    private func captureChanged(_ captured: Bool) {
+        if captured && !keyboardHintShown {
+            keyboardHintShown = true
+            hud.show("Keyboard goes to \(device.name)  ·  press ⌃⌘ to release", for: 2.5)
+        }
+        refreshStatus()
+    }
+
+    @objc private func viewControlChanged() {
+        if let raw = viewControl.selectedItem?.representedObject as? String, let mode = ScalingMode(rawValue: raw) {
+            setScaling(mode)
+        }
+    }
+
+    private func applyPreferences() {
+        if let item = viewControl.itemArray.first(where: { $0.representedObject as? String == device.scaling.rawValue }) {
+            viewControl.select(item)
+        }
         input.modifierProfile = device.profile
         input.invertScroll = device.invertScroll
         videoView.scalingMode = device.scaling
+        window?.invalidateCursorRects(for: videoView)
+        videoView.exactPixels = device.exactPixels
+        refreshStatus()
+    }
+
+    /// Takes preferences edited in the device library (addresses and
+    /// credentials apply on the next connect).
+    func libraryEdited(_ edited: Device) {
+        let keep = device
+        device = edited
+        device.deviceID = keep.deviceID ?? edited.deviceID
+        device.certificateSHA256 = keep.certificateSHA256 ?? edited.certificateSHA256
+        applyPreferences()
+        if edited.adaptiveQuality != keep.adaptiveQuality && !input.viewOnly {
+            engine.setAutoQuality(edited.adaptiveQuality)
+        }
+    }
+
+    /// Changes this device's preferences, applies and persists them.
+    func updatePreferences(_ change: (inout Device) -> Void) {
+        change(&device)
+        applyPreferences()
+        onPreferencesChanged?(self)
+    }
+
+    /// Changing the view mode resizes the window to suit it.
+    func setScaling(_ mode: ScalingMode) {
+        updatePreferences { $0.scaling = mode }
+        if mode == .actualSize || mode == .pixelExact {
+            userSizedWindow = false
+            fitWindowToRemote()
+        }
+    }
+
+    /// First frame, or the remote changed resolution: show it at its natural
+    /// size unless the user sized the window.
+    private func videoSizeChanged() {
+        window?.invalidateCursorRects(for: videoView)
+        guard !userSizedWindow, let window, !window.styleMask.contains(.fullScreen) else { return }
+        fitWindowToRemote()
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -94,13 +180,32 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         bar.wantsLayer = true
         bar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         bar.addSubview(statusLabel)
+        viewControl.controlSize = .mini
+        viewControl.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1)
+        viewControl.translatesAutoresizingMaskIntoConstraints = false
+        viewControl.target = self
+        bar.addSubview(viewControl)
+        viewControl.action = #selector(viewControlChanged)
+        for mode in ScalingMode.allCases {
+            viewControl.addItem(withTitle: mode.shortTitle)
+            viewControl.lastItem?.representedObject = mode.rawValue
+        }
+        viewControl.toolTip = "How the remote screen is sized in the window"
+        hud.translatesAutoresizingMaskIntoConstraints = false
         let container = NSView(frame: window.contentLayoutRect)
         view.translatesAutoresizingMaskIntoConstraints = false
         bar.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(view)
         container.addSubview(bar)
+        container.addSubview(hud)
         NSLayoutConstraint.activate([
+            hud.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            hud.topAnchor.constraint(equalTo: view.topAnchor, constant: 18),
+            hud.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -40),
+            viewControl.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
+            viewControl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             view.topAnchor.constraint(equalTo: container.topAnchor),
@@ -110,25 +215,48 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             bar.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             bar.heightAnchor.constraint(equalToConstant: Self.statusBarHeight),
             statusLabel.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 8),
-            statusLabel.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: viewControl.leadingAnchor, constant: -8),
             statusLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
         ])
         window.contentView = container
         window.initialFirstResponder = view
     }
 
-    func start() throws {
-        try engine.start()
-        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256, offerH265: offerH265)
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshStatus() }
-        startPathMonitor()
+    /// Probes all of the device's addresses every few seconds while not
+    /// connected and moves the session to the first one that answers (the
+    /// first probe found none, e.g. the VPN came up later).
+    private func startReprobing() {
+        guard reprobeAddresses, device.addresses.count > 1, reprobeTimer == nil else { return }
+        reprobeTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if self.snapshot.Phase == "connected" || self.isShutDown {
+                self.reprobeTimer?.invalidate()
+                self.reprobeTimer = nil
+                return
+            }
+            let device = self.device
+            Task { @MainActor in
+                let result = await AddressProbe.choose(addresses: device.addresses, expectedDeviceID: device.deviceID,
+                                                       fetch: AddressProbe.httpFetch(certSHA256: device.certificateSHA256, log: { AppLog.log($0) }))
+                guard case .success(let (address, _)) = result, address != self.address, self.snapshot.Phase != "connected" else { return }
+                AppLog.log("\(device.name) answers at \(address); switching from \(self.address)")
+                self.address = address
+                self.window?.subtitle = address
+                self.reconnect()
+            }
+        }
     }
 
-    func reconnect(offerH265: Bool? = nil) {
-        if let offerH265 {
-            self.offerH265 = offerH265
-            device.offerH265 = offerH265
-        }
+    func start() throws {
+        try engine.start()
+        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256, autoQuality: device.adaptiveQuality && !input.viewOnly,
+                       qualityLevel: input.viewOnly ? nil : device.qualityLevel)
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshStatus() }
+        startPathMonitor()
+        startReprobing()
+    }
+
+    func reconnect() {
         if unverifiedPassword == nil, let stored = credentialProvider?(device) {
             // Pick up a password changed in the device library meanwhile.
             password = stored
@@ -136,7 +264,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         pendingPasteID = nil
         fatalAlertShown = false
         decoder.reset()
-        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256, offerH265: self.offerH265)
+        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256, autoQuality: device.adaptiveQuality && !input.viewOnly,
+                       qualityLevel: input.viewOnly ? nil : device.qualityLevel)
     }
 
     func showVirtualMedia() {
@@ -175,6 +304,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         isShutDown = true
         input.setCaptured(false)
         statusTimer?.invalidate()
+        reprobeTimer?.invalidate()
         pathMonitor?.cancel()
         mediaWindow?.close()
         serialWindow?.close()
@@ -219,17 +349,59 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         engine.send(command: EngineCommand(cmd: "cancelPaste"))
     }
 
-    /// Resizes the window so the remote screen is shown at 1:1 physical
-    /// pixels (or as large as fits the screen, keeping its aspect ratio).
+    /// Resizes the window to show the remote screen at its natural size: one
+    /// remote pixel per point (pixel for pixel in that mode), or as large as
+    /// fits the screen, keeping its aspect ratio. Keeps the window on screen.
     func fitWindowToRemote() {
-        guard let window, let screen = window.screen ?? NSScreen.main,
+        guard let window, !window.styleMask.contains(.fullScreen), let screen = window.screen ?? NSScreen.main,
               let size = videoView.currentVideoSize else { return }
-        let scale = window.backingScaleFactor
-        let bar = Self.statusBarHeight
-        let video = NSSize(width: size.width / scale, height: size.height / scale)
-        let available = window.contentRect(forFrameRect: screen.visibleFrame).size
-        let shrink = min(1, available.width / video.width, (available.height - bar) / video.height)
-        window.setContentSize(NSSize(width: (video.width * shrink).rounded(), height: (video.height * shrink).rounded() + bar))
+        let visible = screen.visibleFrame
+        let available = window.contentRect(forFrameRect: visible).size
+        guard let content = preferredContentSize(videoWidth: Int(size.width), videoHeight: Int(size.height),
+                                                 pointScale: Double(window.backingScaleFactor), mode: videoView.scalingMode,
+                                                 available: (Double(available.width), Double(available.height)),
+                                                 extraHeight: Double(Self.statusBarHeight)) else { return }
+        var frame = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: content.width, height: content.height))
+        // Grow around the current center, then move fully onto the screen.
+        frame.origin.x = window.frame.midX - frame.width / 2
+        frame.origin.y = window.frame.maxY - frame.height
+        frame.origin.x = min(max(frame.origin.x, visible.minX), visible.maxX - frame.width)
+        frame.origin.y = min(max(frame.origin.y, visible.minY), visible.maxY - frame.height)
+        window.setFrame(frame, display: true, animate: false)
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        userSizedWindow = true
+    }
+
+    /// Sets the content size and keeps it (no automatic fit to the remote).
+    func setContentSizeKeepingIt(_ size: NSSize) {
+        userSizedWindow = true
+        window?.setContentSize(size)
+    }
+
+    /// Automatic quality: the engine adapts the stream to the link.
+    func setAdaptiveQuality(_ on: Bool) {
+        guard !input.viewOnly else { return } // view-only never changes device settings
+        let current = snapshot.QualityLevel
+        updatePreferences {
+            $0.adaptiveQuality = on
+            // Off keeps what automatic had chosen (the engine does the same).
+            if !on, let current, !current.isEmpty { $0.qualityLevel = current }
+        }
+        engine.setAutoQuality(on)
+    }
+
+    /// Fixes the stream quality at a ladder level (pkg/session
+    /// autoquality.go) and turns automatic off. Live on firmware with the
+    /// encoder patch; stock firmware restarts its encoder for a new factor.
+    func setQualityLevel(_ name: String) {
+        guard !input.viewOnly else { return }
+        updatePreferences {
+            $0.adaptiveQuality = false
+            $0.qualityLevel = name
+        }
+        engine.setQualityLevel(name)
     }
 
     /// Keeps the video area's shape matching the remote screen while the
@@ -381,9 +553,17 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         if let signal = snapshot.VideoSignal, signal != "ready", !signal.isEmpty {
             parts.append("HDMI: \(signal.replacingOccurrences(of: "_", with: " "))")
         }
+        if let size = videoView.currentVideoSize {
+            let layout = videoView.layout
+            let percent = layout.width > 0 ? Int((layout.width / size.width / videoView.pointScale * 100).rounded()) : 0
+            parts.append("\(Int(size.width))×\(Int(size.height)) at \(percent)%")
+        }
         codecLock.lock()
         parts.append(codecName)
         codecLock.unlock()
+        if let level = snapshot.QualityLevel, !level.isEmpty {
+            parts.append(snapshot.AutoQuality == true ? "quality \(level) (auto)" : "quality \(level)")
+        }
         if let fps = lastStats["FramesPerSecond"] as? Double { parts.append(String(format: "%.0f fps", fps)) }
         if let kbps = lastStats["BitrateKbps"] as? Double { parts.append(String(format: "%.1f Mbit/s", kbps / 1000)) }
         if let rtt = lastStats["RoundTripMs"] as? Double, rtt > 0 { parts.append(String(format: "RTT %.0f ms", rtt)) }
@@ -395,10 +575,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         if input.viewOnly {
             parts.append("view only")
         } else if input.captured {
-            parts.append(input.eventTapActive ? "⌨︎ captured incl. system shortcuts (⌃⌘ releases)" : "⌨︎ captured (⌃⌘ releases)")
+            let captured = input.eventTapActive ? "captured incl. system shortcuts" : "captured"
+            parts.append("input \(captured) (⌃⌘ releases)")
             if input.secureInputActive { parts.append("⚠︎ Secure Input is on: system shortcuts stay local") }
         } else {
-            parts.append("⌨︎ released (click video to capture)")
+            parts.append("input released (click the screen to capture)")
         }
         if let extra { parts.append(extra) }
         statusLabel.stringValue = parts.joined(separator: "  ·  ")
@@ -449,22 +630,57 @@ final class CaptureVideoView: VideoView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    /// Hovering anywhere over the remote picture puts the remote pointer
+    /// there, also while another app is active.
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let trackingArea { removeTrackingArea(trackingArea) }
-        let area = NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil)
+        let area = NSTrackingArea(rect: bounds, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
         addTrackingArea(area)
         trackingArea = area
+    }
+
+    /// A click into an inactive window also reaches the remote.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// Over the remote picture only the remote pointer shows: the local one
+    /// is invisible there (AppKit restores it outside the rect and while the
+    /// window is not key).
+    private static let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 1, height: 1), flipped: false) { _ in true },
+                                                  hotSpot: .zero)
+
+    override func resetCursorRects() {
+        let l = currentLayout()
+        let scale = pointScale
+        guard l.width > 0, l.height > 0, scale > 0 else { return }
+        // Physical pixels, origin top-left -> view points, origin bottom-left.
+        let rect = NSRect(x: l.x / scale, y: bounds.height - (l.y + l.height) / scale,
+                          width: l.width / scale, height: l.height / scale).intersection(bounds)
+        if !rect.isEmpty { addCursorRect(rect, cursor: Self.invisibleCursor) }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        window?.invalidateCursorRects(for: self)
     }
 
     private func routeMouse(_ event: NSEvent) {
         guard let controller else { return }
         let point = convert(event.locationInWindow, from: nil)
-        controller.input.mouse(event, at: physicalPoint(point), in: layout)
+        let physical = physicalPoint(point)
+        if overflows {
+            // A remote screen larger than the view pans with the pointer:
+            // at the view's left edge its left edge shows, and so on.
+            let fx = bounds.width > 0 ? Double(point.x / bounds.width) : 0.5
+            let fy = bounds.height > 0 ? Double(1 - point.y / bounds.height) : 0.5
+            pan = (min(max(fx, 0), 1), min(max(fy, 0), 1))
+        }
+        controller.input.mouse(event, at: physical, in: currentLayout())
     }
 
     override func mouseDown(with event: NSEvent) {
-        if let controller, !controller.input.captured {
+        guard let controller else { return }
+        if !controller.input.captured {
             controller.input.setCaptured(true)
         }
         routeMouse(event)
@@ -498,5 +714,50 @@ final class CaptureVideoView: VideoView {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard let controller, controller.input.captured else { return super.performKeyEquivalent(with: event) }
         return controller.input.handle(event)
+    }
+}
+
+/// A transient hint over the video (how to release capture and the like).
+final class HintView: NSVisualEffectView {
+    private let label = NSTextField(labelWithString: "")
+    private var hideWork: DispatchWorkItem?
+
+    init() {
+        super.init(frame: .zero)
+        material = .hudWindow
+        blendingMode = .withinWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.masksToBounds = true
+        alphaValue = 0
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .labelColor
+        label.alignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 9),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    // Never takes clicks from the video.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func show(_ text: String, for seconds: TimeInterval) {
+        label.stringValue = text
+        hideWork?.cancel()
+        NSAnimationContext.runAnimationGroup { $0.duration = 0.15; animator().alphaValue = 1 }
+        let work = DispatchWorkItem { [weak self] in
+            NSAnimationContext.runAnimationGroup { $0.duration = 0.4; self?.animator().alphaValue = 0 }
+        }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 }

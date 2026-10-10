@@ -1,22 +1,28 @@
 import Foundation
 
 public enum ScalingMode: String, CaseIterable {
+    /// One remote pixel per point: the remote desktop looks the same size as
+    /// on a monitor of its own resolution (2 physical pixels on Retina). Pans
+    /// with the pointer when the window is smaller than the remote screen.
+    case actualSize
     /// Largest aspect-preserving size that fits the view.
     case fit
-    /// One remote pixel per physical display pixel, centered.
-    case actualSize
-    /// Largest whole-number multiple that fits (crisp, nearest-neighbor).
+    /// One remote pixel per physical display pixel (tiny on Retina, but every
+    /// pixel exact). Pans like actualSize.
+    case pixelExact
+    /// Largest whole multiple of physical pixels that fits, always drawn
+    /// with exact (nearest-neighbor) pixels.
     case integer
 }
 
 public struct VideoLayout: Equatable {
-    /// Destination rectangle in physical pixels (origin top-left).
+    /// Destination rectangle in physical pixels (origin top-left). It may
+    /// extend beyond the drawable when the video is larger (panning).
     public var x: Double
     public var y: Double
     public var width: Double
     public var height: Double
-    /// Nearest-neighbor sampling keeps text crisp when the scale is a whole
-    /// number; linear otherwise.
+    /// Whole-number scale: nearest-neighbor sampling keeps edges exact.
     public var nearest: Bool
 
     public init(x: Double, y: Double, width: Double, height: Double, nearest: Bool) {
@@ -27,9 +33,17 @@ public struct VideoLayout: Equatable {
         self.nearest = nearest
     }
 
+    /// Physical pixels per remote pixel.
+    public func scale(videoWidth: Int) -> Double {
+        videoWidth > 0 ? width / Double(videoWidth) : 0
+    }
+
     /// Computes where the video goes inside a drawable of the given pixel
-    /// size. Edges are snapped to whole pixels.
-    public static func compute(videoWidth: Int, videoHeight: Int, drawableWidth: Double, drawableHeight: Double, mode: ScalingMode) -> VideoLayout {
+    /// size. `pointScale` is the display's backing scale factor; `pan` (0...1
+    /// per axis) positions a video larger than the drawable. Edges are snapped
+    /// to whole pixels.
+    public static func compute(videoWidth: Int, videoHeight: Int, drawableWidth: Double, drawableHeight: Double,
+                               mode: ScalingMode, pointScale: Double = 1, pan: (x: Double, y: Double) = (0.5, 0.5)) -> VideoLayout {
         guard videoWidth > 0, videoHeight > 0, drawableWidth > 0, drawableHeight > 0 else {
             return VideoLayout(x: 0, y: 0, width: 0, height: 0, nearest: false)
         }
@@ -40,16 +54,22 @@ public struct VideoLayout: Equatable {
         case .fit:
             scale = fitScale
         case .actualSize:
+            scale = max(pointScale, 0.25)
+        case .pixelExact:
             scale = 1
         case .integer:
             scale = fitScale >= 1 ? floor(fitScale) : fitScale
         }
         let w = (vw * scale).rounded()
         let h = (vh * scale).rounded()
-        let x = ((drawableWidth - w) / 2).rounded(.down)
-        let y = ((drawableHeight - h) / 2).rounded(.down)
+        func place(_ size: Double, in space: Double, pan: Double) -> Double {
+            // Centered when it fits; otherwise the pan fraction picks which
+            // part is visible (0 = leading edge, 1 = trailing edge).
+            size <= space ? ((space - size) / 2).rounded(.down) : ((space - size) * min(max(pan, 0), 1)).rounded()
+        }
         let nearest = scale >= 1 && abs(scale - scale.rounded()) < 0.0001
-        return VideoLayout(x: x, y: y, width: w, height: h, nearest: nearest)
+        return VideoLayout(x: place(w, in: drawableWidth, pan: pan.x), y: place(h, in: drawableHeight, pan: pan.y),
+                           width: w, height: h, nearest: nearest)
     }
 
     /// Maps a point (physical pixels, origin top-left) to the device's
@@ -102,4 +122,16 @@ public struct ScrollAccumulator {
     static func clampTick(_ v: Double) -> Int8 {
         Int8(max(-127, min(127, v)))
     }
+}
+
+/// Window content size (points) that shows a remote screen at `mode`'s
+/// natural size, shrunk to fit `available` keeping the aspect ratio.
+public func preferredContentSize(videoWidth: Int, videoHeight: Int, pointScale: Double, mode: ScalingMode,
+                                 available: (width: Double, height: Double), extraHeight: Double) -> (width: Double, height: Double)? {
+    guard videoWidth > 0, videoHeight > 0, pointScale > 0 else { return nil }
+    let perPixel: Double = mode == .pixelExact ? 1 / pointScale : 1 // points per remote pixel
+    let w = Double(videoWidth) * perPixel
+    let h = Double(videoHeight) * perPixel
+    let shrink = min(1, available.width / w, (available.height - extraHeight) / h)
+    return ((w * shrink).rounded(), (h * shrink).rounded() + extraHeight)
 }

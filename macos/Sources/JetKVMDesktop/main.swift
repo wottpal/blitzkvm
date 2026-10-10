@@ -16,7 +16,6 @@ final class JetKVMApplication: NSApplication {
 struct Options {
     var device: String?
     var password: String?
-    var offerH265: Bool?
     var selfTestSeconds: Double?
     var crashEngineAfter: Double?
     var snapshotPath: String?
@@ -43,8 +42,7 @@ struct Options {
         while i < args.count {
             switch args[i] {
             case "--device": o.device = next()
-            case "--h265": o.offerH265 = true
-            case "--h264": o.offerH265 = false
+            case "--h264": EngineProcess.offerH265 = false // self-tests against the emulator's live pattern
             case "--selftest": o.selfTestSeconds = next().flatMap(Double.init)
             case "--crash-engine-after": o.crashEngineAfter = next().flatMap(Double.init)
             case "--snapshot": o.snapshotPath = next()
@@ -70,6 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var devicesModel: DevicesModel = {
         let model = DevicesModel(store: store)
         model.onConnect = { [weak self] device in self?.connect(device) }
+        model.onSaved = { [weak self] device in
+            self?.windows.first { $0.device.id == device.id }?.libraryEdited(device)
+        }
         return model
     }()
     private var devicesWindow: DevicesWindowController?
@@ -134,8 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let saved = store.device(matchingAddress: address)
         var device = saved ?? Device(name: address, addresses: [address])
         if saved == nil { adHocDeviceIDs.insert(device.id) }
-        if let h265 = options.offerH265 { device.offerH265 = h265 }
-        if let scaling = options.scaling { device.scalingMode = scaling.rawValue }
+        if let scaling = options.scaling { device.scaling = scaling }
         if let profile = options.profile { device.modifierProfile = profile.rawValue }
         if isSelfTest {
             // Self-tests never touch the device library or Keychain.
@@ -160,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             defer { self.connecting.remove(device.id) }
             let result = await AddressProbe.choose(addresses: device.addresses, expectedDeviceID: device.deviceID,
-                                                   fetch: AddressProbe.httpFetch(certSHA256: device.certificateSHA256))
+                                                   fetch: AddressProbe.httpFetch(certSHA256: device.certificateSHA256, log: { AppLog.log($0) }))
             switch result {
             case .success(let (address, identity)):
                 var pinned = device
@@ -174,21 +174,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.alert("Refusing to connect to \(device.name)",
                            detail: "The address answered as device \(found), but this entry belongs to \(expected). No password was sent.")
             case .failure(.unreachable):
-                let a = NSAlert()
-                a.messageText = "\(device.name) is not reachable"
-                a.informativeText = "Tried: \(device.addresses.joined(separator: ", ")). Check the network or VPN."
-                if device.certificateSHA256 != nil, device.addresses.contains(where: { $0.hasPrefix("https://") }) {
-                    a.informativeText += " If the device's HTTPS certificate changed, Try Anyway shows it for review."
-                }
-                a.addButton(withTitle: "Try Anyway")
-                a.addButton(withTitle: "Cancel")
-                if a.runModal() == .alertFirstButtonReturn, let first = device.addresses.first {
-                    // The engine still verifies a pinned device ID before any
-                    // input; an unpinned device gets no stored password
-                    // unverified.
-                    let password = device.deviceID == nil ? self.options.password : (self.options.password ?? Keychain.password(account: device.credentialAccount))
-                    self.open(device, address: first, password: password)
-                }
+                // No quick answer (asleep, VPN still coming up, Local Network
+                // permission pending): open the window anyway; it shows the
+                // progress and the engine keeps retrying. The engine still
+                // verifies a pinned device ID (and certificate) before any
+                // input; an unpinned device gets no stored password.
+                AppLog.log("probe: no answer from \(device.addresses.joined(separator: ", ")); connecting anyway")
+                guard let first = device.addresses.first else { return }
+                let password = device.deviceID == nil ? self.options.password : (self.options.password ?? Keychain.password(account: device.credentialAccount))
+                self.open(device, address: first, password: password, reprobe: true)
             }
         }
     }
@@ -203,13 +197,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func open(_ device: Device, address: String, password: String?) {
+    private func open(_ device: Device, address: String, password: String?, reprobe: Bool = false) {
         guard let engineURL = EngineProcess.locateHelper() else {
             fail("jetkvm-engine helper not found (set JETKVM_ENGINE or run `make app`)")
             return
         }
         let controller = DeviceWindowController(device: device, address: address, password: password, engineURL: engineURL)
         controller.input.viewOnly = options.viewOnly
+        controller.reprobeAddresses = reprobe
         if !isSelfTest {
             controller.onConnected = { [weak self] c in self?.recordConnection(c.device) }
             controller.onCertificateChange = { [weak self] c in self?.recordCertificate(c.device) }
@@ -224,6 +219,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.credentialProvider = { Keychain.password(account: $0.credentialAccount) }
         }
         controller.onClose = { [weak self] c in self?.windows.removeAll { $0 === c } }
+        if !isSelfTest {
+            controller.onPreferencesChanged = { [weak self] c in self?.recordPreferences(c.device) }
+        }
         let tabHost = (windows.first { $0.window?.isKeyWindow == true } ?? windows.last)?.window
         windows.append(controller)
         if let seconds = options.selfTestSeconds {
@@ -232,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selfTest?.exerciseExtras = options.exerciseExtras
         }
         if let (w, h) = options.windowSize {
-            controller.window?.setContentSize(NSSize(width: w, height: h))
+            controller.setContentSizeKeepingIt(NSSize(width: w, height: h))
         }
         if let tabHost, let window = controller.window {
             // Additional devices open as tabs of the current window.
@@ -263,6 +261,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             return
         }
+        try? store.save()
+        devicesModel.reload()
+    }
+
+    /// Persists preferences changed from the menus.
+    private func recordPreferences(_ device: Device) {
+        guard var saved = store.device(id: device.id) else { return }
+        saved.modifierProfile = device.modifierProfile
+        saved.viewMode = device.viewMode
+        saved.exactPixelScaling = device.exactPixelScaling
+        saved.invertScroll = device.invertScroll
+        saved.autoQuality = device.autoQuality
+        saved.qualityLevel = device.qualityLevel
+        store.upsert(saved)
         try? store.save()
         devicesModel.reload()
     }
@@ -368,20 +380,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             i.representedObject = profile.rawValue
             device.addItem(i)
         }
-        device.addItem(item("Use H.265 (reconnects)", #selector(toggleH265)))
+        device.addItem(.separator())
+        device.addItem(item("Invert Scrolling", #selector(toggleInvertScroll)))
+        device.addItem(.separator())
+        let quality = NSMenu(title: "Stream Quality")
+        quality.addItem(item("Automatic (Adapts to the Network)", #selector(toggleAdaptiveQuality)))
+        quality.addItem(.separator())
+        for (title, level) in Self.qualityLevels {
+            let i = item(title, #selector(setQualityLevel(_:)))
+            i.representedObject = level
+            quality.addItem(i)
+        }
+        let qualityItem = NSMenuItem(title: "Stream Quality", action: nil, keyEquivalent: "")
+        qualityItem.submenu = quality
+        device.addItem(qualityItem)
         let deviceItem = NSMenuItem()
         deviceItem.submenu = device
         main.addItem(deviceItem)
 
         let view = NSMenu(title: "View")
-        for (title, mode, key) in [("Fit to Window", ScalingMode.fit, "0"), ("Actual Size (1:1)", ScalingMode.actualSize, "1"), ("Integer Scale", ScalingMode.integer, "2")] {
+        for (title, mode, key) in [("Actual Size", ScalingMode.actualSize, "1"), ("Scale to Fit Window", ScalingMode.fit, "2"),
+                                   ("Pixel for Pixel", ScalingMode.pixelExact, "3"), ("Largest Whole Multiple", ScalingMode.integer, "4")] {
             let i = item(title, #selector(setScaling(_:)), key: key)
             i.representedObject = mode.rawValue
             view.addItem(i)
         }
+        view.addItem(item("Exact Pixels at Whole-Number Scales", #selector(toggleExactPixels)))
+        view.addItem(.separator())
         view.addItem(item("Fit Window to Remote Screen", #selector(fitWindow), key: "0", mods: [.command, .option]))
         view.addItem(item("Lock Aspect Ratio", #selector(toggleAspectLock)))
-        view.addItem(item("Invert Scrolling", #selector(toggleInvertScroll)))
         view.addItem(.separator())
         view.addItem(item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), key: "f", mods: [.command, .control], target: nil))
         let viewItem = NSMenuItem()
@@ -415,24 +442,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc private func requestAccessibility() { _ = InputController.accessibilityTrusted(prompt: true) }
     @objc private func setProfile(_ sender: NSMenuItem) {
-        if let raw = sender.representedObject as? String, let p = ModifierProfile(rawValue: raw) { current?.input.modifierProfile = p }
-    }
-    @objc private func toggleH265() {
-        guard let c = current else { return }
-        c.reconnect(offerH265: !c.offerH265)
+        if let raw = sender.representedObject as? String, let p = ModifierProfile(rawValue: raw) {
+            current?.updatePreferences { $0.modifierProfile = p.rawValue }
+        }
     }
     @objc private func setScaling(_ sender: NSMenuItem) {
-        if let raw = sender.representedObject as? String, let m = ScalingMode(rawValue: raw) { current?.videoView.scalingMode = m }
+        if let raw = sender.representedObject as? String, let m = ScalingMode(rawValue: raw) { current?.setScaling(m) }
+    }
+    @objc private func toggleExactPixels() { current?.updatePreferences { $0.exactPixels.toggle() } }
+
+    /// The engine's quality ladder (pkg/session/autoquality.go), best first.
+    static let qualityLevels: [(String, String)] = [
+        ("Maximum (Fast LAN)", "maximum"), ("High", "high"), ("Balanced", "balanced"),
+        ("Low", "low"), ("Minimal (Slow Links)", "minimal"),
+    ]
+    @objc private func toggleAdaptiveQuality() {
+        guard let c = current else { return }
+        c.setAdaptiveQuality(!c.device.adaptiveQuality)
+    }
+    @objc private func setQualityLevel(_ sender: NSMenuItem) {
+        if let level = sender.representedObject as? String { current?.setQualityLevel(level) }
     }
     @objc private func fitWindow() { current?.fitWindowToRemote() }
     @objc private func toggleAspectLock() {
         guard let c = current else { return }
         c.lockAspect(!c.isAspectLocked)
     }
-    @objc private func toggleInvertScroll() {
-        guard let c = current else { return }
-        c.input.invertScroll.toggle()
-    }
+    @objc private func toggleInvertScroll() { current?.updatePreferences { $0.invertScroll.toggle() } }
     @objc private func pasteClipboard() {
         guard let c = current, let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
         c.paste(text)
@@ -468,6 +504,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate: NSMenuItemValidation {
     /// Checks the active extension port; actions on the device need a session.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        let c = current
+        switch menuItem.action {
+        case #selector(setScaling(_:)):
+            menuItem.state = c?.device.scaling.rawValue == menuItem.representedObject as? String ? .on : .off
+            return c != nil
+        case #selector(toggleExactPixels):
+            menuItem.state = c?.device.exactPixels == true ? .on : .off
+            return c != nil
+        case #selector(toggleInvertScroll):
+            menuItem.state = c?.device.invertScroll == true ? .on : .off
+            return c != nil
+        case #selector(setProfile(_:)):
+            menuItem.state = c?.device.modifierProfile == menuItem.representedObject as? String ? .on : .off
+            return c != nil
+        case #selector(toggleAspectLock):
+            menuItem.state = c?.isAspectLocked == true ? .on : .off
+            return c != nil
+        case #selector(toggleAdaptiveQuality):
+            menuItem.state = c?.device.adaptiveQuality == true ? .on : .off
+            return c != nil
+        case #selector(setQualityLevel(_:)):
+            let manual = c?.device.adaptiveQuality == false
+            menuItem.state = manual && c?.device.qualityLevel == menuItem.representedObject as? String ? .on : .off
+            return c?.snapshot.Phase == "connected"
+        default:
+            break
+        }
         if menuItem.action == #selector(setExtension(_:)) {
             let active = current?.snapshot.ActiveExtension ?? ""
             menuItem.state = active == (menuItem.representedObject as? String) ? .on : .off

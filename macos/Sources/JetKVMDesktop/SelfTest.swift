@@ -202,6 +202,7 @@ final class SelfTest {
             "presentedFrames": controller.videoView.presentedFrames,
             "decodeErrors": stats.errors,
             "keyframes": stats.keyframes,
+            "codec": controller.currentCodec,
             "lastDecodeMs": stats.lastDecodeMs,
             "engineRestarts": restarts,
             "backingScale": controller.window?.backingScaleFactor ?? 0,

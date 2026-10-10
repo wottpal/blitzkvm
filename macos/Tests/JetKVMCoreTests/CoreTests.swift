@@ -113,11 +113,43 @@ final class GeometryTests: XCTestCase {
         XCTAssertFalse(layout.nearest)
     }
 
-    func testActualSizeIsPixelExact() {
-        let layout = VideoLayout.compute(videoWidth: 1920, videoHeight: 1080, drawableWidth: 3024, drawableHeight: 1964, mode: .actualSize)
+    func testPixelExactIsOnePhysicalPixel() {
+        let layout = VideoLayout.compute(videoWidth: 1920, videoHeight: 1080, drawableWidth: 3024, drawableHeight: 1964, mode: .pixelExact, pointScale: 2)
         XCTAssertEqual(layout.width, 1920)
         XCTAssertEqual(layout.x, 552)
         XCTAssertTrue(layout.nearest)
+    }
+
+    func testActualSizeIsOnePointPerRemotePixel() {
+        // Retina: a 1080p remote is 3840 physical pixels wide, the size a
+        // 1080p monitor shows it at.
+        let layout = VideoLayout.compute(videoWidth: 1920, videoHeight: 1080, drawableWidth: 6016, drawableHeight: 2400, mode: .actualSize, pointScale: 2)
+        XCTAssertEqual(layout.width, 3840)
+        XCTAssertEqual(layout.x, 1088)
+        XCTAssertEqual(layout.y, 120)
+        XCTAssertTrue(layout.nearest)
+    }
+
+    func testActualSizePansWhenLargerThanTheView() {
+        let left = VideoLayout.compute(videoWidth: 1920, videoHeight: 1080, drawableWidth: 2000, drawableHeight: 2160, mode: .actualSize, pointScale: 2, pan: (0, 0.5))
+        XCTAssertEqual(left.x, 0)
+        let right = VideoLayout.compute(videoWidth: 1920, videoHeight: 1080, drawableWidth: 2000, drawableHeight: 2160, mode: .actualSize, pointScale: 2, pan: (1, 0.5))
+        XCTAssertEqual(right.x, -1840)
+        // The pointer at the view's right edge reaches the remote's right edge.
+        XCTAssertEqual(right.absolutePosition(px: 2000, py: 0)?.0, 32767)
+        let middle = VideoLayout.compute(videoWidth: 1920, videoHeight: 1080, drawableWidth: 2000, drawableHeight: 2160, mode: .actualSize, pointScale: 2, pan: (0.5, 0.5))
+        XCTAssertEqual(middle.absolutePosition(px: 1000, py: 1080)?.0, 16384)
+    }
+
+    func testPreferredContentSizeUsesPointsAndFitsTheScreen() {
+        let size = preferredContentSize(videoWidth: 1920, videoHeight: 1080, pointScale: 2, mode: .actualSize, available: (3008, 1200), extraHeight: 22)
+        XCTAssertEqual(size?.width, 1920)
+        XCTAssertEqual(size?.height, 1102)
+        let small = preferredContentSize(videoWidth: 1920, videoHeight: 1080, pointScale: 2, mode: .actualSize, available: (1512, 900), extraHeight: 22)
+        XCTAssertEqual(small?.width, 1512)
+        XCTAssertEqual(small?.height, 873)
+        let exact = preferredContentSize(videoWidth: 1920, videoHeight: 1080, pointScale: 2, mode: .pixelExact, available: (3008, 1200), extraHeight: 22)
+        XCTAssertEqual(exact?.width, 960)
     }
 
     func testIntegerScaleUsesWholeMultiples() {
