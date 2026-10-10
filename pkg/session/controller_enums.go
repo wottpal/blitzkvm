@@ -38,23 +38,26 @@ func _PhaseNoOp() {
 var _PhaseValues = []Phase{PhaseIdle, PhaseConnecting, PhaseConnected, PhaseReconnecting, PhaseDisconnected, PhaseAuthFailed, PhaseOtherSession, PhaseRebooting, PhaseFatal}
 
 var _PhaseNameToValueMap = map[string]Phase{
-	_PhaseName[0:4]:        PhaseIdle,
+	_PhaseName[0:4]:   PhaseIdle,
+	_PhaseName[4:14]:  PhaseConnecting,
+	_PhaseName[14:23]: PhaseConnected,
+	_PhaseName[23:35]: PhaseReconnecting,
+	_PhaseName[35:47]: PhaseDisconnected,
+	_PhaseName[47:58]: PhaseAuthFailed,
+	_PhaseName[58:71]: PhaseOtherSession,
+	_PhaseName[71:80]: PhaseRebooting,
+	_PhaseName[80:91]: PhaseFatal,
+}
+
+var _PhaseLowerNameToValueMap = map[string]Phase{
 	_PhaseLowerName[0:4]:   PhaseIdle,
-	_PhaseName[4:14]:       PhaseConnecting,
 	_PhaseLowerName[4:14]:  PhaseConnecting,
-	_PhaseName[14:23]:      PhaseConnected,
 	_PhaseLowerName[14:23]: PhaseConnected,
-	_PhaseName[23:35]:      PhaseReconnecting,
 	_PhaseLowerName[23:35]: PhaseReconnecting,
-	_PhaseName[35:47]:      PhaseDisconnected,
 	_PhaseLowerName[35:47]: PhaseDisconnected,
-	_PhaseName[47:58]:      PhaseAuthFailed,
 	_PhaseLowerName[47:58]: PhaseAuthFailed,
-	_PhaseName[58:71]:      PhaseOtherSession,
 	_PhaseLowerName[58:71]: PhaseOtherSession,
-	_PhaseName[71:80]:      PhaseRebooting,
 	_PhaseLowerName[71:80]: PhaseRebooting,
-	_PhaseName[80:91]:      PhaseFatal,
 	_PhaseLowerName[80:91]: PhaseFatal,
 }
 
@@ -77,7 +80,7 @@ func PhaseString(s string) (Phase, error) {
 		return val, nil
 	}
 
-	if val, ok := _PhaseNameToValueMap[strings.ToLower(s)]; ok {
+	if val, ok := _PhaseLowerNameToValueMap[strings.ToLower(s)]; ok {
 		return val, nil
 	}
 	return 0, fmt.Errorf("%s does not belong to Phase values", s)

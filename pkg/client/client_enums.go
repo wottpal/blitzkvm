@@ -32,11 +32,14 @@ func _SignalingModeNoOp() {
 var _SignalingModeValues = []SignalingMode{SignalingModeUnknown, SignalingModeLegacyHTTP, SignalingModeWebSocket}
 
 var _SignalingModeNameToValueMap = map[string]SignalingMode{
-	_SignalingModeName[0:7]:        SignalingModeUnknown,
+	_SignalingModeName[0:7]:   SignalingModeUnknown,
+	_SignalingModeName[7:18]:  SignalingModeLegacyHTTP,
+	_SignalingModeName[18:27]: SignalingModeWebSocket,
+}
+
+var _SignalingModeLowerNameToValueMap = map[string]SignalingMode{
 	_SignalingModeLowerName[0:7]:   SignalingModeUnknown,
-	_SignalingModeName[7:18]:       SignalingModeLegacyHTTP,
 	_SignalingModeLowerName[7:18]:  SignalingModeLegacyHTTP,
-	_SignalingModeName[18:27]:      SignalingModeWebSocket,
 	_SignalingModeLowerName[18:27]: SignalingModeWebSocket,
 }
 
@@ -53,7 +56,7 @@ func SignalingModeString(s string) (SignalingMode, error) {
 		return val, nil
 	}
 
-	if val, ok := _SignalingModeNameToValueMap[strings.ToLower(s)]; ok {
+	if val, ok := _SignalingModeLowerNameToValueMap[strings.ToLower(s)]; ok {
 		return val, nil
 	}
 	return 0, fmt.Errorf("%s does not belong to SignalingMode values", s)

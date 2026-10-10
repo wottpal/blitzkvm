@@ -24,7 +24,7 @@ func (i iconKind) String() string {
 // An "invalid array index" compiler error signifies that the constant values have changed.
 // Re-run the stringer command to generate them again.
 func _iconKindNoOp() {
-	var x [64]struct{}
+	var x [1]struct{}
 	_ = x[iconReconnect-(0)]
 	_ = x[iconMouse-(1)]
 	_ = x[iconPaste-(2)]
@@ -42,29 +42,32 @@ func _iconKindNoOp() {
 var _iconKindValues = []iconKind{iconReconnect, iconMouse, iconPaste, iconMedia, iconStats, iconTerminal, iconMinus, iconPlus, iconPower, iconSettings, iconFullscreen, iconClose}
 
 var _iconKindNameToValueMap = map[string]iconKind{
-	_iconKindName[0:9]:        iconReconnect,
+	_iconKindName[0:9]:   iconReconnect,
+	_iconKindName[9:14]:  iconMouse,
+	_iconKindName[14:19]: iconPaste,
+	_iconKindName[19:24]: iconMedia,
+	_iconKindName[24:29]: iconStats,
+	_iconKindName[29:37]: iconTerminal,
+	_iconKindName[37:42]: iconMinus,
+	_iconKindName[42:46]: iconPlus,
+	_iconKindName[46:51]: iconPower,
+	_iconKindName[51:59]: iconSettings,
+	_iconKindName[59:69]: iconFullscreen,
+	_iconKindName[69:74]: iconClose,
+}
+
+var _iconKindLowerNameToValueMap = map[string]iconKind{
 	_iconKindLowerName[0:9]:   iconReconnect,
-	_iconKindName[9:14]:       iconMouse,
 	_iconKindLowerName[9:14]:  iconMouse,
-	_iconKindName[14:19]:      iconPaste,
 	_iconKindLowerName[14:19]: iconPaste,
-	_iconKindName[19:24]:      iconMedia,
 	_iconKindLowerName[19:24]: iconMedia,
-	_iconKindName[24:29]:      iconStats,
 	_iconKindLowerName[24:29]: iconStats,
-	_iconKindName[29:37]:      iconTerminal,
 	_iconKindLowerName[29:37]: iconTerminal,
-	_iconKindName[37:42]:      iconMinus,
 	_iconKindLowerName[37:42]: iconMinus,
-	_iconKindName[42:46]:      iconPlus,
 	_iconKindLowerName[42:46]: iconPlus,
-	_iconKindName[46:51]:      iconPower,
 	_iconKindLowerName[46:51]: iconPower,
-	_iconKindName[51:59]:      iconSettings,
 	_iconKindLowerName[51:59]: iconSettings,
-	_iconKindName[59:69]:      iconFullscreen,
 	_iconKindLowerName[59:69]: iconFullscreen,
-	_iconKindName[69:74]:      iconClose,
 	_iconKindLowerName[69:74]: iconClose,
 }
 
@@ -90,7 +93,7 @@ func iconKindString(s string) (iconKind, error) {
 		return val, nil
 	}
 
-	if val, ok := _iconKindNameToValueMap[strings.ToLower(s)]; ok {
+	if val, ok := _iconKindLowerNameToValueMap[strings.ToLower(s)]; ok {
 		return val, nil
 	}
 	return 0, fmt.Errorf("%s does not belong to iconKind values", s)
@@ -163,7 +166,7 @@ func (i settingsSection) String() string {
 // An "invalid array index" compiler error signifies that the constant values have changed.
 // Re-run the stringer command to generate them again.
 func _settingsSectionNoOp() {
-	var x [64]struct{}
+	var x [1]struct{}
 	_ = x[sectionGeneral-(0)]
 	_ = x[sectionMouse-(1)]
 	_ = x[sectionKeyboard-(2)]
@@ -181,29 +184,32 @@ func _settingsSectionNoOp() {
 var _settingsSectionValues = []settingsSection{sectionGeneral, sectionMouse, sectionKeyboard, sectionVideo, sectionHardware, sectionATX, sectionAccess, sectionAppearance, sectionMacros, sectionNetwork, sectionMQTT, sectionAdvanced}
 
 var _settingsSectionNameToValueMap = map[string]settingsSection{
-	_settingsSectionName[0:7]:        sectionGeneral,
+	_settingsSectionName[0:7]:   sectionGeneral,
+	_settingsSectionName[7:12]:  sectionMouse,
+	_settingsSectionName[12:20]: sectionKeyboard,
+	_settingsSectionName[20:25]: sectionVideo,
+	_settingsSectionName[25:33]: sectionHardware,
+	_settingsSectionName[33:36]: sectionATX,
+	_settingsSectionName[36:42]: sectionAccess,
+	_settingsSectionName[42:52]: sectionAppearance,
+	_settingsSectionName[52:58]: sectionMacros,
+	_settingsSectionName[58:65]: sectionNetwork,
+	_settingsSectionName[65:69]: sectionMQTT,
+	_settingsSectionName[69:77]: sectionAdvanced,
+}
+
+var _settingsSectionLowerNameToValueMap = map[string]settingsSection{
 	_settingsSectionLowerName[0:7]:   sectionGeneral,
-	_settingsSectionName[7:12]:       sectionMouse,
 	_settingsSectionLowerName[7:12]:  sectionMouse,
-	_settingsSectionName[12:20]:      sectionKeyboard,
 	_settingsSectionLowerName[12:20]: sectionKeyboard,
-	_settingsSectionName[20:25]:      sectionVideo,
 	_settingsSectionLowerName[20:25]: sectionVideo,
-	_settingsSectionName[25:33]:      sectionHardware,
 	_settingsSectionLowerName[25:33]: sectionHardware,
-	_settingsSectionName[33:36]:      sectionATX,
 	_settingsSectionLowerName[33:36]: sectionATX,
-	_settingsSectionName[36:42]:      sectionAccess,
 	_settingsSectionLowerName[36:42]: sectionAccess,
-	_settingsSectionName[42:52]:      sectionAppearance,
 	_settingsSectionLowerName[42:52]: sectionAppearance,
-	_settingsSectionName[52:58]:      sectionMacros,
 	_settingsSectionLowerName[52:58]: sectionMacros,
-	_settingsSectionName[58:65]:      sectionNetwork,
 	_settingsSectionLowerName[58:65]: sectionNetwork,
-	_settingsSectionName[65:69]:      sectionMQTT,
 	_settingsSectionLowerName[65:69]: sectionMQTT,
-	_settingsSectionName[69:77]:      sectionAdvanced,
 	_settingsSectionLowerName[69:77]: sectionAdvanced,
 }
 
@@ -229,7 +235,7 @@ func settingsSectionString(s string) (settingsSection, error) {
 		return val, nil
 	}
 
-	if val, ok := _settingsSectionNameToValueMap[strings.ToLower(s)]; ok {
+	if val, ok := _settingsSectionLowerNameToValueMap[strings.ToLower(s)]; ok {
 		return val, nil
 	}
 	return 0, fmt.Errorf("%s does not belong to settingsSection values", s)

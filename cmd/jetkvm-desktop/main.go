@@ -73,6 +73,15 @@ func main() {
 			if err := logging.Configure(logLevel); err != nil {
 				return err
 			}
+			if !logging.StderrIsTerminal() {
+				// Launched without a terminal (e.g. from an .app bundle): keep
+				// logs and crash reports in ~/Library/Logs/jetkvm-desktop.
+				if f, err := logging.OpenLogFile("jetkvm-desktop"); err == nil {
+					defer f.Close()
+					logging.SetOutput(f, false)
+					_ = logging.EnableCrashOutput(f)
+				}
+			}
 			cfg.ExperimentalUSBNetwork = envEnabled(experimentalUSBNetworkEnv, os.Getenv)
 
 			clientApp, err := app.New(cfg)

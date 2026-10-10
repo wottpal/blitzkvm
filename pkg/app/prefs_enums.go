@@ -34,13 +34,16 @@ func _ThemeNoOp() {
 var _ThemeValues = []Theme{themeUnknown, themeSystem, themeDark, themeLight}
 
 var _ThemeNameToValueMap = map[string]Theme{
-	_ThemeName[0:7]:        themeUnknown,
+	_ThemeName[0:7]:   themeUnknown,
+	_ThemeName[7:13]:  themeSystem,
+	_ThemeName[13:17]: themeDark,
+	_ThemeName[17:22]: themeLight,
+}
+
+var _ThemeLowerNameToValueMap = map[string]Theme{
 	_ThemeLowerName[0:7]:   themeUnknown,
-	_ThemeName[7:13]:       themeSystem,
 	_ThemeLowerName[7:13]:  themeSystem,
-	_ThemeName[13:17]:      themeDark,
 	_ThemeLowerName[13:17]: themeDark,
-	_ThemeName[17:22]:      themeLight,
 	_ThemeLowerName[17:22]: themeLight,
 }
 
@@ -58,7 +61,7 @@ func ThemeString(s string) (Theme, error) {
 		return val, nil
 	}
 
-	if val, ok := _ThemeNameToValueMap[strings.ToLower(s)]; ok {
+	if val, ok := _ThemeLowerNameToValueMap[strings.ToLower(s)]; ok {
 		return val, nil
 	}
 	return 0, fmt.Errorf("%s does not belong to Theme values", s)
@@ -146,23 +149,26 @@ func _ChromeAnchorNoOp() {
 var _ChromeAnchorValues = []ChromeAnchor{chromeAnchorUnknown, chromeAnchorTopLeft, chromeAnchorTopCenter, chromeAnchorTopRight, chromeAnchorLeftCenter, chromeAnchorRightCenter, chromeAnchorBottomLeft, chromeAnchorBottomCenter, chromeAnchorBottomRight}
 
 var _ChromeAnchorNameToValueMap = map[string]ChromeAnchor{
-	_ChromeAnchorName[0:7]:        chromeAnchorUnknown,
+	_ChromeAnchorName[0:7]:   chromeAnchorUnknown,
+	_ChromeAnchorName[7:15]:  chromeAnchorTopLeft,
+	_ChromeAnchorName[15:25]: chromeAnchorTopCenter,
+	_ChromeAnchorName[25:34]: chromeAnchorTopRight,
+	_ChromeAnchorName[34:45]: chromeAnchorLeftCenter,
+	_ChromeAnchorName[45:57]: chromeAnchorRightCenter,
+	_ChromeAnchorName[57:68]: chromeAnchorBottomLeft,
+	_ChromeAnchorName[68:81]: chromeAnchorBottomCenter,
+	_ChromeAnchorName[81:93]: chromeAnchorBottomRight,
+}
+
+var _ChromeAnchorLowerNameToValueMap = map[string]ChromeAnchor{
 	_ChromeAnchorLowerName[0:7]:   chromeAnchorUnknown,
-	_ChromeAnchorName[7:15]:       chromeAnchorTopLeft,
 	_ChromeAnchorLowerName[7:15]:  chromeAnchorTopLeft,
-	_ChromeAnchorName[15:25]:      chromeAnchorTopCenter,
 	_ChromeAnchorLowerName[15:25]: chromeAnchorTopCenter,
-	_ChromeAnchorName[25:34]:      chromeAnchorTopRight,
 	_ChromeAnchorLowerName[25:34]: chromeAnchorTopRight,
-	_ChromeAnchorName[34:45]:      chromeAnchorLeftCenter,
 	_ChromeAnchorLowerName[34:45]: chromeAnchorLeftCenter,
-	_ChromeAnchorName[45:57]:      chromeAnchorRightCenter,
 	_ChromeAnchorLowerName[45:57]: chromeAnchorRightCenter,
-	_ChromeAnchorName[57:68]:      chromeAnchorBottomLeft,
 	_ChromeAnchorLowerName[57:68]: chromeAnchorBottomLeft,
-	_ChromeAnchorName[68:81]:      chromeAnchorBottomCenter,
 	_ChromeAnchorLowerName[68:81]: chromeAnchorBottomCenter,
-	_ChromeAnchorName[81:93]:      chromeAnchorBottomRight,
 	_ChromeAnchorLowerName[81:93]: chromeAnchorBottomRight,
 }
 
@@ -185,7 +191,7 @@ func ChromeAnchorString(s string) (ChromeAnchor, error) {
 		return val, nil
 	}
 
-	if val, ok := _ChromeAnchorNameToValueMap[strings.ToLower(s)]; ok {
+	if val, ok := _ChromeAnchorLowerNameToValueMap[strings.ToLower(s)]; ok {
 		return val, nil
 	}
 	return 0, fmt.Errorf("%s does not belong to ChromeAnchor values", s)
@@ -267,11 +273,14 @@ func _ChromeLayoutNoOp() {
 var _ChromeLayoutValues = []ChromeLayout{chromeLayoutUnknown, chromeLayoutHorizontal, chromeLayoutVertical}
 
 var _ChromeLayoutNameToValueMap = map[string]ChromeLayout{
-	_ChromeLayoutName[0:7]:        chromeLayoutUnknown,
+	_ChromeLayoutName[0:7]:   chromeLayoutUnknown,
+	_ChromeLayoutName[7:17]:  chromeLayoutHorizontal,
+	_ChromeLayoutName[17:25]: chromeLayoutVertical,
+}
+
+var _ChromeLayoutLowerNameToValueMap = map[string]ChromeLayout{
 	_ChromeLayoutLowerName[0:7]:   chromeLayoutUnknown,
-	_ChromeLayoutName[7:17]:       chromeLayoutHorizontal,
 	_ChromeLayoutLowerName[7:17]:  chromeLayoutHorizontal,
-	_ChromeLayoutName[17:25]:      chromeLayoutVertical,
 	_ChromeLayoutLowerName[17:25]: chromeLayoutVertical,
 }
 
@@ -288,7 +297,7 @@ func ChromeLayoutString(s string) (ChromeLayout, error) {
 		return val, nil
 	}
 
-	if val, ok := _ChromeLayoutNameToValueMap[strings.ToLower(s)]; ok {
+	if val, ok := _ChromeLayoutLowerNameToValueMap[strings.ToLower(s)]; ok {
 		return val, nil
 	}
 	return 0, fmt.Errorf("%s does not belong to ChromeLayout values", s)
@@ -373,17 +382,20 @@ func _ScrollThrottleNoOp() {
 var _ScrollThrottleValues = []ScrollThrottle{scrollThrottleUnknown, scrollThrottleOff, scrollThrottle10ms, scrollThrottle25ms, scrollThrottle50ms, scrollThrottle100ms}
 
 var _ScrollThrottleNameToValueMap = map[string]ScrollThrottle{
-	_ScrollThrottleName[0:7]:        scrollThrottleUnknown,
+	_ScrollThrottleName[0:7]:   scrollThrottleUnknown,
+	_ScrollThrottleName[7:8]:   scrollThrottleOff,
+	_ScrollThrottleName[8:10]:  scrollThrottle10ms,
+	_ScrollThrottleName[10:12]: scrollThrottle25ms,
+	_ScrollThrottleName[12:14]: scrollThrottle50ms,
+	_ScrollThrottleName[14:17]: scrollThrottle100ms,
+}
+
+var _ScrollThrottleLowerNameToValueMap = map[string]ScrollThrottle{
 	_ScrollThrottleLowerName[0:7]:   scrollThrottleUnknown,
-	_ScrollThrottleName[7:8]:        scrollThrottleOff,
 	_ScrollThrottleLowerName[7:8]:   scrollThrottleOff,
-	_ScrollThrottleName[8:10]:       scrollThrottle10ms,
 	_ScrollThrottleLowerName[8:10]:  scrollThrottle10ms,
-	_ScrollThrottleName[10:12]:      scrollThrottle25ms,
 	_ScrollThrottleLowerName[10:12]: scrollThrottle25ms,
-	_ScrollThrottleName[12:14]:      scrollThrottle50ms,
 	_ScrollThrottleLowerName[12:14]: scrollThrottle50ms,
-	_ScrollThrottleName[14:17]:      scrollThrottle100ms,
 	_ScrollThrottleLowerName[14:17]: scrollThrottle100ms,
 }
 
@@ -403,7 +415,7 @@ func ScrollThrottleString(s string) (ScrollThrottle, error) {
 		return val, nil
 	}
 
-	if val, ok := _ScrollThrottleNameToValueMap[strings.ToLower(s)]; ok {
+	if val, ok := _ScrollThrottleLowerNameToValueMap[strings.ToLower(s)]; ok {
 		return val, nil
 	}
 	return 0, fmt.Errorf("%s does not belong to ScrollThrottle values", s)

@@ -1,0 +1,50 @@
+# Fork-only checks. Upstream's workflows stay untouched and disabled on this fork.
+# No push trigger: macOS runners bill 10x on private repos, so this runs on PRs
+# and on demand only. `make check` runs the same steps locally.
+name: Fork check
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Go checks (macOS)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Generated code is up to date
+        run: |
+          go generate ./...
+          git diff --exit-code
+
+      - name: Test (race)
+        run: go test -race -p 1 -count=1 ./...
+
+      - name: Test vendored openh264 module
+        working-directory: third_party/openh264-go
+        run: go test -count=1 ./...
+
+      - name: Vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Native app (Swift)
+        run: make -C macos test
