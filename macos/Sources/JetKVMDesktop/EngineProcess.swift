@@ -135,7 +135,9 @@ final class EngineProcess {
                 }
             case .event:
                 handleEvent(payload)
-            case .commandDone:
+            case .commandDone, .rpcResult:
+                // RPC results share the id/error shape; their result payload
+                // is not needed by the app yet.
                 if let result = try? JSONDecoder().decode(CommandResult.self, from: payload) {
                     DispatchQueue.main.async { self.delegate?.engine(self, didFinishCommand: result.id, error: result.error, invalid: result.invalid) }
                 }

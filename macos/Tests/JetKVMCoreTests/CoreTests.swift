@@ -162,3 +162,51 @@ final class BarcodeTests: XCTestCase {
         XCTAssertEqual(decoded, ms)
     }
 }
+
+final class DeviceLibraryTests: XCTestCase {
+    func testStoreRoundTrips() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("devices.json")
+        let store = DeviceStore(url: url)
+        var device = Device(name: "Server", addresses: ["10.0.0.5", "server.tailnet.ts.net"], deviceID: "abc")
+        device.lastConnected = Date(timeIntervalSince1970: 1_760_000_000)
+        store.upsert(device)
+        try store.save()
+        let reloaded = DeviceStore(url: url)
+        XCTAssertEqual(reloaded.devices, [device])
+        XCTAssertEqual(reloaded.device(matchingAddress: "SERVER.tailnet.ts.net")?.id, device.id)
+        XCTAssertEqual(device.credentialAccount, "abc")
+    }
+
+    func testParseAddresses() {
+        XCTAssertEqual(Device.parseAddresses(" 10.0.0.5, jetkvm.local  kvm.ts.net\n"), ["10.0.0.5", "jetkvm.local", "kvm.ts.net"])
+    }
+
+    func testProbePrefersEarlierAddressWithinWindow() async {
+        // The VPN name answers first, the LAN IP (preferred) shortly after.
+        let result = await AddressProbe.choose(addresses: ["lan", "vpn"], expectedDeviceID: "dev") { address in
+            try? await Task.sleep(for: .milliseconds(address == "lan" ? 60 : 10))
+            return DeviceIdentity(deviceId: "dev", authMode: nil)
+        }
+        XCTAssertEqual(try? result.get().address, "lan")
+    }
+
+    func testProbeFallsBackWhenPreferredIsDown() async {
+        let result = await AddressProbe.choose(addresses: ["lan", "vpn"], expectedDeviceID: nil, preferenceWindow: .milliseconds(50)) { address in
+            if address == "lan" {
+                try? await Task.sleep(for: .seconds(5)) // unreachable: times out
+                return nil
+            }
+            return DeviceIdentity(deviceId: "dev", authMode: nil)
+        }
+        XCTAssertEqual(try? result.get().address, "vpn")
+    }
+
+    func testProbeRejectsImpostor() async {
+        let result = await AddressProbe.choose(addresses: ["evil"], expectedDeviceID: "real") { _ in
+            DeviceIdentity(deviceId: "other", authMode: "password")
+        }
+        guard case .failure(.identityMismatch(expected: "real", found: "other")) = result else {
+            return XCTFail("impostor accepted: \(result)")
+        }
+    }
+}

@@ -25,6 +25,14 @@ final class VideoDecoder {
     private var waitingForKeyframe = true
     private(set) var stats = Stats()
     private let statsLock = NSLock()
+    private var pausedFlag = false
+
+    /// While paused (window hidden) units are dropped without decoding;
+    /// decoding resumes at the next keyframe.
+    var paused: Bool {
+        get { statsLock.lock(); defer { statsLock.unlock() }; return pausedFlag }
+        set { statsLock.lock(); pausedFlag = newValue; statsLock.unlock() }
+    }
 
     func snapshot() -> Stats {
         statsLock.lock(); defer { statsLock.unlock() }
@@ -54,6 +62,10 @@ final class VideoDecoder {
     }
 
     private func decodeOnQueue(_ header: AccessUnitHeader, annexB: Data) {
+        if paused {
+            waitingForKeyframe = true
+            return
+        }
         let annexCodec: AnnexB.Codec = header.codec == .h265 ? .h265 : .h264
         let split = AnnexB.split(annexB, codec: annexCodec)
         if codec != header.codec {

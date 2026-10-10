@@ -258,6 +258,14 @@ class VideoView: NSView {
         return ColorParams(matrix: m, offset: SIMD3<Float>(16.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0))
     }
 
+    /// Size of the most recent frame in pixels.
+    var currentVideoSize: CGSize? {
+        frameLock.lock()
+        defer { frameLock.unlock() }
+        guard let frame = currentFrame else { return nil }
+        return CGSize(width: CVPixelBufferGetWidth(frame), height: CVPixelBufferGetHeight(frame))
+    }
+
     /// Converts a point in view coordinates to physical pixels (top-left
     /// origin), matching `layout`.
     func physicalPoint(_ point: NSPoint) -> (Double, Double) {

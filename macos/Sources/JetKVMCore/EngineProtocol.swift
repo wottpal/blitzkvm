@@ -106,17 +106,19 @@ public struct EngineCommand: Codable, Equatable {
     public var password: String?
     public var offerH265: Bool?
     public var method: String?
+    public var params: JSONValue?
     public var text: String?
     public var delay: Int?
 
     public init(id: Int64? = nil, cmd: String, baseURL: String? = nil, password: String? = nil,
-                offerH265: Bool? = nil, method: String? = nil, text: String? = nil, delay: Int? = nil) {
+                offerH265: Bool? = nil, method: String? = nil, params: JSONValue? = nil, text: String? = nil, delay: Int? = nil) {
         self.id = id
         self.cmd = cmd
         self.baseURL = baseURL
         self.password = password
         self.offerH265 = offerH265
         self.method = method
+        self.params = params
         self.text = text
         self.delay = delay
     }
@@ -177,5 +179,37 @@ public struct AccessUnitHeader: Equatable {
         for i in 6..<14 { nanos = nanos << 8 | UInt64(b[i]) }
         let header = AccessUnitHeader(codec: codec, keyframe: b[1] & 1 != 0, rtpTimestamp: ts, receivedUnixNano: Int64(bitPattern: nanos))
         return (header, payload.subdata(in: (payload.startIndex + size)..<payload.endIndex))
+    }
+}
+
+/// Minimal JSON value for RPC parameters.
+public enum JSONValue: Codable, Equatable {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case null
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null }
+        else if let b = try? c.decode(Bool.self) { self = .bool(b) }
+        else if let n = try? c.decode(Double.self) { self = .number(n) }
+        else if let s = try? c.decode(String.self) { self = .string(s) }
+        else if let a = try? c.decode([JSONValue].self) { self = .array(a) }
+        else { self = .object(try c.decode([String: JSONValue].self)) }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .string(let s): try c.encode(s)
+        case .number(let n): try c.encode(n)
+        case .bool(let b): try c.encode(b)
+        case .object(let o): try c.encode(o)
+        case .array(let a): try c.encode(a)
+        case .null: try c.encodeNil()
+        }
     }
 }
