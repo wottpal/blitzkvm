@@ -706,6 +706,7 @@ The independent review (`plans/2026-10-10-engineering-plan-review.md`, merged in
 | 2026-10-10 | NACK every 40 ms, at most 6 per packet; assembler gap deadline from the selected pair's RTT (assumed 100 ms until known) |
 | 2026-10-10 | Escape chord ⌃⌘ releases keyboard capture |
 | 2026-10-10 | Developer ID signing (Scio Labs), hardened runtime; every signed build is copied to ~/Downloads |
+| 2026-10-10 | Notarize through the Xcode account (`xcodebuild` export with upload), not an app-specific password |
 | 2026-10-10 | HTTPS: pin the device CA the chain is signed up to, on first use; publicly trusted devices pin to public trust |
 | 2026-10-10 | Serial console is line-based (Return sends the line + device terminator), not a full terminal emulator |
 
@@ -768,7 +769,7 @@ Branch `native-foundation`, on top of `289df51`. The live device was used **read
 
 **Open (next)**
 - Phase R benchmark and the Phase 2 pass criteria that depend on it.
-- Settings parity (Phase 4); notarization once credentials are stored.
+- Settings parity (Phase 4).
 - Event-tap reliability needs an Accessibility grant on a signed build.
 - Relative mouse / pointer lock; audio.
 
@@ -787,7 +788,7 @@ The plan was executed in one long working session by AI agents, with the PM away
 | Phase 3: native MVP | Done except the settings UI (Phase 4 anyway) |
 | Phase R: benchmark | Not started: needs the HDMI rig and a sink window for safe input tests |
 | Phase 4: settings parity | Not started |
-| Developer ID signing | Done (Scio Labs team); notarization waits for stored credentials |
+| Developer ID signing and notarization | Done (Scio Labs team); `make -C macos notarize` uses the Apple ID signed into Xcode, no app-specific password |
 
 ### Where execution diverged from the plan
 
@@ -817,7 +818,7 @@ The plan was executed in one long working session by AI agents, with the PM away
 ### Next steps
 
 1. PM: connect the sink-window harness and run Phase R (latency, H.264 vs H.265, CPU).
-2. PM: store notarization credentials; then `make -C macos notarize` produces a shareable build.
+2. Share builds with `make -C macos notarize` (notarized, stapled zip in `~/Downloads`).
 3. Try the app daily against `.107` with input, once input can safely go to a separate machine.
 4. Phase 4: generated schema, then the settings sections.
 

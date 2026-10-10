@@ -60,7 +60,7 @@ Run root targets from the repository root and macOS targets with `make -C macos 
 | `make -C macos selftest-extras` | End to end over http and https: virtual media (upload, mount, eject, delete), serial console, address probing with certificate pins |
 | `make -C macos run DEVICE=jetkvm.local` | Builds and opens the app connected to a device |
 | `make -C macos install` | Copies the app to `/Applications` |
-| `make -C macos notarize` | Notarizes and staples, leaves `macos/build/JetKVM-Desktop.zip` (see Signing) |
+| `make -C macos notarize` | Notarizes with the Xcode account and staples; leaves `macos/build/JetKVM-Desktop.zip` (see Signing) |
 
 Focused checks, by what you changed:
 
@@ -129,7 +129,7 @@ Mandatory:
 5. **Regi** (AGPL-3.0, another JetKVM client) is learn-only: never read its source while implementing, and never copy from it.
 6. **Fork hygiene:** the `upstream` remote is fetch-only, and no pull requests go upstream. Upstream's GitHub workflows are disabled on this fork. Fork CI (`.github/workflows/fork-check.yml`) runs only on pull requests and manual dispatch, because macOS minutes are expensive on private repositories.
 7. **Security changes need an attack test.** When you change identity checks, TLS pinning or credential handling, add a test that plays the attacker (see `pkg/session/tls_test.go`, where an intercepting proxy must not receive the password) and confirm it fails without your fix.
-8. **Never commit credentials:** no signing identities, notarization passwords or device passwords. Notarization credentials live only in a keychain profile.
+8. **Never commit credentials:** no signing identities, private keys, passwords or API keys. Notarization uses the account signed into Xcode.
 
 Preferred:
 
@@ -149,13 +149,7 @@ Ask the owner before you:
 
 `make -C macos app` signs with the first "Developer ID Application" identity in the login keychain (currently Scio Labs, team `79UD4HPFRD`), using the hardened runtime and a secure timestamp. Without such an identity it signs ad hoc. In that case Accessibility and Local Network grants reset on every rebuild. Override with `SIGN_IDENTITY="…"`. Set `COPY_TO=` (empty) to skip the `~/Downloads` copy.
 
-Before notarizing for the first time, store credentials once (this needs an app-specific password from appleid.apple.com):
-
-```bash
-xcrun notarytool store-credentials jetkvm --apple-id <apple-id> --team-id 79UD4HPFRD
-```
-
-Then `make -C macos notarize` submits, staples and zips the app. `NOTARY_PROFILE` selects a different keychain profile.
+`make -C macos notarize` notarizes with the Apple ID signed into Xcode (Settings → Accounts, team `79UD4HPFRD`); it needs no app-specific password or API key. `macos/scripts/notarize.sh` wraps the signed app in a minimal Xcode archive, uploads it with `xcodebuild -exportArchive`, and waits until Apple has processed it (usually a few minutes). It then fetches the stapled app with `xcodebuild -exportNotarizedApp` and leaves `macos/build/JetKVM-Desktop.zip`, also copied to `~/Downloads`. Notarizing publishes the build to Apple, so only do it when the owner asks for a shareable build.
 
 ## Troubleshooting
 

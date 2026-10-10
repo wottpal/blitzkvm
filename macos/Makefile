@@ -5,7 +5,7 @@
 #   make selftest   end-to-end run against the in-repo emulator
 #   make run DEVICE=jetkvm.local
 #   make install    copy the app to /Applications
-#   make notarize   notarize and staple, for use on other Macs
+#   make notarize   notarize (Xcode account) and staple, for use on other Macs
 #
 # Signing: the keychain's first "Developer ID Application" identity, with the
 # hardened runtime and a secure timestamp (both required for notarization).
@@ -17,8 +17,8 @@ export DEVELOPER_DIR
 DEVELOPER_ID := $(shell security find-identity -v -p codesigning 2>/dev/null | sed -n 's/^.*"\(Developer ID Application: .*\)"$$/\1/p' | head -n 1)
 SIGN_IDENTITY ?= $(if $(DEVELOPER_ID),$(DEVELOPER_ID),-)
 SIGN_FLAGS ?= $(if $(filter -,$(SIGN_IDENTITY)),,--options runtime --timestamp)
-# Keychain profile for notarytool (see `notarize`).
-NOTARY_PROFILE ?= jetkvm
+# The signing identity's team, for notarization.
+TEAM_ID ?= $(shell echo '$(SIGN_IDENTITY)' | sed -n 's/.*(\([A-Z0-9]\{10\}\))$$/\1/p')
 # Every signed build is also copied here (empty to skip).
 COPY_TO ?= $(HOME)/Downloads
 define copy_signed
@@ -74,20 +74,18 @@ install: app
 	ditto "$(APP)" "/Applications/JetKVM Desktop.app"
 	@echo "installed /Applications/JetKVM Desktop.app"
 
-# Notarizes and staples the app so other Macs open it without warnings, and
-# leaves build/JetKVM-Desktop.zip to hand out. One-time setup, which stores
-# an app-specific password (appleid.apple.com) in the keychain:
-#   xcrun notarytool store-credentials jetkvm --apple-id <apple-id> --team-id <team-id>
+# Notarizes with the Apple ID signed into Xcode (Settings → Accounts; no
+# app-specific password), staples, and leaves build/JetKVM-Desktop.zip to
+# hand out (also copied to COPY_TO). See scripts/notarize.sh.
 notarize: app
 	@test "$(SIGN_IDENTITY)" != "-" || { echo "notarize needs a Developer ID Application identity" >&2; exit 2; }
+	scripts/notarize.sh "$(APP)" "$(TEAM_ID)" build/notarized
+	rm -rf "$(APP)"
+	ditto "build/notarized/JetKVM Desktop.app" "$(APP)"
 	rm -f build/JetKVM-Desktop.zip
 	ditto -c -k --keepParent "$(APP)" build/JetKVM-Desktop.zip
-	xcrun notarytool submit build/JetKVM-Desktop.zip --keychain-profile "$(NOTARY_PROFILE)" --wait
-	xcrun stapler staple "$(APP)"
-	rm -f build/JetKVM-Desktop.zip
-	ditto -c -k --keepParent "$(APP)" build/JetKVM-Desktop.zip
-	spctl --assess --type execute -vv "$(APP)"
 	$(copy_signed)
+	@if [ -n "$(COPY_TO)" ]; then cp build/JetKVM-Desktop.zip "$(COPY_TO)/JetKVM-Desktop.zip" && echo "copied to $(COPY_TO)/JetKVM-Desktop.zip"; fi
 	@echo "notarized: build/JetKVM-Desktop.zip"
 
 # Virtual media, serial console and address probing through the app, over
