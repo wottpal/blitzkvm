@@ -229,4 +229,65 @@ final class DeviceLibraryTests: XCTestCase {
             return XCTFail("impostor accepted: \(result)")
         }
     }
+
+    // MARK: Serial console, virtual media, certificate pinning
+
+    func testSerialFilterStripsEscapesAcrossChunks() {
+        var filter = SerialTextFilter()
+        var out = filter.feed("\u{1B}[1;32mok\u{1B}[")
+        out += filter.feed("0m done\r")
+        out += filter.feed("\nnext\u{07}line\r\n\u{1B}]0;title\u{07}end")
+        XCTAssertEqual(out, "ok done\nnextline\nend")
+    }
+
+    func testSerialFilterSurvivesAnUnterminatedSequence() {
+        // Line noise at the wrong baud rate opens an OSC that never ends.
+        var filter = SerialTextFilter()
+        var out = filter.feed("noise\u{1B}]garbage")
+        out += filter.feed("\nline one\nline two\n")
+        XCTAssertEqual(out, "noise\nline one\nline two\n")
+        var long = SerialTextFilter()
+        let text = long.feed("\u{1B}[" + String(repeating: "1;", count: 200)) + long.feed("after")
+        XCTAssertTrue(text.hasSuffix("after"), "a held-back sequence is bounded: \(text.suffix(20))")
+    }
+
+    func testSerialFilterLineEndingsAndCharsetEscapes() {
+        var filter = SerialTextFilter()
+        XCTAssertEqual(filter.feed("a\r\r\nb\u{1B}(Bc\r"), "a\nbc")
+        XCTAssertEqual(filter.feed("\nd"), "\nd", "CR LF split across chunks is one line break")
+    }
+
+    func testSerialFilterTurnsLoneCarriageReturnIntoNewline() {
+        var filter = SerialTextFilter()
+        XCTAssertEqual(filter.feed("a\rb\n"), "a\nb\n")
+    }
+
+    func testStorageFilesDecodeGoTimes() throws {
+        let json = #"{"files":[{"filename":"debian.iso","size":8192,"createdAt":"2026-10-10T15:04:05.123456789+02:00"},{"filename":"x.img.incomplete","size":1,"createdAt":"2026-10-10T13:04:05Z"}]}"#
+        let files = try JSONDecoder().decode(StorageFiles.self, from: Data(json.utf8)).files
+        XCTAssertEqual(files.map(\.filename), ["debian.iso", "x.img.incomplete"])
+        XCTAssertNotNil(files[0].createdAt)
+        XCTAssertNotNil(files[1].createdAt)
+        XCTAssertTrue(files[1].isIncomplete)
+    }
+
+    func testCertificatePinChecksTheChainsAuthority() {
+        let leaf = Data("leaf".utf8), ca = Data("device-ca".utf8)
+        // Chains here stand for what SecTrust built, i.e. already linked by
+        // signatures (a forged leaf yields a chain without the CA).
+        XCTAssertTrue(CertificatePin.accepts(chain: [leaf, ca], pin: nil), "first use")
+        XCTAssertTrue(CertificatePin.accepts(chain: [Data("other-leaf".utf8), ca], pin: CertificatePin.fingerprint(ca)))
+        XCTAssertFalse(CertificatePin.accepts(chain: [Data("forged-leaf".utf8)], pin: CertificatePin.fingerprint(ca)))
+        XCTAssertFalse(CertificatePin.accepts(chain: [leaf, Data("evil-ca".utf8)], pin: CertificatePin.fingerprint(ca)))
+        XCTAssertFalse(CertificatePin.accepts(chain: [], pin: nil))
+        // Same algorithm as the engine (sha256 hex).
+        XCTAssertEqual(CertificatePin.fingerprint(Data("abc".utf8)), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    }
+
+    func testSerialSettingsRoundTripOneField() throws {
+        var settings = try JSONDecoder().decode(JSONValue.self, from: Data(#"{"BaudRate":9600,"Parity":"none","Buttons":[]}"#.utf8))
+        settings["BaudRate"] = .number(115200)
+        XCTAssertEqual(settings["BaudRate"]?.numberValue, 115200)
+        XCTAssertEqual(settings["Parity"]?.stringValue, "none")
+    }
 }

@@ -8,7 +8,14 @@ protocol EngineProcessDelegate: AnyObject {
     func engine(_ engine: EngineProcess, didUpdate snapshot: SessionSnapshot)
     func engine(_ engine: EngineProcess, didUpdateStats stats: [String: Any])
     func engine(_ engine: EngineProcess, didFinishCommand id: Int64, error: String?, invalid: String?)
+    func engine(_ engine: EngineProcess, didReceiveSerial text: String)
+    func engine(_ engine: EngineProcess, didUpdateUpload progress: UploadProgress)
     func engineDidRestart(_ engine: EngineProcess, reason: String)
+}
+
+struct EngineError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
 }
 
 /// Runs and supervises the Go helper (`jetkvm-engine`): one process per
@@ -30,6 +37,8 @@ final class EngineProcess {
     private var restartDelay: TimeInterval = 0.5
     private var nextCommandID: Int64 = 1
     private(set) var restarts = 0
+    /// Awaited commands and RPCs by ID (main thread).
+    private var waiting: [Int64: CheckedContinuation<Data?, Error>] = [:]
 
     init(executableURL: URL) {
         self.executableURL = executableURL
@@ -73,6 +82,12 @@ final class EngineProcess {
         // keeps calling them with empty data, spinning a CPU core.
         handles.forEach { $0.readabilityHandler = nil }
         p?.terminate()
+        // The termination handler ignores a process stopped on purpose, so
+        // fail what is still awaited here (e.g. an upload when the window
+        // closes).
+        let abandoned = waiting
+        waiting = [:]
+        abandoned.values.forEach { $0.resume(throwing: EngineError(message: "the session was closed")) }
     }
 
     /// Terminates the helper as a crash would (used by the self-test).
@@ -146,7 +161,12 @@ final class EngineProcess {
             stdinHandle = nil
         }
         writeLock.unlock()
-        guard !stopped, isCurrent else { return }
+        guard isCurrent else { return }
+        // Requests to the dead helper get no answer.
+        let abandoned = waiting
+        waiting = [:]
+        abandoned.values.forEach { $0.resume(throwing: EngineError(message: "the engine restarted")) }
+        guard !stopped else { return }
         restarts += 1
         let why = proc.terminationReason == .uncaughtSignal ? "signal \(proc.terminationStatus)" : "exit \(proc.terminationStatus)"
         AppLog.log("engine \(proc.processIdentifier) ended (\(why)); restarting")
@@ -178,10 +198,21 @@ final class EngineProcess {
             case .event:
                 handleEvent(payload)
             case .commandDone, .rpcResult:
-                // RPC results share the id/error shape; their result payload
-                // is not needed by the app yet.
+                // RPC results share the id/error shape, plus a result.
                 if let result = try? JSONDecoder().decode(CommandResult.self, from: payload) {
-                    DispatchQueue.main.async { self.delegate?.engine(self, didFinishCommand: result.id, error: result.error, invalid: result.invalid) }
+                    let value = type == .rpcResult ? (try? JSONSerialization.jsonObject(with: payload) as? [String: Any])?["result"] : nil
+                    let resultData = value.flatMap { try? JSONSerialization.data(withJSONObject: $0, options: .fragmentsAllowed) }
+                    DispatchQueue.main.async {
+                        if let continuation = self.waiting.removeValue(forKey: result.id) {
+                            if let error = result.error, !error.isEmpty {
+                                continuation.resume(throwing: EngineError(message: error))
+                            } else {
+                                continuation.resume(returning: resultData)
+                            }
+                            return
+                        }
+                        self.delegate?.engine(self, didFinishCommand: result.id, error: result.error, invalid: result.invalid)
+                    }
                 }
             default:
                 break
@@ -201,6 +232,14 @@ final class EngineProcess {
                 if snapshot.Phase == "connected" { self.restartDelay = 0.5 }
                 self.delegate?.engine(self, didUpdate: snapshot)
             }
+        case "serial":
+            guard let text = object["text"] as? String else { return }
+            DispatchQueue.main.async { self.delegate?.engine(self, didReceiveSerial: text) }
+        case "uploadProgress":
+            guard let raw = object["upload"],
+                  let data = try? JSONSerialization.data(withJSONObject: raw),
+                  let progress = try? JSONDecoder().decode(UploadProgress.self, from: data) else { return }
+            DispatchQueue.main.async { self.delegate?.engine(self, didUpdateUpload: progress) }
         case "stats":
             // {"stats": {"stats": {...client stats...}, "engineDroppedUnits": n}}
             guard let wrapper = object["stats"] as? [String: Any] else { return }
@@ -214,8 +253,9 @@ final class EngineProcess {
 
     // MARK: Sending
 
-    func connect(baseURL: String, password: String?, deviceID: String?, offerH265: Bool) {
-        let command = EngineCommand(cmd: "connect", baseURL: baseURL, password: password, deviceID: deviceID, offerH265: offerH265)
+    func connect(baseURL: String, password: String?, deviceID: String?, certSHA256: String?, offerH265: Bool) {
+        let command = EngineCommand(cmd: "connect", baseURL: baseURL, password: password, deviceID: deviceID,
+                                    certSHA256: certSHA256, offerH265: offerH265)
         lastConnect = command
         send(command: command)
     }
@@ -225,6 +265,50 @@ final class EngineProcess {
     func pin(deviceID: String) {
         lastConnect?.deviceID = deviceID
     }
+
+    /// Pins a certificate authority learned on first connect (see pin(deviceID:)).
+    func pin(certSHA256: String) {
+        lastConnect?.certSHA256 = certSHA256
+    }
+
+    /// Sends a command and waits for its completion. Returns the RPC result
+    /// (JSON) for "rpc" commands; throws the engine's or device's error.
+    /// `assigned` receives the command's ID before it is sent (to match
+    /// progress events). Main thread only.
+    @MainActor @discardableResult
+    func run(_ command: EngineCommand, assigned: ((Int64) -> Void)? = nil) async throws -> Data? {
+        dispatchPrecondition(condition: .onQueue(.main))
+        var command = command
+        let id = nextCommandID
+        nextCommandID += 1
+        command.id = id
+        assigned?(id)
+        return try await withCheckedThrowingContinuation { continuation in
+            writeLock.lock()
+            let running = process != nil
+            writeLock.unlock()
+            guard running else {
+                continuation.resume(throwing: EngineError(message: "the engine is not running"))
+                return
+            }
+            waiting[id] = continuation
+            send(command: command)
+        }
+    }
+
+    /// Calls a device JSON-RPC method and decodes its result.
+    @MainActor
+    func call<T: Decodable>(_ method: String, params: JSONValue? = nil, as type: T.Type) async throws -> T {
+        let data = try await run(EngineCommand(cmd: "rpc", method: method, params: params)) ?? Data("null".utf8)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// Calls a device JSON-RPC method that returns nothing of interest.
+    @MainActor
+    func call(_ method: String, params: JSONValue? = nil) async throws {
+        try await run(EngineCommand(cmd: "rpc", method: method, params: params))
+    }
+
 
     @discardableResult
     func send(command: EngineCommand) -> Int64 {

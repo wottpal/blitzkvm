@@ -1,10 +1,14 @@
 package engine_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +16,7 @@ import (
 	"github.com/lkarlslund/jetkvm-desktop/pkg/emulator"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/engine"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/engineipc"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/tlspin"
 )
 
 type harness struct {
@@ -102,7 +107,13 @@ func (h *harness) waitFor(timeout time.Duration, what string, match func(frame) 
 
 func startEmulator(t *testing.T) *emulator.Server {
 	t.Helper()
-	srv, err := emulator.NewServer(emulator.Config{ListenAddr: "127.0.0.1:0", AuthMode: emulator.AuthModePassword, Password: "pw"})
+	return startEmulatorWith(t, emulator.Config{})
+}
+
+func startEmulatorWith(t *testing.T, cfg emulator.Config) *emulator.Server {
+	t.Helper()
+	cfg.ListenAddr, cfg.AuthMode, cfg.Password, cfg.ICELoopbackOnly = "127.0.0.1:0", emulator.AuthModePassword, "pw", true
+	srv, err := emulator.NewServer(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,5 +212,206 @@ func TestNormalizeBaseURL(t *testing.T) {
 		if _, err := engine.NormalizeBaseURL(bad); err == nil {
 			t.Fatalf("NormalizeBaseURL(%q) accepted", bad)
 		}
+	}
+}
+
+func (h *harness) connect(baseURL string, cmd engineipc.Command) {
+	h.t.Helper()
+	cmd.ID, cmd.Cmd, cmd.BaseURL, cmd.Password = 1, "connect", baseURL, "pw"
+	h.send(cmd)
+	h.waitForSnapshot(10*time.Second, "connected", func(snap map[string]any) bool { return snap["Phase"] == "connected" })
+}
+
+func (h *harness) waitForSnapshot(timeout time.Duration, what string, match func(map[string]any) bool) map[string]any {
+	h.t.Helper()
+	var snap map[string]any
+	h.waitFor(timeout, what+" snapshot", func(f frame) bool {
+		var evt engineipc.Event
+		if f.typ != engineipc.TypeEvent || json.Unmarshal(f.payload, &evt) != nil || evt.Type != "snapshot" {
+			return false
+		}
+		return json.Unmarshal(evt.Snapshot, &snap) == nil && match(snap)
+	})
+	return snap
+}
+
+func (h *harness) waitDone(timeout time.Duration, id int64) engineipc.CommandResult {
+	h.t.Helper()
+	var res engineipc.CommandResult
+	h.waitFor(timeout, fmt.Sprintf("command %d", id), func(f frame) bool {
+		return f.typ == engineipc.TypeCommandDone && json.Unmarshal(f.payload, &res) == nil && res.ID == id
+	})
+	return res
+}
+
+func (h *harness) storageFiles(id int64) map[string]float64 {
+	h.t.Helper()
+	h.send(engineipc.Command{ID: id, Cmd: "rpc", Method: "listStorageFiles"})
+	var rpc engineipc.RPCResult
+	h.waitFor(5*time.Second, "listStorageFiles", func(f frame) bool {
+		return f.typ == engineipc.TypeRPCResult && json.Unmarshal(f.payload, &rpc) == nil && rpc.ID == id
+	})
+	var payload struct {
+		Files []struct {
+			Filename string
+			Size     float64
+		}
+	}
+	if err := json.Unmarshal(rpc.Result, &payload); err != nil {
+		h.t.Fatalf("listStorageFiles: %s (%v)", rpc.Result, err)
+	}
+	files := map[string]float64{}
+	for _, f := range payload.Files {
+		files[f.Filename] = f.Size
+	}
+	return files
+}
+
+// An upload over a slow link can be cancelled and later resumes where it
+// stopped, as on the device.
+func TestEngineUploadCancelAndResume(t *testing.T) {
+	srv := startEmulatorWith(t, emulator.Config{Faults: emulator.FaultConfig{UploadBytesPerSecond: 1 << 20}})
+	h := startEngine(t)
+	h.connect(srv.BaseURL(), engineipc.Command{})
+
+	// Big enough that socket buffers cannot absorb it: progress below the
+	// total means the transfer is still running when it is cancelled.
+	const size = 16 << 20
+	path := filepath.Join(t.TempDir(), "installer.img")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("x"), size), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.send(engineipc.Command{ID: 20, Cmd: "upload", Path: path})
+	h.waitFor(5*time.Second, "upload progress", func(f frame) bool {
+		var evt engineipc.Event
+		return f.typ == engineipc.TypeEvent && json.Unmarshal(f.payload, &evt) == nil && evt.Type == "uploadProgress" &&
+			evt.Upload.ID == 20 && evt.Upload.Sent > 0 && evt.Upload.Sent < size && evt.Upload.Total == size
+	})
+	h.send(engineipc.Command{ID: 21, Cmd: "cancelUpload", Target: 20})
+	if res := h.waitDone(5*time.Second, 20); res.Error != "upload cancelled" {
+		t.Fatalf("cancelled upload ended with %q", res.Error)
+	}
+	partial := h.storageFiles(22)["installer.img.incomplete"]
+	if partial <= 0 || partial >= size {
+		t.Fatalf("partial upload has %v bytes", partial)
+	}
+
+	srv.SetUploadBytesPerSecond(0)
+	h.send(engineipc.Command{ID: 23, Cmd: "upload", Path: path})
+	var firstSent int64 = -1
+	h.waitFor(10*time.Second, "resumed upload done", func(f frame) bool {
+		var evt engineipc.Event
+		if f.typ == engineipc.TypeEvent && json.Unmarshal(f.payload, &evt) == nil && evt.Type == "uploadProgress" && evt.Upload.ID == 23 && firstSent < 0 {
+			firstSent = evt.Upload.Sent
+		}
+		var res engineipc.CommandResult
+		return f.typ == engineipc.TypeCommandDone && json.Unmarshal(f.payload, &res) == nil && res.ID == 23 && res.Error == ""
+	})
+	if firstSent < int64(partial) {
+		t.Fatalf("resumed upload started at %d, before the %v bytes already on the device", firstSent, partial)
+	}
+	files := h.storageFiles(24)
+	if files["installer.img"] != size {
+		t.Fatalf("storage after resume: %v", files)
+	}
+	if _, left := files["installer.img.incomplete"]; left {
+		t.Fatalf("partial file left behind: %v", files)
+	}
+}
+
+func TestEngineSerialConsole(t *testing.T) {
+	srv := startEmulator(t)
+	h := startEngine(t)
+	h.connect(srv.BaseURL(), engineipc.Command{})
+
+	h.send(engineipc.Command{ID: 30, Cmd: "setExtension", Text: "serial-console"})
+	if res := h.waitDone(10*time.Second, 30); res.Error != "" {
+		t.Fatalf("setExtension: %s", res.Error)
+	}
+	serialText := func(want string) {
+		t.Helper()
+		var got strings.Builder
+		h.waitFor(5*time.Second, "serial "+want, func(f frame) bool {
+			var evt engineipc.Event
+			if f.typ == engineipc.TypeEvent && json.Unmarshal(f.payload, &evt) == nil && evt.Type == "serial" {
+				got.WriteString(evt.Text)
+			}
+			return strings.Contains(got.String(), want)
+		})
+	}
+	h.send(engineipc.Command{ID: 31, Cmd: "serialSend", Text: "uname -a\r"})
+	if res := h.waitDone(5*time.Second, 31); res.Error != "" {
+		t.Fatalf("serialSend: %s", res.Error)
+	}
+	serialText("uname -a") // the emulated target echoes
+	if err := srv.WriteSerial("Linux target 6.1\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	serialText("Linux target")
+	found := false
+	for _, in := range srv.Inputs() {
+		found = found || (in.Type == "serial.tx" && in.Data == "uname -a\r")
+	}
+	if !found {
+		t.Fatal("serial input did not reach the device")
+	}
+	// The scrollback is not repeated in every snapshot.
+	snap := h.waitForSnapshot(2*time.Second, "any", func(map[string]any) bool { return true })
+	if buffer, _ := snap["SerialConsoleBuffer"].(string); buffer != "" {
+		t.Fatalf("snapshot carries the serial scrollback (%d bytes)", len(buffer))
+	}
+}
+
+func TestEngineTLSPin(t *testing.T) {
+	srv := startEmulatorWith(t, emulator.Config{TLS: true})
+	h := startEngine(t)
+	h.send(engineipc.Command{ID: 1, Cmd: "connect", BaseURL: srv.BaseURL(), Password: "pw", CertSHA256: strings.Repeat("00", 32)})
+	h.waitForSnapshot(10*time.Second, "fatal", func(snap map[string]any) bool { return snap["Phase"] == "fatal_error" })
+
+	h.send(engineipc.Command{ID: 2, Cmd: "connect", BaseURL: srv.BaseURL(), Password: "pw"})
+	snap := h.waitForSnapshot(10*time.Second, "connected", func(snap map[string]any) bool { return snap["Phase"] == "connected" })
+	if want := tlspin.Fingerprint(srv.CertificateAuthority()); snap["CertSHA256"] != want {
+		t.Fatalf("pinned %v, want %s", snap["CertSHA256"], want)
+	}
+}
+
+// A partial upload bigger than the file now uploaded under that name cannot
+// be resumed: it is replaced, and the result is checked on the device.
+func TestEngineUploadReplacesABiggerPartialUpload(t *testing.T) {
+	srv := startEmulatorWith(t, emulator.Config{Faults: emulator.FaultConfig{UploadBytesPerSecond: 1 << 20}})
+	h := startEngine(t)
+	h.connect(srv.BaseURL(), engineipc.Command{})
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big", "disk.img")
+	small := filepath.Join(dir, "small", "disk.img")
+	for path, size := range map[string]int{big: 16 << 20, small: 100 << 10} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, bytes.Repeat([]byte("y"), size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.send(engineipc.Command{ID: 40, Cmd: "upload", Path: big})
+	h.waitFor(5*time.Second, "upload progress", func(f frame) bool {
+		var evt engineipc.Event
+		return f.typ == engineipc.TypeEvent && json.Unmarshal(f.payload, &evt) == nil && evt.Type == "uploadProgress" &&
+			evt.Upload.ID == 40 && evt.Upload.Sent > 200<<10 && evt.Upload.Sent < evt.Upload.Total
+	})
+	h.send(engineipc.Command{ID: 41, Cmd: "cancelUpload", Target: 40})
+	h.waitDone(5*time.Second, 40)
+	deadline := time.Now().Add(5 * time.Second)
+	for h.storageFiles(42)["disk.img.incomplete"] <= 100<<10 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	srv.SetUploadBytesPerSecond(0)
+	h.send(engineipc.Command{ID: 43, Cmd: "upload", Path: small})
+	if res := h.waitDone(10*time.Second, 43); res.Error != "" {
+		t.Fatalf("upload: %s", res.Error)
+	}
+	files := h.storageFiles(44)
+	if files["disk.img"] != 100<<10 {
+		t.Fatalf("storage: %v", files)
 	}
 }

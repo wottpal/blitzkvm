@@ -7,6 +7,7 @@ package emulator
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -64,6 +66,9 @@ type Config struct {
 	Faults         FaultConfig
 	// ICELoopbackOnly restricts ICE to 127.0.0.1 (tests).
 	ICELoopbackOnly bool
+	// TLS serves https with a self-signed device CA, like the firmware's
+	// self-signed TLS mode.
+	TLS bool
 }
 
 type FaultConfig struct {
@@ -78,6 +83,8 @@ type FaultConfig struct {
 	SignalingAnswerError bool
 	// SignalingSilent accepts the socket but never answers offers.
 	SignalingSilent bool
+	// UploadBytesPerSecond throttles /storage/upload, like a slow uplink.
+	UploadBytesPerSecond int
 }
 
 // USBDevices mirrors upstream usbgadget.Devices. Unknown fields sent by a
@@ -164,6 +171,8 @@ type Server struct {
 	mu           sync.Mutex
 	serveCtx     context.Context // ends with ListenAndServe
 	offlineUntil time.Time       // rebooting: unreachable until then
+	tlsCert      atomic.Pointer[tls.Certificate]
+	uploadRate   atomic.Int64 // bytes per second, 0 = unlimited
 	session      *session
 	sessionCount int
 	loginCount   int
@@ -184,6 +193,10 @@ type storedFile struct {
 type pendingUpload struct {
 	filename string
 	size     int64
+	// superseded is set when a new start for the same file replaces this
+	// transfer; later writes are dropped (upstream closes the file).
+	superseded bool
+	claimed    bool
 }
 
 type session struct {
@@ -196,7 +209,10 @@ type session struct {
 	mu     sync.Mutex
 	rpc    *webrtc.DataChannel
 	hid    *webrtc.DataChannel
-	opened map[string]bool
+	serial *webrtc.DataChannel
+	// serialMidLine is the console broker's "RX line not ended" state.
+	serialMidLine bool
+	opened        map[string]bool
 }
 
 func NewServer(cfg Config) (*Server, error) {
@@ -272,6 +288,7 @@ func NewServer(cfg Config) (*Server, error) {
 		mux.ServeHTTP(w, r)
 	})
 	s.httpServer = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	s.uploadRate.Store(int64(cfg.Faults.UploadBytesPerSecond))
 	return s, nil
 }
 
@@ -394,6 +411,18 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if s.cfg.TLS {
+		if s.tlsCert.Load() == nil {
+			if err := s.RotateCertificate(); err != nil {
+				_ = ln.Close()
+				return err
+			}
+		}
+		ln = tls.NewListener(ln, &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return s.tlsCert.Load(), nil },
+		})
+	}
 	s.mu.Lock()
 	s.listener = ln
 	s.serveCtx = ctx
@@ -434,6 +463,9 @@ func (s *Server) BaseURL() string {
 	defer s.mu.Unlock()
 	if s.listener == nil {
 		return ""
+	}
+	if s.cfg.TLS {
+		return "https://" + s.listener.Addr().String()
 	}
 	return "http://" + s.listener.Addr().String()
 }
@@ -533,6 +565,28 @@ func (s *Server) SendWillReboot(redirectTo string) {
 }
 
 // DisconnectSession closes the active WebRTC session as a network drop would.
+// WriteSerial sends text on the serial console, as if the target printed it.
+func (s *Server) WriteSerial(text string) error {
+	s.mu.Lock()
+	current := s.session
+	s.mu.Unlock()
+	if current == nil {
+		return errors.New("no session")
+	}
+	current.mu.Lock()
+	dc := current.serial
+	current.mu.Unlock()
+	if dc == nil {
+		return errors.New("serial channel not open")
+	}
+	return current.serialRX(text)
+}
+
+// SetUploadBytesPerSecond throttles storage uploads (0 = unlimited).
+func (s *Server) SetUploadBytesPerSecond(rate int) {
+	s.uploadRate.Store(int64(rate))
+}
+
 // SetDeviceID changes the device identity, as if another JetKVM now
 // answered at this address.
 func (s *Server) SetDeviceID(id string) {
@@ -950,31 +1004,78 @@ func (s *Server) handleStorageUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing uploadId", http.StatusBadRequest)
 		return
 	}
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "failed to read upload", http.StatusInternalServerError)
-		return
-	}
-
+	// Like handleUploadHttp: claim the upload, append to the .incomplete
+	// file as data arrives (so an aborted upload can resume), and rename it
+	// once exactly the announced size was written.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	upload, ok := s.uploads[uploadID]
+	if ok && upload.claimed {
+		ok = false
+	}
+	if ok {
+		upload.claimed = true
+	}
+	s.mu.Unlock()
 	if !ok {
-		http.Error(w, "upload not found", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "Upload not found")
 		return
 	}
+	defer func() {
+		s.mu.Lock()
+		if s.uploads[uploadID] == upload {
+			delete(s.uploads, uploadID)
+		}
+		s.mu.Unlock()
+	}()
 	incompleteName := upload.filename + ".incomplete"
-	file := s.storage[incompleteName]
-	file.data = append(file.data, data...)
-	if file.createdAt.IsZero() {
-		file.createdAt = time.Now()
+	buffer := make([]byte, 32<<10)
+	var readErr error
+	for {
+		chunk := buffer
+		if rate := int(s.uploadRate.Load()); rate > 0 {
+			if rate < len(chunk) {
+				chunk = chunk[:rate]
+			}
+			time.Sleep(time.Duration(len(chunk)) * time.Second / time.Duration(rate))
+		}
+		n, err := r.Body.Read(chunk)
+		if n > 0 {
+			s.mu.Lock()
+			if upload.superseded {
+				s.mu.Unlock()
+				break
+			}
+			file := s.storage[incompleteName]
+			if file.createdAt.IsZero() {
+				file.createdAt = time.Now()
+			}
+			file.data = append(file.data, chunk[:n]...)
+			s.storage[incompleteName] = file
+			s.mu.Unlock()
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			readErr = err
+			break
+		}
 	}
-	if int64(len(file.data)) >= upload.size {
-		s.storage[upload.filename] = storedFile{data: file.data[:upload.size], createdAt: file.createdAt}
+	s.mu.Lock()
+	superseded := upload.superseded
+	if file := s.storage[incompleteName]; !superseded && int64(len(file.data)) == upload.size {
+		s.storage[upload.filename] = file
 		delete(s.storage, incompleteName)
-		delete(s.uploads, uploadID)
-	} else {
-		s.storage[incompleteName] = file
+	}
+	s.mu.Unlock()
+	if superseded {
+		// Upstream closed the file under the transfer: the write fails.
+		writeJSONError(w, http.StatusInternalServerError, "Failed to write upload data")
+		return
+	}
+	if readErr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "Failed to read upload data")
+		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": "Upload completed"})
 }
@@ -1242,6 +1343,29 @@ func (sess *session) attachDataChannel(dc *webrtc.DataChannel) {
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			sess.hidState.enqueue("hidrpc", msg.Data)
 		})
+	case "serial":
+		// The serial console (upstream serial.go): input is
+		// {"type":"serial","data":"..."} or, for older clients, raw text.
+		// Output goes through the firmware's console broker formatting
+		// (see serialRX). The emulated target echoes what it receives.
+		dc.OnOpen(func() { sess.serialRX("[serial attached]\n") })
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			data := string(msg.Data)
+			var envelope struct {
+				Type string          `json:"type"`
+				Data json.RawMessage `json:"data"`
+			}
+			if msg.IsString && json.Unmarshal(msg.Data, &envelope) == nil && envelope.Type != "" {
+				if envelope.Type != "serial" || json.Unmarshal(envelope.Data, &data) != nil {
+					return
+				}
+			}
+			s.appendInput("serial", "serial.tx", data)
+			sess.serialRX(data)
+		})
+		sess.mu.Lock()
+		sess.serial = dc
+		sess.mu.Unlock()
 	case "hidrpc-unreliable-ordered", "hidrpc-unreliable-nonordered":
 		label := dc.Label()
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {

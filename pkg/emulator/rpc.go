@@ -33,8 +33,19 @@ func (sess *session) handleRPC(data []byte) error {
 		return nil
 	}
 
+	// The firmware fetches the image URL to check it; not under srv.mu.
+	var urlCheck *mountURLInfo
+	if req.Method == "checkMountUrl" || req.Method == "mountWithHTTP" {
+		if params, ok := req.Params.(map[string]any); ok {
+			if url, ok := params["url"].(string); ok {
+				info := checkMountURL(url)
+				urlCheck = &info
+			}
+		}
+	}
+
 	srv.mu.Lock()
-	resp, after := sess.dispatchRPC(req)
+	resp, after := sess.dispatchRPC(req, urlCheck)
 	srv.mu.Unlock()
 	if after != nil {
 		after()
@@ -62,7 +73,7 @@ func (sess *session) handleRPC(data []byte) error {
 
 // dispatchRPC runs with srv.mu held. Side effects that must not run under the
 // lock (events, timers) are returned as after.
-func (sess *session) dispatchRPC(req jsonrpc.Request) (resp jsonrpc.Response, after func()) {
+func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (resp jsonrpc.Response, after func()) {
 	srv := sess.serverRef
 	st := &srv.state
 	ok := func(result any) jsonrpc.Response { return jsonrpc.NewResponse(req.ID, result) }
@@ -494,8 +505,20 @@ func (sess *session) dispatchRPC(req jsonrpc.Request) (resp jsonrpc.Response, af
 		if srv.media != nil {
 			return failed("another virtual media is already mounted"), nil
 		}
-		srv.media = &virtualmedia.State{Source: virtualmedia.SourceHTTP, Mode: params.Mode, URL: params.URL, Size: 2 * 1024 * 1024}
+		if urlCheck == nil || !urlCheck.Usable {
+			reason := "invalid URL"
+			if urlCheck != nil {
+				reason = urlCheck.Reason
+			}
+			return failed(reason), nil
+		}
+		srv.media = &virtualmedia.State{Source: virtualmedia.SourceHTTP, Mode: params.Mode, URL: strings.TrimSpace(params.URL), Size: urlCheck.Size}
 		return ok(nil), nil
+	case "checkMountUrl":
+		if urlCheck == nil {
+			return failed("missing parameter: url"), nil
+		}
+		return ok(urlCheck), nil
 	case "mountWithStorage":
 		params, err := decodeParams[client.MountWithStorageRequest](req.Params)
 		filename := filepath.Base(strings.TrimSpace(params.Filename))
@@ -544,6 +567,15 @@ func (sess *session) dispatchRPC(req jsonrpc.Request) (resp jsonrpc.Response, af
 		}
 		if _, found := srv.storage[filename]; found {
 			return failed("file already exists"), nil
+		}
+		// A transfer still running for this file (e.g. one the client
+		// cancelled whose bytes are still arriving) ends here, so it cannot
+		// append after the partial size was measured.
+		for id, other := range srv.uploads {
+			if other.filename == filename {
+				other.superseded = true
+				delete(srv.uploads, id)
+			}
 		}
 		file := srv.storage[filename+".incomplete"]
 		uploadID := fmt.Sprintf("upload_%d", time.Now().UnixNano())

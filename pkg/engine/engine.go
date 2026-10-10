@@ -21,6 +21,7 @@ import (
 	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/session"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/video"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
 )
 
 const (
@@ -30,8 +31,10 @@ const (
 	// falls behind, units are dropped until the next keyframe rather than
 	// building latency.
 	videoQueueDepth = 16
-	defaultRPCWait  = 10 * time.Second
-	defaultPasteMS  = 20
+	// defaultRPCWait bounds an app-initiated RPC. Some take long on the
+	// device: mountWithHTTP checks the URL (up to 10 s) before mounting.
+	defaultRPCWait = 30 * time.Second
+	defaultPasteMS = 20
 )
 
 // Engine runs one device session.
@@ -45,6 +48,9 @@ type Engine struct {
 	video        chan []byte
 	needKeyframe atomic.Bool
 	droppedUnits atomic.Uint64
+
+	uploadMu sync.Mutex
+	uploads  map[int64]context.CancelFunc
 }
 
 // Run serves the protocol until in reaches EOF or ctx ends. Closing the
@@ -52,7 +58,7 @@ type Engine struct {
 func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	e := &Engine{w: engineipc.NewWriter(out), ctx: ctx, video: make(chan []byte, videoQueueDepth)}
+	e := &Engine{w: engineipc.NewWriter(out), ctx: ctx, video: make(chan []byte, videoQueueDepth), uploads: map[int64]context.CancelFunc{}}
 	go e.videoWriter(ctx)
 	go e.snapshotLoop(ctx)
 	defer e.stopSession()
@@ -132,7 +138,7 @@ func (e *Engine) command(cmd engineipc.Command) error {
 			e.reply(cmd.ID, err, "")
 			return nil
 		}
-		e.startSession(baseURL, cmd.Password, cmd.DeviceID, cmd.OfferH265)
+		e.startSession(baseURL, cmd)
 		e.reply(cmd.ID, nil, "")
 	case "disconnect":
 		e.stopSession()
@@ -159,6 +165,33 @@ func (e *Engine) command(cmd engineipc.Command) error {
 		}
 		e.reply(cmd.ID, err, "")
 	case "ping":
+		e.reply(cmd.ID, nil, "")
+	case "serialSend":
+		err := errors.New("not connected")
+		if c := e.controller(); c != nil {
+			err = c.SendSerialText(cmd.Text)
+		}
+		e.reply(cmd.ID, err, "")
+	case "setExtension":
+		// Through the controller, so the snapshot (and the serial console
+		// gating) follows the change.
+		go e.withController(cmd, func(c *session.Controller) error { return c.SetActiveExtension(cmd.Text) })
+	case "setSerialSettings":
+		var settings session.SerialSettings
+		if err := json.Unmarshal(cmd.Params, &settings); err != nil {
+			e.reply(cmd.ID, fmt.Errorf("serial settings: %w", err), "")
+			return nil
+		}
+		go e.withController(cmd, func(c *session.Controller) error { return c.SetSerialSettings(settings) })
+	case "upload":
+		go e.upload(cmd)
+	case "cancelUpload":
+		e.uploadMu.Lock()
+		cancel := e.uploads[cmd.Target]
+		e.uploadMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 		e.reply(cmd.ID, nil, "")
 	default:
 		e.reply(cmd.ID, fmt.Errorf("unknown command %q", cmd.Cmd), "")
@@ -209,15 +242,60 @@ func (e *Engine) paste(cmd engineipc.Command) {
 	e.reply(cmd.ID, err, input.InvalidRunesString(invalid))
 }
 
-func (e *Engine) startSession(baseURL, password, deviceID string, offerH265 bool) {
+// withController runs a (possibly slow) controller call and replies.
+func (e *Engine) withController(cmd engineipc.Command, call func(*session.Controller) error) {
+	err := errors.New("not connected")
+	if c := e.controller(); c != nil {
+		err = call(c)
+	}
+	e.reply(cmd.ID, err, "")
+}
+
+// upload copies a local file to the device's storage, reporting progress,
+// until done or cancelled (cancelUpload with this command's ID).
+func (e *Engine) upload(cmd engineipc.Command) {
+	c := e.controller()
+	if c == nil {
+		e.reply(cmd.ID, errors.New("not connected"), "")
+		return
+	}
+	ctx, cancel := context.WithCancel(e.ctx)
+	defer cancel()
+	e.uploadMu.Lock()
+	e.uploads[cmd.ID] = cancel
+	e.uploadMu.Unlock()
+	defer func() {
+		e.uploadMu.Lock()
+		delete(e.uploads, cmd.ID)
+		e.uploadMu.Unlock()
+	}()
+	err := c.UploadStorageFileContext(ctx, cmd.Path, func(p virtualmedia.UploadProgress) {
+		_ = e.w.WriteJSON(engineipc.TypeEvent, engineipc.Event{Type: "uploadProgress", Upload: &engineipc.UploadProgress{
+			ID: cmd.ID, Sent: p.Sent, Total: p.Total, BytesPerSecond: p.BytesPerS,
+		}})
+	})
+	if err != nil && ctx.Err() != nil && e.ctx.Err() == nil {
+		err = errors.New("upload cancelled")
+	}
+	e.reply(cmd.ID, err, "")
+}
+
+// onSerialText runs on the session goroutine; the writer serialises frames.
+func (e *Engine) onSerialText(text string) {
+	_ = e.w.WriteJSON(engineipc.TypeEvent, engineipc.Event{Type: "serial", Text: text})
+}
+
+func (e *Engine) startSession(baseURL string, cmd engineipc.Command) {
 	e.stopSession()
 	ctrl := session.New(session.Config{
 		BaseURL:          baseURL,
-		Password:         password,
-		ExpectedDeviceID: deviceID,
+		Password:         cmd.Password,
+		ExpectedDeviceID: cmd.DeviceID,
+		CertSHA256:       cmd.CertSHA256,
 		Reconnect:        true,
-		OfferH265:        offerH265,
+		OfferH265:        cmd.OfferH265,
 		OnAccessUnit:     e.onAccessUnit,
+		OnSerialText:     e.onSerialText,
 	})
 	e.mu.Lock()
 	e.ctrl = ctrl
@@ -295,7 +373,10 @@ func (e *Engine) snapshotLoop(ctx context.Context) {
 			if c == nil {
 				continue
 			}
-			snap, err := json.Marshal(c.Snapshot())
+			snapshot := c.Snapshot()
+			// Serial output goes out as "serial" events instead.
+			snapshot.SerialConsoleBuffer = ""
+			snap, err := json.Marshal(snapshot)
 			if err == nil && string(snap) != string(last) {
 				last = snap
 				_ = e.w.WriteJSON(engineipc.TypeEvent, engineipc.Event{Type: "snapshot", Snapshot: snap})

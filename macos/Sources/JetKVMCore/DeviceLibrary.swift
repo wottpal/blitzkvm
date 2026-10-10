@@ -10,6 +10,9 @@ public struct Device: Codable, Equatable, Identifiable {
     /// The device's own ID, learned on first connect (GET /device, or over
     /// RPC after login on password-protected devices).
     public var deviceID: String?
+    /// For https addresses: the pinned device certificate authority
+    /// (SHA-256 hex), learned on first connect.
+    public var certificateSHA256: String?
     public var modifierProfile: String
     public var scalingMode: String
     public var offerH265: Bool
@@ -182,15 +185,18 @@ public enum AddressProbe {
 
     /// GET http(s)://address/device with a short timeout. A 401 counts as
     /// reachable with unknown identity when the public /device/status
-    /// endpoint confirms a JetKVM answers there.
-    public static func httpFetch(timeout: TimeInterval = 2) -> Fetch {
+    /// endpoint confirms a JetKVM answers there. https devices must present
+    /// the pinned certificate authority (any, before the first connect).
+    public static func httpFetch(timeout: TimeInterval = 2, certSHA256: String? = nil) -> Fetch {
         return { address in
             let base = (address.contains("://") ? address : "http://" + address).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard let (data, status) = await get(base + "/device", timeout: timeout) else { return nil }
+            let session = URLSession(configuration: .ephemeral, delegate: PinningDelegate(pin: certSHA256), delegateQueue: nil)
+            defer { session.finishTasksAndInvalidate() }
+            guard let (data, status) = await get(base + "/device", timeout: timeout, session: session) else { return nil }
             if status == 200 {
                 return try? JSONDecoder().decode(DeviceIdentity.self, from: data)
             }
-            guard status == 401, let (statusData, code) = await get(base + "/device/status", timeout: timeout), code == 200,
+            guard status == 401, let (statusData, code) = await get(base + "/device/status", timeout: timeout, session: session), code == 200,
                   (try? JSONDecoder().decode(DeviceStatus.self, from: statusData)) != nil else { return nil }
             return DeviceIdentity(deviceId: nil, authMode: "password")
         }
@@ -200,11 +206,11 @@ public enum AddressProbe {
         var isSetup: Bool
     }
 
-    private static func get(_ string: String, timeout: TimeInterval) async -> (Data, Int)? {
+    private static func get(_ string: String, timeout: TimeInterval, session: URLSession) async -> (Data, Int)? {
         guard let url = URL(string: string) else { return nil }
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await session.data(for: request),
               let http = response as? HTTPURLResponse else { return nil }
         return (data, http.statusCode)
     }

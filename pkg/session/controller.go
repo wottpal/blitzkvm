@@ -19,6 +19,7 @@ import (
 	"github.com/lkarlslund/jetkvm-desktop/pkg/input"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/auth"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/tlspin"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/video"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
 )
@@ -52,6 +53,13 @@ type Config struct {
 	// ExpectedDeviceID makes every connect verify the device's identity
 	// before any input is sent (see client.Config.ExpectedDeviceID).
 	ExpectedDeviceID string
+	// CertSHA256 pins an https device's certificate authority (see
+	// tlspin); empty trusts the first one seen, reported in the snapshot.
+	CertSHA256 string
+	// OnSerialText receives serial console output as it arrives (while the
+	// serial-console extension is active), in addition to the snapshot's
+	// scrollback. It must not block.
+	OnSerialText func(string)
 	// ICELoopbackOnly restricts ICE to loopback (tests against a local
 	// emulator).
 	ICELoopbackOnly bool
@@ -100,11 +108,14 @@ type Snapshot struct {
 	USBState       string
 	FailsafeActive bool
 	FailsafeReason string
+	// CertSHA256 is the pinned certificate authority of an https device.
+	CertSHA256 string
 }
 
 type Controller struct {
 	cfg  Config
 	auth *auth.Client
+	pin  *tlspin.Pin
 
 	mu           sync.RWMutex
 	snapshot     Snapshot
@@ -217,13 +228,15 @@ func New(cfg Config) *Controller {
 	// One cookie jar for the controller's lifetime: reconnects reuse the
 	// session cookie instead of logging in (each login rotates the device's
 	// token, logging out other clients, and writes to its flash).
-	authClient, err := auth.NewClient()
+	pin := tlspin.New(cfg.CertSHA256)
+	authClient, err := auth.NewClient(pin.TLSConfig())
 	if err != nil {
 		panic(fmt.Sprintf("auth client: %v", err))
 	}
 	return &Controller{
 		cfg:  cfg,
 		auth: authClient,
+		pin:  pin,
 		wake: make(chan struct{}, 1),
 		snapshot: Snapshot{
 			Phase:   PhaseIdle,
@@ -1695,6 +1708,15 @@ func (c *Controller) MountStorageFile(filename string, mode virtualmedia.Mode) e
 }
 
 func (c *Controller) UploadStorageFile(path string, progress func(virtualmedia.UploadProgress)) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	return c.UploadStorageFileContext(ctx, path, progress)
+}
+
+// UploadStorageFileContext uploads a local file to the device's storage
+// until done or ctx ends. A cancelled upload resumes where it stopped when
+// the same file is uploaded again.
+func (c *Controller) UploadStorageFileContext(ctx context.Context, path string, progress func(virtualmedia.UploadProgress)) error {
 	current := c.clientIfConnected()
 	if current == nil {
 		return errors.New("client not connected")
@@ -1716,18 +1738,41 @@ func (c *Controller) UploadStorageFile(path string, progress func(virtualmedia.U
 	}
 	defer file.Close()
 
-	uploadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
-	start, err := current.StartStorageFileUpload(uploadCtx, filepath.Base(path), info.Size())
+	name := filepath.Base(path)
+	start, err := current.StartStorageFileUpload(ctx, name, info.Size())
 	if err != nil {
 		return err
+	}
+	if start.AlreadyUploadedBytes > info.Size() {
+		// A partial upload of a bigger file with this name: it cannot be
+		// the start of this one. Remove it and start over.
+		if err := current.DeleteStorageFile(ctx, name+".incomplete"); err != nil {
+			return fmt.Errorf("remove an older partial upload of %s: %w", name, err)
+		}
+		if start, err = current.StartStorageFileUpload(ctx, name, info.Size()); err != nil {
+			return err
+		}
 	}
 	if start.AlreadyUploadedBytes > 0 {
 		if _, err := file.Seek(start.AlreadyUploadedBytes, 0); err != nil {
 			return err
 		}
 	}
-	return current.UploadStorageFile(uploadCtx, start.DataChannel, file, start.AlreadyUploadedBytes, info.Size(), progress)
+	if err := current.UploadStorageFile(ctx, start.DataChannel, file, start.AlreadyUploadedBytes, info.Size(), progress); err != nil {
+		return err
+	}
+	// The device answers 200 even when it kept less than the whole file
+	// (a superseded or short transfer); check what it stored.
+	files, err := current.ListStorageFiles(ctx)
+	if err != nil {
+		return fmt.Errorf("check the uploaded file: %w", err)
+	}
+	for _, f := range files {
+		if f.Filename == name && f.Size == info.Size() {
+			return nil
+		}
+	}
+	return fmt.Errorf("the device did not store all of %s; upload it again to resume", name)
 }
 
 func (c *Controller) SendKeypress(key byte, press bool) error {

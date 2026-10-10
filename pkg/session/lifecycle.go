@@ -14,6 +14,7 @@ import (
 
 	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/auth"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/tlspin"
 )
 
 // Session lifecycle. One goroutine (run) owns connecting, watching and
@@ -183,7 +184,7 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 		if err := cl.Connect(ctx); err != nil {
 			_ = cl.Close()
 			c.setConnectError(err)
-			if isAuthError(err) || errors.Is(err, client.ErrDeviceMismatch) || !retry() {
+			if isAuthError(err) || errors.Is(err, client.ErrDeviceMismatch) || errors.Is(err, tlspin.ErrChanged) || !retry() {
 				return
 			}
 			continue
@@ -220,6 +221,7 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 			s.Status = "connected"
 			s.HIDReady = true
 			s.LastError = ""
+			s.CertSHA256 = c.pin.Pinned()
 		})
 		go c.bootstrap(ctx, cl)
 
@@ -425,6 +427,9 @@ func (c *Controller) watch(ctx context.Context, cl *client.Client) string {
 				s.SerialConsoleBuffer = buffer
 				s.SerialConsoleTruncated = truncated
 			})
+			if c.cfg.OnSerialText != nil {
+				c.cfg.OnSerialText(text.Text)
+			}
 		case life, ok := <-lifecycle:
 			if !ok {
 				return "disconnected"
@@ -569,6 +574,9 @@ func (c *Controller) setConnectError(err error) {
 		if errors.Is(err, client.ErrDeviceMismatch) {
 			s.Phase = PhaseFatal
 			s.Status = "a different device answers at this address"
+		} else if errors.Is(err, tlspin.ErrChanged) {
+			s.Phase = PhaseFatal
+			s.Status = "the device's TLS certificate changed"
 		} else if isAuthError(err) {
 			s.Phase = PhaseAuthFailed
 			s.Status = "authentication failed"

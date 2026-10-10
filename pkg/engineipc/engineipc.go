@@ -76,26 +76,45 @@ func ParseAccessUnit(payload []byte) (AccessUnitHeader, []byte, error) {
 type Command struct {
 	ID int64 `json:"id,omitempty"`
 	// Cmd is one of: connect, disconnect, reconnect, rpc, paste,
-	// cancelPaste, releaseAll, ping.
-	Cmd       string          `json:"cmd"`
-	BaseURL   string          `json:"baseURL,omitempty"`
-	Password  string          `json:"password,omitempty"`
-	DeviceID  string          `json:"deviceID,omitempty"`
-	OfferH265 bool            `json:"offerH265,omitempty"`
-	Method    string          `json:"method,omitempty"`
-	Params    json.RawMessage `json:"params,omitempty"`
-	Text      string          `json:"text,omitempty"`
-	Delay     int             `json:"delay,omitempty"`
+	// cancelPaste, releaseAll, ping, serialSend, setExtension (Text),
+	// setSerialSettings (Params: session.SerialSettings), upload,
+	// cancelUpload.
+	Cmd      string `json:"cmd"`
+	BaseURL  string `json:"baseURL,omitempty"`
+	Password string `json:"password,omitempty"`
+	DeviceID string `json:"deviceID,omitempty"`
+	// CertSHA256 pins an https device's certificate authority (connect).
+	CertSHA256 string          `json:"certSHA256,omitempty"`
+	OfferH265  bool            `json:"offerH265,omitempty"`
+	Method     string          `json:"method,omitempty"`
+	Params     json.RawMessage `json:"params,omitempty"`
+	Text       string          `json:"text,omitempty"`
+	Delay      int             `json:"delay,omitempty"`
+	// Path is a local file to upload to the device's storage (upload).
+	Path string `json:"path,omitempty"`
+	// Target is the ID of the upload command to cancel (cancelUpload).
+	Target int64 `json:"target,omitempty"`
 }
 
 // Event is a JSON message from the engine. Type "snapshot" carries the
-// session snapshot; "stats" carries transport statistics; "log" carries a
-// diagnostic line.
+// session snapshot (without the serial scrollback); "stats" carries
+// transport statistics; "serial" carries new serial console output in Text;
+// "uploadProgress" carries Upload; "log" carries a diagnostic line.
 type Event struct {
 	Type     string          `json:"type"`
 	Snapshot json.RawMessage `json:"snapshot,omitempty"`
 	Stats    json.RawMessage `json:"stats,omitempty"`
 	Message  string          `json:"message,omitempty"`
+	Text     string          `json:"text,omitempty"`
+	Upload   *UploadProgress `json:"upload,omitempty"`
+}
+
+// UploadProgress reports an upload command's progress; ID is the command's.
+type UploadProgress struct {
+	ID             int64   `json:"id"`
+	Sent           int64   `json:"sent"`
+	Total          int64   `json:"total"`
+	BytesPerSecond float64 `json:"bytesPerSecond"`
 }
 
 // RPCResult answers an "rpc" command.

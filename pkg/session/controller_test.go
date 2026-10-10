@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/emulator"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/auth"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/tlspin"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
 	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
 )
@@ -440,14 +443,29 @@ func TestControllerVirtualMediaURLMountAndUnmount(t *testing.T) {
 
 	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
 
-	if err := controller.MountMediaURL("https://example.com/debian.iso", virtualmedia.ModeCDROM); err != nil {
+	// The device reads the image on demand, so it needs byte ranges.
+	image := strings.Repeat("I", 4096)
+	ranged := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "debian.iso", time.Time{}, strings.NewReader(image))
+	}))
+	defer ranged.Close()
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(image))
+	}))
+	defer plain.Close()
+
+	if err := controller.MountMediaURL(plain.URL+"/debian.iso", virtualmedia.ModeCDROM); err == nil || !strings.Contains(err.Error(), "byte-range") {
+		t.Fatalf("a server without byte ranges must be refused with a reason, got %v", err)
+	}
+	imageURL := ranged.URL + "/debian.iso"
+	if err := controller.MountMediaURL(imageURL, virtualmedia.ModeCDROM); err != nil {
 		t.Fatalf("MountMediaURL returned error: %v", err)
 	}
 	state, err := controller.GetVirtualMediaState(context.Background())
 	if err != nil {
 		t.Fatalf("GetVirtualMediaState returned error: %v", err)
 	}
-	if state == nil || state.Source != virtualmedia.SourceHTTP || state.URL != "https://example.com/debian.iso" {
+	if state == nil || state.Source != virtualmedia.SourceHTTP || state.URL != imageURL || state.Size != int64(len(image)) {
 		t.Fatalf("unexpected media state: %+v", state)
 	}
 
@@ -890,5 +908,52 @@ func TestControllerReconnectsAfterReboot(t *testing.T) {
 	}
 	if srv.SessionCount() <= sessions {
 		t.Fatal("no new session after the reboot")
+	}
+}
+
+func TestControllerPinsTheTLSCertificateOnFirstUse(t *testing.T) {
+	srv, ctx, cancel := startEmulatorWith(t, emulator.Config{TLS: true})
+	defer cancel()
+	if !strings.HasPrefix(srv.BaseURL(), "https://") {
+		t.Fatalf("emulator not on https: %s", srv.BaseURL())
+	}
+	controller := New(Config{
+		BaseURL: srv.BaseURL(), ICELoopbackOnly: true, Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true,
+		ReconnectBase: 200 * time.Millisecond, ReconnectMax: 400 * time.Millisecond,
+	})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	want := tlspin.Fingerprint(srv.CertificateAuthority())
+	if got := controller.Snapshot().CertSHA256; got != want {
+		t.Fatalf("pinned %q, want the device CA %q", got, want)
+	}
+
+	// Another CA at the same address: the reconnect must refuse it.
+	if err := srv.RotateCertificate(); err != nil {
+		t.Fatal(err)
+	}
+	srv.DisconnectSession()
+	waitForPhase(t, controller, PhaseFatal, 5*time.Second)
+	if status := controller.Snapshot().Status; !strings.Contains(status, "certificate changed") {
+		t.Fatalf("status %q", status)
+	}
+}
+
+func TestControllerChecksAGivenTLSPin(t *testing.T) {
+	srv, ctx, cancel := startEmulatorWith(t, emulator.Config{TLS: true})
+	defer cancel()
+	good := New(Config{BaseURL: srv.BaseURL(), ICELoopbackOnly: true, Password: "secret", RPCTimeout: 2 * time.Second, CertSHA256: tlspin.Fingerprint(srv.CertificateAuthority())})
+	good.Start(ctx)
+	waitForPhase(t, good, PhaseConnected, 5*time.Second)
+	good.Stop()
+
+	logins := srv.LoginCount()
+	bad := New(Config{BaseURL: srv.BaseURL(), ICELoopbackOnly: true, Password: "secret", RPCTimeout: 2 * time.Second, Reconnect: true, CertSHA256: strings.Repeat("ab", 32)})
+	bad.Start(ctx)
+	defer bad.Stop()
+	waitForPhase(t, bad, PhaseFatal, 5*time.Second)
+	if srv.LoginCount() != logins {
+		t.Fatal("the password was sent over a connection with the wrong certificate")
 	}
 }

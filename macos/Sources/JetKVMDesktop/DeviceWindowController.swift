@@ -24,6 +24,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// The device ID became known after connecting; passes the device as it
     /// was before (its credential account may change).
     var onIdentityLearned: ((DeviceWindowController, Device) -> Void)?
+    /// The pinned certificate authority was learned or cleared.
+    var onCertificateChange: ((DeviceWindowController) -> Void)?
     /// Called with a password the user typed, once it has been accepted by
     /// the device (to store it in the Keychain).
     var onPasswordAccepted: ((DeviceWindowController, String) -> Void)?
@@ -39,6 +41,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private var pathMonitor: NWPathMonitor?
     private var aspectLocked = false
     private var pendingPasteID: Int64?
+    let serialLog = SerialConsoleLog()
+    private(set) lazy var mediaModel = VirtualMediaModel(engine: engine)
+    private var mediaWindow: VirtualMediaWindowController?
+    private var serialWindow: SerialConsoleWindowController?
+    private var fatalAlertShown = false
 
     static let statusBarHeight: CGFloat = 22
 
@@ -112,7 +119,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func start() throws {
         try engine.start()
-        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, offerH265: offerH265)
+        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256, offerH265: offerH265)
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshStatus() }
         startPathMonitor()
     }
@@ -127,8 +134,38 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             password = stored
         }
         pendingPasteID = nil
+        fatalAlertShown = false
         decoder.reset()
-        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, offerH265: self.offerH265)
+        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256, offerH265: self.offerH265)
+    }
+
+    func showVirtualMedia() {
+        if mediaWindow == nil {
+            mediaWindow = VirtualMediaWindowController(model: mediaModel, deviceName: device.name)
+            mediaWindow?.window?.center()
+        }
+        mediaWindow?.showWindow(nil)
+        Task { await mediaModel.refresh() }
+    }
+
+    func showSerialConsole() {
+        if serialWindow == nil {
+            serialWindow = SerialConsoleWindowController(log: serialLog, engine: engine, deviceName: device.name)
+            serialWindow?.window?.center()
+        }
+        serialWindow?.update(snapshot: snapshot)
+        serialWindow?.showWindow(nil)
+    }
+
+    /// Switches the device's extension port (ATX, DC power, serial console).
+    func setExtension(_ id: String) {
+        Task { @MainActor in
+            do {
+                try await engine.run(EngineCommand(cmd: "setExtension", text: id))
+            } catch {
+                refreshStatus(extra: error.localizedDescription)
+            }
+        }
     }
 
     /// Ends the session: releases input and stops the engine helper.
@@ -139,6 +176,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         input.setCaptured(false)
         statusTimer?.invalidate()
         pathMonitor?.cancel()
+        mediaWindow?.close()
+        serialWindow?.close()
         engine.stop()
         decoder.reset()
     }
@@ -246,7 +285,50 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             engine.pin(deviceID: id)
             onIdentityLearned?(self, before)
         }
+        // https: the device CA seen on first connect is pinned from now on.
+        if snapshot.Phase == "connected", let cert = snapshot.CertSHA256, !cert.isEmpty, device.certificateSHA256 == nil {
+            device.certificateSHA256 = cert
+            engine.pin(certSHA256: cert)
+            onCertificateChange?(self)
+        }
+        if snapshot.Phase == "fatal_error" {
+            showFatal(snapshot.Status)
+        }
+        serialWindow?.update(snapshot: snapshot)
         refreshStatus()
+    }
+
+    /// The engine stops on these; explain, and for a changed certificate
+    /// let the user trust the new one (e.g. after resetting it on the device).
+    private func showFatal(_ status: String) {
+        guard !fatalAlertShown, let window else { return }
+        fatalAlertShown = true
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        if status.contains("certificate changed") {
+            alert.messageText = "\(device.name) presented a different certificate"
+            alert.informativeText = "Someone may be intercepting the connection, or the device's HTTPS certificate was regenerated. No password was sent. Trust the new certificate only if you changed it yourself."
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Trust New Certificate")
+        } else {
+            alert.messageText = "Stopped connecting to \(device.name)"
+            alert.informativeText = status.prefix(1).uppercased() + status.dropFirst() + ". Check the address in the device library."
+            alert.addButton(withTitle: "OK")
+        }
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertSecondButtonReturn else { return }
+            self.device.certificateSHA256 = nil
+            self.onCertificateChange?(self)
+            self.reconnect()
+        }
+    }
+
+    func engine(_ engine: EngineProcess, didReceiveSerial text: String) {
+        serialLog.append(text)
+    }
+
+    func engine(_ engine: EngineProcess, didUpdateUpload progress: UploadProgress) {
+        mediaModel.progress(progress)
     }
 
     func engine(_ engine: EngineProcess, didUpdateStats stats: [String: Any]) {

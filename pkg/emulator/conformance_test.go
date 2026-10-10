@@ -514,7 +514,7 @@ func TestClientSendsFirmwareParameterNames(t *testing.T) {
 		"SetDeveloperModeState":   func() error { return c.SetDeveloperModeState(ctx, false) },
 		"SetJigglerState":         func() error { return c.SetJigglerState(ctx, false) },
 		"SetJigglerConfig":        func() error { return c.SetJigglerConfig(ctx, client.JigglerConfig{}) },
-		"MountMediaURL":           func() error { return c.MountMediaURL(ctx, "http://192.0.2.1/x.iso", "CDROM") },
+		"MountMediaURL":           func() error { return c.MountMediaURL(ctx, "http://127.0.0.1:1/x.iso", "CDROM") },
 		"UnmountMedia":            func() error { return c.UnmountMedia(ctx) },
 		"DeleteStorageFile":       func() error { return c.DeleteStorageFile(ctx, "none.iso") },
 		"MountStorageFile":        func() error { return c.MountStorageFile(ctx, "none.iso", "CDROM") },

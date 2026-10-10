@@ -31,7 +31,7 @@ APP := build/JetKVM Desktop.app
 BUILD_NUMBER := $(shell git -C .. rev-list --count HEAD 2>/dev/null || echo 0)
 EMULATOR_ADDR ?= 127.0.0.1:18080
 
-.PHONY: app engine swift test selftest run install notarize clean
+.PHONY: app engine swift test selftest selftest-extras run install notarize clean
 
 engine:
 	cd .. && GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o macos/build/jetkvm-engine ./cmd/jetkvm-engine
@@ -89,6 +89,22 @@ notarize: app
 	spctl --assess --type execute -vv "$(APP)"
 	$(copy_signed)
 	@echo "notarized: build/JetKVM-Desktop.zip"
+
+# Virtual media, serial console and address probing through the app, over
+# http and over https (self-signed device CA, pinned on first use).
+selftest-extras: app
+	cd .. && go build -o macos/build/emulator-serve ./test/emulator-serve
+	@for scheme in http https; do \
+		port=$$([ $$scheme = https ] && echo 18443 || echo 18081); \
+		./build/emulator-serve serve --listen 127.0.0.1:$$port $$([ $$scheme = https ] && echo --tls) --log-inputs > build/emulator-extras.jsonl & pid=$$!; \
+		sleep 1; \
+		"$(APP)/Contents/MacOS/JetKVMDesktop" --device $$scheme://127.0.0.1:$$port --selftest 15 --exercise-extras --view-only > build/selftest-extras-$$scheme.json; status=$$?; \
+		kill $$pid; \
+		cat build/selftest-extras-$$scheme.json; \
+		test $$status -eq 0 || { echo "selftest-extras ($$scheme) failed"; exit 1; }; \
+		grep -q '"Type":"serial.tx","Data":"selftest-serial\\r"' build/emulator-extras.jsonl || { echo "serial input not received ($$scheme)"; exit 1; }; \
+	done
+	@echo "selftest-extras passed: virtual media, serial console and probing over http and https"
 
 run: app
 	"$(APP)/Contents/MacOS/JetKVMDesktop" $(if $(DEVICE),--device $(DEVICE))

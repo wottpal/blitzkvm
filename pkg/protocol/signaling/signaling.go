@@ -73,5 +73,10 @@ func DialWebsocket(ctx context.Context, client *http.Client, baseURL string) (*w
 
 	// HandshakeTimeout bounds the HTTP upgrade even if ctx has no deadline.
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second, Proxy: http.ProxyFromEnvironment}
+	if client != nil {
+		if transport, ok := client.Transport.(*http.Transport); ok && transport.TLSClientConfig != nil {
+			dialer.TLSClientConfig = transport.TLSClientConfig.Clone()
+		}
+	}
 	return dialer.DialContext(ctx, wsURL, header)
 }

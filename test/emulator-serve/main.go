@@ -78,6 +78,8 @@ func main() {
 	serveCmd.Flags().Float64Var(&cfg.Netem.LossRate, "loss", 0, "Probability (0..1) of dropping each outgoing RTP packet")
 	serveCmd.Flags().DurationVar(&cfg.Netem.Latency, "latency", 0, "One-way delay added to outgoing RTP packets")
 	serveCmd.Flags().DurationVar(&cfg.RebootDowntime, "reboot-downtime", 20*time.Second, "How long the device is unreachable after a reboot RPC")
+	serveCmd.Flags().BoolVar(&cfg.TLS, "tls", false, "Serve https with a self-signed device CA, like the firmware's self-signed TLS mode")
+	serveCmd.Flags().IntVar(&cfg.Faults.UploadBytesPerSecond, "upload-rate", 0, "Throttle storage uploads to this many bytes per second")
 	serveCmd.Flags().BoolVar(&logInputs, "log-inputs", false, "Print every received input as a JSON line on stdout")
 
 	rootCmd := &cobra.Command{

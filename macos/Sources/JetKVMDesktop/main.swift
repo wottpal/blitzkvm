@@ -21,6 +21,9 @@ struct Options {
     var crashEngineAfter: Double?
     var snapshotPath: String?
     var injectInput = false
+    /// Self-test: also upload, mount and eject an image and use the serial
+    /// console (emulator only).
+    var exerciseExtras = false
     /// Never sends keyboard or mouse input (safe testing against a device
     /// whose target is this very Mac).
     var viewOnly = false
@@ -46,6 +49,7 @@ struct Options {
             case "--crash-engine-after": o.crashEngineAfter = next().flatMap(Double.init)
             case "--snapshot": o.snapshotPath = next()
             case "--inject-input": o.injectInput = true
+            case "--exercise-extras": o.exerciseExtras = true
             case "--view-only": o.viewOnly = true
             case "--scale": o.scaling = next().flatMap(ScalingMode.init(rawValue:))
             case "--profile": o.profile = next().flatMap(ModifierProfile.init(rawValue:))
@@ -156,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             defer { self.connecting.remove(device.id) }
             let result = await AddressProbe.choose(addresses: device.addresses, expectedDeviceID: device.deviceID,
-                                                   fetch: AddressProbe.httpFetch())
+                                                   fetch: AddressProbe.httpFetch(certSHA256: device.certificateSHA256))
             switch result {
             case .success(let (address, identity)):
                 var pinned = device
@@ -173,6 +177,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let a = NSAlert()
                 a.messageText = "\(device.name) is not reachable"
                 a.informativeText = "Tried: \(device.addresses.joined(separator: ", ")). Check the network or VPN."
+                if device.certificateSHA256 != nil, device.addresses.contains(where: { $0.hasPrefix("https://") }) {
+                    a.informativeText += " If the device's HTTPS certificate changed, Try Anyway shows it for review."
+                }
                 a.addButton(withTitle: "Try Anyway")
                 a.addButton(withTitle: "Cancel")
                 if a.runModal() == .alertFirstButtonReturn, let first = device.addresses.first {
@@ -205,6 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.input.viewOnly = options.viewOnly
         if !isSelfTest {
             controller.onConnected = { [weak self] c in self?.recordConnection(c.device) }
+            controller.onCertificateChange = { [weak self] c in self?.recordCertificate(c.device) }
             controller.onIdentityLearned = { [weak self] c, before in
                 // Password-protected devices reveal their ID only after login.
                 self?.migrateCredential(from: before, to: c.device)
@@ -221,6 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let seconds = options.selfTestSeconds {
             selfTest = SelfTest(controller: controller, seconds: seconds, crashEngineAfter: options.crashEngineAfter, snapshotPath: options.snapshotPath)
             selfTest?.injectInput = options.injectInput
+            selfTest?.exerciseExtras = options.exerciseExtras
         }
         if let (w, h) = options.windowSize {
             controller.window?.setContentSize(NSSize(width: w, height: h))
@@ -256,6 +265,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         try? store.save()
         devicesModel.reload()
+    }
+
+    /// Persists a learned (or cleared, to trust a new one) certificate pin.
+    private func recordCertificate(_ device: Device) {
+        guard var saved = store.device(id: device.id) else { return }
+        saved.certificateSHA256 = device.certificateSHA256
+        store.upsert(saved)
+        try? store.save()
     }
 
     private func alert(_ message: String, detail: String) {
@@ -334,6 +351,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let powerItem = NSMenuItem(title: "Power", action: nil, keyEquivalent: "")
         powerItem.submenu = power
         device.addItem(powerItem)
+        device.addItem(item("Virtual Media…", #selector(showVirtualMedia), key: "m", mods: [.command, .shift]))
+        device.addItem(item("Serial Console…", #selector(showSerialConsole), key: "l", mods: [.command, .shift]))
+        let extensions = NSMenu(title: "Extension Port")
+        for (title, id) in [("None", ""), ("ATX Power Control", "atx-power"), ("DC Power Control", "dc-power"), ("Serial Console", "serial-console")] {
+            let i = item(title, #selector(setExtension(_:)))
+            i.representedObject = id
+            extensions.addItem(i)
+        }
+        let extensionsItem = NSMenuItem(title: "Extension Port", action: nil, keyEquivalent: "")
+        extensionsItem.submenu = extensions
+        device.addItem(extensionsItem)
         device.addItem(.separator())
         for profile in ModifierProfile.allCases {
             let i = item(profile == .mac ? "Remote Is a Mac (⌘ stays ⌘)" : "Remote Is a PC (⌘ ↔ Ctrl)", #selector(setProfile(_:)))
@@ -374,6 +402,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func reconnect() { current?.reconnect() }
+    @objc private func showVirtualMedia() { current?.showVirtualMedia() }
+    @objc private func showSerialConsole() { current?.showSerialConsole() }
+    @objc private func setExtension(_ sender: NSMenuItem) {
+        if let id = sender.representedObject as? String { current?.setExtension(id) }
+    }
     @objc private func releaseAll() { current?.input.releaseAll() }
     @objc private func cancelPaste() { current?.cancelPaste() }
     @objc private func toggleCapture() {
@@ -429,6 +462,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func dcPower(_ sender: NSMenuItem) {
         guard let c = current, let on = sender.representedObject as? Bool, confirm(sender.title, on: c) else { return }
         c.sendRPC("setDCPowerState", params: .object(["enabled": .bool(on)]))
+    }
+}
+
+extension AppDelegate: NSMenuItemValidation {
+    /// Checks the active extension port; actions on the device need a session.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(setExtension(_:)) {
+            let active = current?.snapshot.ActiveExtension ?? ""
+            menuItem.state = active == (menuItem.representedObject as? String) ? .on : .off
+            return current?.snapshot.Phase == "connected"
+        }
+        if menuItem.action == #selector(showVirtualMedia) {
+            return current?.snapshot.Phase == "connected"
+        }
+        return true
     }
 }
 

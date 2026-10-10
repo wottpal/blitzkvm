@@ -13,6 +13,11 @@ final class SelfTest {
     private let snapshotPath: String?
     var injectInput = false
     private var inputInjected = false
+    /// Also exercises virtual media, the serial console and address probing
+    /// through the app's models and windows.
+    var exerciseExtras = false
+    private var extras: [String: Any] = [:]
+    private var extrasOK = false
     private let lock = NSLock()
     private var latenciesMs: [Double] = []
     private var decodedFrames = 0
@@ -47,6 +52,9 @@ final class SelfTest {
         if injectInput {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.inject() }
         }
+        if exerciseExtras {
+            Task { @MainActor [weak self] in await self?.runExtras() }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in self?.finish() }
     }
 
@@ -77,6 +85,77 @@ final class SelfTest {
             }
         }
         inputInjected = true
+    }
+
+    @MainActor
+    private func waitUntil(_ timeout: TimeInterval, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return condition()
+    }
+
+    /// Upload, mount, eject and delete an image; type into the serial
+    /// console and read the echo; probe the address with and without the
+    /// right certificate pin. Each step is reported.
+    @MainActor
+    private func runExtras() async {
+        guard let controller else { return }
+        var ok = true
+        func step(_ name: String, _ passed: Bool, _ detail: Any? = nil) {
+            extras[name] = detail.map { ["ok": passed, "detail": $0] as [String: Any] } ?? passed
+            ok = ok && passed
+        }
+        guard await waitUntil(10, { controller.snapshot.Phase == "connected" }) else {
+            step("connected", false, controller.snapshot.Status)
+            return
+        }
+
+        // Address probe, with the pinning the device library uses.
+        let address = controller.address
+        let identity = await AddressProbe.httpFetch(timeout: 3)(address)
+        step("probe", identity?.deviceId?.isEmpty == false, identity?.deviceId ?? "no answer")
+        if address.hasPrefix("https://") {
+            let pin = controller.snapshot.CertSHA256 ?? ""
+            step("tlsPinLearned", pin.count == 64, pin)
+            let pinned = await AddressProbe.httpFetch(timeout: 3, certSHA256: pin)(address)
+            step("probeWithPin", pinned != nil)
+            let wrong = await AddressProbe.httpFetch(timeout: 3, certSHA256: String(repeating: "0", count: 64))(address)
+            step("probeRefusesWrongPin", wrong == nil)
+        }
+
+        // Virtual media through the window's model.
+        controller.showVirtualMedia()
+        let media = controller.mediaModel
+        let name = "selftest-\(ProcessInfo.processInfo.processIdentifier).img"
+        let file = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(name)
+        let size = 300 * 1024
+        try? Data(repeating: 0x5A, count: size).write(to: file)
+        await media.upload(file)
+        step("upload", media.files.contains { $0.filename == name && $0.size == Int64(size) }, media.error ?? media.files.map(\.filename))
+        if let stored = media.files.first(where: { $0.filename == name }) {
+            await media.mount(stored, mode: .cdrom)
+            step("mount", media.mounted?.filename == name, media.error ?? "")
+            await media.eject()
+            step("eject", media.mounted == nil, media.error ?? "")
+            await media.delete(stored)
+            step("delete", !media.files.contains { $0.filename == name }, media.error ?? "")
+        }
+
+        // Serial console: turn the extension on, type, read the echo.
+        do {
+            try await controller.engine.run(EngineCommand(cmd: "setExtension", text: "serial-console"))
+            controller.showSerialConsole()
+            try await controller.engine.run(EngineCommand(cmd: "serialSend", text: "selftest-serial\r"))
+            let echoed = await waitUntil(5) { controller.serialLog.text.contains("selftest-serial") }
+            step("serial", echoed, String(controller.serialLog.text.suffix(80)))
+        } catch {
+            step("serial", false, error.localizedDescription)
+        }
+        try? FileManager.default.removeItem(at: file)
+        extrasOK = ok
     }
 
     private func frameDecoded(_ buffer: CVPixelBuffer, _ header: AccessUnitHeader) {
@@ -136,6 +215,10 @@ final class SelfTest {
         }
         if crashEngineAfter != nil { report["framesAfterEngineCrash"] = afterCrash }
         if injectInput { report["inputInjected"] = inputInjected }
+        if exerciseExtras {
+            report["extras"] = extras
+            report["extrasOK"] = extrasOK
+        }
         if let snapshotPath {
             report["snapshotWritten"] = controller.videoView.writeSnapshot(to: URL(fileURLWithPath: snapshotPath))
         }
@@ -147,6 +230,7 @@ final class SelfTest {
         FileHandle.standardOutput.write(Data("\n".utf8))
         var ok = decoded > 0 && controller.videoView.presentedFrames > 0
         if crashEngineAfter != nil { ok = ok && afterCrash > 0 && !restarts.isEmpty }
+        if exerciseExtras { ok = ok && extrasOK }
         controller.shutdown()
         AppLog.flush()
         // _exit: skip atexit/static teardown while VideoToolbox and pipe

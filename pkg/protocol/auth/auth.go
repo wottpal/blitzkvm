@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,10 +51,16 @@ func (e *Error) Error() string {
 	return e.Message
 }
 
-func NewClient() (*Client, error) {
+// NewClient creates a client with its own cookie jar. tlsConfig, if given,
+// verifies https devices (see tlspin); the WebSocket dialer reuses it.
+func NewClient(tlsConfig ...*tls.Config) (*Client, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
+	}
+	var tc *tls.Config
+	if len(tlsConfig) > 0 {
+		tc = tlsConfig[0]
 	}
 	return &Client{
 		httpClient: &http.Client{
@@ -65,6 +72,7 @@ func NewClient() (*Client, error) {
 				MaxIdleConns:          0,
 				MaxIdleConnsPerHost:   -1,
 				IdleConnTimeout:       0,
+				TLSClientConfig:       tc,
 				TLSHandshakeTimeout:   5 * time.Second,
 				ResponseHeaderTimeout: 10 * time.Second,
 				ExpectContinueTimeout: time.Second,

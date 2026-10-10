@@ -107,24 +107,34 @@ public struct EngineCommand: Codable, Equatable {
     /// The engine verifies this ID before any input: before login when the
     /// device answers GET /device without one, else over RPC after login.
     public var deviceID: String?
+    /// Pins an https device's certificate authority (SHA-256 hex).
+    public var certSHA256: String?
     public var offerH265: Bool?
     public var method: String?
     public var params: JSONValue?
     public var text: String?
     public var delay: Int?
+    /// A local file to upload (cmd "upload").
+    public var path: String?
+    /// The upload command to cancel (cmd "cancelUpload").
+    public var target: Int64?
 
     public init(id: Int64? = nil, cmd: String, baseURL: String? = nil, password: String? = nil,
-                deviceID: String? = nil, offerH265: Bool? = nil, method: String? = nil, params: JSONValue? = nil, text: String? = nil, delay: Int? = nil) {
+                deviceID: String? = nil, certSHA256: String? = nil, offerH265: Bool? = nil, method: String? = nil,
+                params: JSONValue? = nil, text: String? = nil, delay: Int? = nil, path: String? = nil, target: Int64? = nil) {
         self.id = id
         self.cmd = cmd
         self.baseURL = baseURL
         self.password = password
         self.deviceID = deviceID
+        self.certSHA256 = certSHA256
         self.offerH265 = offerH265
         self.method = method
         self.params = params
         self.text = text
         self.delay = delay
+        self.path = path
+        self.target = target
     }
 }
 
@@ -150,6 +160,13 @@ public struct SessionSnapshot: Decodable, Equatable {
     public var VideoHeight: Int?
     public var PasteInProgress: Bool?
     public var KeyboardLEDs: Int?
+    public var ActiveExtension: String?
+    /// The pinned certificate authority of an https device.
+    public var CertSHA256: String?
+    /// Go session.SerialSettings (field names as in Go), kept as JSON so a
+    /// change round-trips every field.
+    public var SerialSettings: JSONValue?
+    public var SerialConsoleError: String?
 
     public init(Phase: String, Status: String) {
         self.Phase = Phase
@@ -186,6 +203,21 @@ public struct AccessUnitHeader: Equatable {
     }
 }
 
+/// Progress of an "upload" command.
+public struct UploadProgress: Decodable, Equatable {
+    public var id: Int64
+    public var sent: Int64
+    public var total: Int64
+    public var bytesPerSecond: Double
+
+    public init(id: Int64, sent: Int64, total: Int64, bytesPerSecond: Double) {
+        self.id = id
+        self.sent = sent
+        self.total = total
+        self.bytesPerSecond = bytesPerSecond
+    }
+}
+
 /// Minimal JSON value for RPC parameters.
 public enum JSONValue: Codable, Equatable {
     case string(String)
@@ -215,5 +247,29 @@ public enum JSONValue: Codable, Equatable {
         case .array(let a): try c.encode(a)
         case .null: try c.encodeNil()
         }
+    }
+}
+
+public extension JSONValue {
+    subscript(key: String) -> JSONValue? {
+        get {
+            if case .object(let o) = self { return o[key] }
+            return nil
+        }
+        set {
+            guard case .object(var o) = self else { return }
+            o[key] = newValue
+            self = .object(o)
+        }
+    }
+
+    var stringValue: String? {
+        if case .string(let s) = self { return s }
+        return nil
+    }
+
+    var numberValue: Double? {
+        if case .number(let n) = self { return n }
+        return nil
     }
 }
