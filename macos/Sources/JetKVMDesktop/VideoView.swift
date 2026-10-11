@@ -63,6 +63,12 @@ class VideoView: NSView {
     private var scalePipeline: MTLRenderPipelineState!
     private var easuPipeline: MTLRenderPipelineState!
     private var rcasPipeline: MTLRenderPipelineState!
+    private var chromaSitedPipeline: MTLComputePipelineState!
+    private var chromaFitPipeline: MTLComputePipelineState!
+    private var chromaFitMeanPipeline: MTLComputePipelineState!
+    private var chromaResidualPipeline: MTLComputePipelineState!
+    /// Half-resolution intermediates of the guided chroma (see the shader).
+    private var chromaTextures: (sited: MTLTexture, fit: MTLTexture, fitMean: MTLTexture, residual: MTLTexture)?
     private var linearClampSampler: MTLSamplerState!
     private var textureCache: CVMetalTextureCache?
     private let metalLayer = CAMetalLayer()
@@ -75,7 +81,11 @@ class VideoView: NSView {
     private var easuTexture: MTLTexture?
     /// RCAS strength in stops (0 = strongest). 0.5 sharpens text edges
     /// without a dark rim around light text on dark backgrounds.
-    private static let rcasStops: Float = 0.5
+    /// JETKVM_RCAS_STOPS overrides it (A/B checks).
+    private static let rcasStops = Float(ProcessInfo.processInfo.environment["JETKVM_RCAS_STOPS"] ?? "") ?? 0.5
+    /// JETKVM_UPSCALER=catmull enlarges with Catmull-Rom instead of FSR (A/B
+    /// checks).
+    private static let fsrUpscaling = ProcessInfo.processInfo.environment["JETKVM_UPSCALER"] != "catmull"
 
     private static let shaderSource = """
     #include <metal_stdlib>
@@ -107,31 +117,157 @@ class VideoView: NSView {
         return 0.0;
     }
 
-    struct ConvertParams { float3x3 matrix; float3 offset; float2 chromaShift; };
+    struct ConvertParams { float3x3 matrix; float3 offset; float2 chromaShift; int guided; float lumaBias; };
 
-    // Pass 1: NV12 → RGB at the source resolution.
-    fragment float4 convert_fragment(VOut in [[stage_in]],
-                                     texture2d<float, access::read> luma [[texture(0)]],
-                                     texture2d<float, access::read> chroma [[texture(1)]],
-                                     constant ConvertParams &p [[buffer(0)]]) {
-        uint2 pos = uint2(in.position.xy);
-        float y = luma.read(pos).r;
-        int2 csize = int2(chroma.get_width(), chroma.get_height());
-        // Continuous chroma index (texel i centered at i), shifted to where
-        // the stream sites chroma relative to luma.
-        float2 c = (float2(pos) + 0.5) * 0.5 + p.chromaShift - 0.5;
+    // Continuous chroma index (texel i centered at i) of a luma pixel,
+    // shifted to where the stream sites chroma relative to luma.
+    static float2 chromaCoord(int2 pos, float2 shift) {
+        return (float2(pos) + 0.5) * 0.5 + shift - 0.5;
+    }
+
+    static float4 catmullRomRG(texture2d<float, access::read> t, float2 c) {
+        int2 size = int2(t.get_width(), t.get_height());
         float2 base = floor(c);
         float2 f = c - base;
         float4 wx = catmullRomWeights(f.x), wy = catmullRomWeights(f.y);
         int2 b = int2(base) - 1;
-        float2 cbcr = 0;
+        float4 sum = 0;
         for (int j = 0; j < 4; j++) {
-            float2 row = 0;
+            float4 row = 0;
             for (int i = 0; i < 4; i++) {
-                row += wx[i] * chroma.read(uint2(clamp(b + int2(i, j), int2(0), csize - 1))).rg;
+                row += wx[i] * t.read(uint2(clamp(b + int2(i, j), int2(0), size - 1)));
             }
-            cbcr += wy[j] * row;
+            sum += wy[j] * row;
         }
+        return sum;
+    }
+
+    // Luma-guided chroma ("chroma from luma"). Inside a few pixels, desktop
+    // content mixes two colors (antialiased text on a background), so chroma
+    // is a linear function of luma there. Each chroma site fits
+    // chroma = a * luma + b over its 3x3 neighbourhood (luma filtered the way
+    // the JetKVM subsamples chroma); the full-resolution luma then puts the
+    // chroma edges back where the luma edges are. A back-projection step
+    // keeps the result consistent with the transmitted chroma where the model
+    // does not hold (photos). Measured on device frames: colored text
+    // 28 -> 46 dB, no region worse than 0.3 dB (plan section 23).
+    //
+    // The JetKVM's 4:2:0 chroma: horizontal [1 2 1]/4 centered on even
+    // columns, the average of two rows ("left" siting).
+    static float sitedLuma(texture2d<float, access::read> luma, int2 site) {
+        int2 size = int2(luma.get_width(), luma.get_height());
+        float sum = 0;
+        for (int r = 0; r < 2; r++) {
+            int y = min(site.y * 2 + r, size.y - 1);
+            int x = site.x * 2;
+            sum += 0.25 * luma.read(uint2(max(x - 1, 0), y)).r + 0.5 * luma.read(uint2(min(x, size.x - 1), y)).r
+                 + 0.25 * luma.read(uint2(min(x + 1, size.x - 1), y)).r;
+        }
+        return sum * 0.5;
+    }
+
+    kernel void chroma_sited_luma(texture2d<float, access::read> luma [[texture(0)]],
+                                  texture2d<float, access::write> out [[texture(1)]],
+                                  uint2 gid [[thread_position_in_grid]]) {
+        if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;
+        out.write(float4(sitedLuma(luma, int2(gid))), gid);
+    }
+
+    // Per chroma site: a (cb, cr) and b (cb, cr) of the local linear fit.
+    kernel void chroma_fit(texture2d<float, access::read> sited [[texture(0)]],
+                           texture2d<float, access::read> chroma [[texture(1)]],
+                           texture2d<float, access::write> out [[texture(2)]],
+                           constant float &eps [[buffer(0)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+        int2 size = int2(out.get_width(), out.get_height());
+        if (int(gid.x) >= size.x || int(gid.y) >= size.y) return;
+        float sy = 0, syy = 0;
+        float2 sc = 0, syc = 0;
+        for (int j = -1; j <= 1; j++) {
+            for (int i = -1; i <= 1; i++) {
+                uint2 q = uint2(clamp(int2(gid) + int2(i, j), int2(0), size - 1));
+                float y = sited.read(q).r;
+                float2 c = chroma.read(q).rg;
+                sy += y; syy += y * y; sc += c; syc += y * c;
+            }
+        }
+        float my = sy / 9.0, vy = max(syy / 9.0 - my * my, 0.0);
+        float2 mc = sc / 9.0, cov = syc / 9.0 - my * mc;
+        float2 a = cov / (vy + eps);
+        out.write(float4(a, mc - a * my), gid);
+    }
+
+    // 3x3 mean of the fits (each pixel is covered by several windows).
+    kernel void chroma_fit_mean(texture2d<float, access::read> fit [[texture(0)]],
+                                texture2d<float, access::write> out [[texture(1)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+        int2 size = int2(out.get_width(), out.get_height());
+        if (int(gid.x) >= size.x || int(gid.y) >= size.y) return;
+        float4 sum = 0;
+        for (int j = -1; j <= 1; j++) {
+            for (int i = -1; i <= 1; i++) {
+                sum += fit.read(uint2(clamp(int2(gid) + int2(i, j), int2(0), size - 1)));
+            }
+        }
+        out.write(sum / 9.0, gid);
+    }
+
+    // The fit's chroma for one luma pixel: (a, b) interpolated bilinearly at
+    // the pixel's chroma position.
+    static float2 fittedChroma(texture2d<float, access::read> fit, texture2d<float, access::read> luma,
+                               int2 pos, float2 shift) {
+        int2 size = int2(fit.get_width(), fit.get_height());
+        float2 c = chromaCoord(pos, shift);
+        float2 base = floor(c);
+        float2 f = c - base;
+        int2 b0 = clamp(int2(base), int2(0), size - 1), b1 = clamp(int2(base) + 1, int2(0), size - 1);
+        float4 v = mix(mix(fit.read(uint2(b0.x, b0.y)), fit.read(uint2(b1.x, b0.y)), f.x),
+                       mix(fit.read(uint2(b0.x, b1.y)), fit.read(uint2(b1.x, b1.y)), f.x), f.y);
+        int2 lsize = int2(luma.get_width(), luma.get_height());
+        float y = luma.read(uint2(clamp(pos, int2(0), lsize - 1))).r;
+        return v.xy * y + v.zw;
+    }
+
+    // Back-projection: transmitted chroma minus the fit's chroma subsampled
+    // the way the device subsamples.
+    kernel void chroma_residual(texture2d<float, access::read> fit [[texture(0)]],
+                                texture2d<float, access::read> luma [[texture(1)]],
+                                texture2d<float, access::read> chroma [[texture(2)]],
+                                texture2d<float, access::write> out [[texture(3)]],
+                                constant float2 &shift [[buffer(0)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+        if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;
+        int2 lsize = int2(luma.get_width(), luma.get_height());
+        float2 sum = 0;
+        for (int r = 0; r < 2; r++) {
+            int y = min(int(gid.y) * 2 + r, lsize.y - 1);
+            int x = int(gid.x) * 2;
+            sum += 0.25 * fittedChroma(fit, luma, int2(max(x - 1, 0), y), shift)
+                 + 0.5 * fittedChroma(fit, luma, int2(min(x, lsize.x - 1), y), shift)
+                 + 0.25 * fittedChroma(fit, luma, int2(min(x + 1, lsize.x - 1), y), shift);
+        }
+        out.write(float4(chroma.read(gid).rg - sum * 0.5, 0, 0), gid);
+    }
+
+    // Pass 1: NV12 → RGB at the source resolution. Chroma is either the
+    // guided fit plus the Catmull-Rom-upsampled residual, or plain
+    // Catmull-Rom.
+    fragment float4 convert_fragment(VOut in [[stage_in]],
+                                     texture2d<float, access::read> luma [[texture(0)]],
+                                     texture2d<float, access::read> chroma [[texture(1)]],
+                                     texture2d<float, access::read> fit [[texture(2)]],
+                                     texture2d<float, access::read> residual [[texture(3)]],
+                                     constant ConvertParams &p [[buffer(0)]]) {
+        int2 pos = int2(in.position.xy);
+        float y = luma.read(uint2(pos)).r;
+        // The JetKVM's HDMI bridge truncates luma instead of rounding it
+        // (measured on a gray ramp: every step decodes 0-1 code values low,
+        // 0.5 on average). Half a code value puts it back in the middle;
+        // exact black (16) gets nothing, so it stays black.
+        y += p.lumaBias * saturate(y * 255.0 - 16.0);
+        float2 c = chromaCoord(pos, p.chromaShift);
+        float2 cbcr = p.guided != 0 ? fittedChroma(fit, luma, pos, p.chromaShift) + catmullRomRG(residual, c).rg
+                                    : catmullRomRG(chroma, c).rg;
         float3 rgb = p.matrix * (float3(y, cbcr) - p.offset);
         return float4(saturate(rgb), 1.0);
     }
@@ -181,7 +317,11 @@ class VideoView: NSView {
         super.init(frame: frame)
         wantsLayer = true
         metalLayer.device = device
-        metalLayer.pixelFormat = .bgra8Unorm
+        // 10 bits per channel: the picture is computed in floating point,
+        // and 8-bit output would add a rounding step of its own (uneven
+        // steps in gradients, since video range expands 219 levels to 255).
+        // The compositor dithers it to the panel.
+        metalLayer.pixelFormat = .bgr10a2Unorm
         metalLayer.framebufferOnly = true
         metalLayer.isOpaque = true
         // Two drawables: one on screen, one being rendered. A third would
@@ -217,6 +357,13 @@ class VideoView: NSView {
             return try device.makeRenderPipelineState(descriptor: d)
         }
         convertPipeline = try pipeline("convert_fragment", .rgba16Float)
+        func kernel(_ name: String) throws -> MTLComputePipelineState {
+            try device.makeComputePipelineState(function: library.makeFunction(name: name)!)
+        }
+        chromaSitedPipeline = try kernel("chroma_sited_luma")
+        chromaFitPipeline = try kernel("chroma_fit")
+        chromaFitMeanPipeline = try kernel("chroma_fit_mean")
+        chromaResidualPipeline = try kernel("chroma_residual")
         scalePipeline = try pipeline("scale_fragment", metalLayer.pixelFormat)
         // FSR keeps upstream's code in a library of its own; exact resolve
         // keeps flat areas exactly flat (upstream darkens white by 0.2%).
@@ -336,7 +483,7 @@ class VideoView: NSView {
                 let scale = l.width / Double(source.width)
                 let identity = abs(scale - 1) < 0.0001
                 // Whole-multiple mode exists for exact pixels; elsewhere it is a preference.
-                if scale >= 1 && !identity && !(l.nearest && (s.exactPixels || s.mode == .integer)),
+                if Self.fsrUpscaling, scale >= 1 && !identity && !(l.nearest && (s.exactPixels || s.mode == .integer)),
                    let easu = easu(source: source, layout: l, visible: (x0, y0, x1, y1), commandBuffer: commandBuffer) {
                     var params = FSR.rcasConstants(sharpnessStops: Self.rcasStops, outputOrigin: SIMD2(Int32(x0), Int32(y0)))
                     draw = { encoder in
@@ -348,8 +495,9 @@ class VideoView: NSView {
                     }
                 } else {
                     // Nearest-neighbor at whole-number scales, otherwise shrinking.
+                    let nearest = scale >= 1 && (Self.fsrUpscaling || (l.nearest && (s.exactPixels || s.mode == .integer)))
                     var params = ScaleParams(origin: SIMD2(Float(l.x), Float(l.y)), scale: SIMD2(repeating: Float(scale)),
-                                             filter: scale >= 1 ? 0 : 1)
+                                             filter: nearest ? 0 : 1)
                     draw = { encoder in
                         encoder.setRenderPipelineState(self.scalePipeline)
                         encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
@@ -413,18 +561,26 @@ class VideoView: NSView {
             d.storageMode = .private
             rgbTexture = device.makeTexture(descriptor: d)
         }
-        guard let rgb = rgbTexture else { return nil }
+        guard let rgb = rgbTexture, let lumaTexture = CVMetalTextureGetTexture(luma),
+              let chromaTexture = CVMetalTextureGetTexture(chroma) else { return nil }
+        var params = Self.colorParams(for: frame)
+        var guided: (fit: MTLTexture, residual: MTLTexture)?
+        if params.guided != 0 {
+            guided = guideChroma(luma: lumaTexture, chroma: chromaTexture, shift: params.chromaShift, commandBuffer: commandBuffer)
+            if guided == nil { params.guided = 0 }
+        }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = rgb
         pass.colorAttachments[0].loadAction = .dontCare
         pass.colorAttachments[0].storeAction = .store
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return nil }
         var rect = SIMD4<Float>(-1, -1, 2, 2)
-        var params = Self.colorParams(for: frame)
         encoder.setRenderPipelineState(convertPipeline)
         encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
-        encoder.setFragmentTexture(CVMetalTextureGetTexture(luma), index: 0)
-        encoder.setFragmentTexture(CVMetalTextureGetTexture(chroma), index: 1)
+        encoder.setFragmentTexture(lumaTexture, index: 0)
+        encoder.setFragmentTexture(chromaTexture, index: 1)
+        encoder.setFragmentTexture(guided?.fit ?? chromaTexture, index: 2)
+        encoder.setFragmentTexture(guided?.residual ?? chromaTexture, index: 3)
         encoder.setFragmentBytes(&params, length: MemoryLayout<ColorParams>.stride, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
@@ -432,6 +588,57 @@ class VideoView: NSView {
         // GPU is done.
         commandBuffer.addCompletedHandler { _ in _ = luma; _ = chroma }
         return rgb
+    }
+
+    /// Regularizes the guided chroma fit where luma is flat (variance in
+    /// normalized units; 1 code value squared).
+    private static let chromaFitEpsilon: Float = 1.0 / (255 * 255)
+
+    /// Encodes the half-resolution passes of the guided chroma; returns the
+    /// smoothed fit and the back-projection residual.
+    private func guideChroma(luma: MTLTexture, chroma: MTLTexture, shift: SIMD2<Float>,
+                             commandBuffer: MTLCommandBuffer) -> (fit: MTLTexture, residual: MTLTexture)? {
+        let w = chroma.width, h = chroma.height
+        if chromaTextures?.sited.width != w || chromaTextures?.sited.height != h {
+            func make(_ format: MTLPixelFormat) -> MTLTexture? {
+                let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: w, height: h, mipmapped: false)
+                d.usage = [.shaderRead, .shaderWrite]
+                d.storageMode = .private
+                return device.makeTexture(descriptor: d)
+            }
+            if let sited = make(.r32Float), let fit = make(.rgba32Float), let fitMean = make(.rgba32Float), let residual = make(.rg32Float) {
+                chromaTextures = (sited, fit, fitMean, residual)
+            } else {
+                chromaTextures = nil
+            }
+        }
+        guard let t = chromaTextures, let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        func dispatch(_ pipeline: MTLComputePipelineState) {
+            encoder.setComputePipelineState(pipeline)
+            let group = MTLSize(width: 16, height: 16, depth: 1)
+            encoder.dispatchThreadgroups(MTLSize(width: (w + 15) / 16, height: (h + 15) / 16, depth: 1), threadsPerThreadgroup: group)
+        }
+        encoder.setTexture(luma, index: 0)
+        encoder.setTexture(t.sited, index: 1)
+        dispatch(chromaSitedPipeline)
+        var eps = Self.chromaFitEpsilon
+        encoder.setTexture(t.sited, index: 0)
+        encoder.setTexture(chroma, index: 1)
+        encoder.setTexture(t.fit, index: 2)
+        encoder.setBytes(&eps, length: MemoryLayout<Float>.size, index: 0)
+        dispatch(chromaFitPipeline)
+        encoder.setTexture(t.fit, index: 0)
+        encoder.setTexture(t.fitMean, index: 1)
+        dispatch(chromaFitMeanPipeline)
+        var shift = shift
+        encoder.setTexture(t.fitMean, index: 0)
+        encoder.setTexture(luma, index: 1)
+        encoder.setTexture(chroma, index: 2)
+        encoder.setTexture(t.residual, index: 3)
+        encoder.setBytes(&shift, length: MemoryLayout<SIMD2<Float>>.size, index: 0)
+        dispatch(chromaResidualPipeline)
+        encoder.endEncoding()
+        return (t.fitMean, t.residual)
     }
 
     /// Renders the current frame through the same pipeline into an offscreen
@@ -442,15 +649,26 @@ class VideoView: NSView {
             let s = state.withLock { $0 }
             let w = Int(s.drawableSize.width), h = Int(s.drawableSize.height)
             guard w > 0, h > 0, let commandBuffer = commandQueue.makeCommandBuffer() else { return false }
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
+            // The layer's format (the pipelines are built for it), read back
+            // as 8-bit BGRA.
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: metalLayer.pixelFormat, width: w, height: h, mipmapped: false)
             descriptor.usage = [.renderTarget, .shaderRead]
             descriptor.storageMode = .shared
             guard let texture = device.makeTexture(descriptor: descriptor) else { return false }
             _ = encode(s, into: texture, commandBuffer: commandBuffer)
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
+            var packed = [UInt32](repeating: 0, count: w * h)
+            texture.getBytes(&packed, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
             var bytes = [UInt8](repeating: 0, count: w * h * 4)
-            texture.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+            for (i, v) in packed.enumerated() {
+                // bgr10a2Unorm: blue in bits 0-9, green 10-19, red 20-29.
+                func eight(_ shift: UInt32) -> UInt8 { UInt8((((v >> shift) & 0x3FF) * 255 + 511) / 1023) }
+                bytes[i * 4] = eight(0)
+                bytes[i * 4 + 1] = eight(10)
+                bytes[i * 4 + 2] = eight(20)
+                bytes[i * 4 + 3] = 255
+            }
             guard let provider = CGDataProvider(data: Data(bytes) as CFData),
                   let image = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
                                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
@@ -479,7 +697,15 @@ class VideoView: NSView {
         var matrix: simd_float3x3
         var offset: SIMD3<Float>
         var chromaShift: SIMD2<Float>
+        /// Luma-guided chroma (left-sited 4:2:0 as the JetKVM sends it).
+        var guided: Int32
+        /// Added to luma above black (normalized): undoes the JetKVM bridge's
+        /// truncation.
+        var lumaBias: Float
     }
+
+    /// JETKVM_CHROMA=bicubic turns the luma-guided chroma off (A/B checks).
+    static let guidedChroma = ProcessInfo.processInfo.environment["JETKVM_CHROMA"] != "bicubic"
 
     struct ScaleParams {
         var origin: SIMD2<Float>
@@ -518,8 +744,11 @@ class VideoView: NSView {
             SIMD3<Float>(0, cbG * cs, cbB * cs),
             SIMD3<Float>(crR * cs, crG * cs, 0)))
         let location = CVBufferCopyAttachment(buffer, kCVImageBufferChromaLocationTopFieldKey, nil) as? String
+        let shift = chromaShift(location: location)
+        // The fit's subsampling model is the JetKVM's left-sited one.
+        let guided = guidedChroma && shift == SIMD2<Float>(0.25, 0)
         return ColorParams(matrix: m, offset: SIMD3<Float>(16.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0),
-                           chromaShift: chromaShift(location: location))
+                           chromaShift: shift, guided: guided ? 1 : 0, lumaBias: forceBT601 ? 0.5 / 255 : 0)
     }
 
     /// Shift (in chroma texels) from a centered 2×2 chroma sample to the
