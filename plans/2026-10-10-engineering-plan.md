@@ -1117,6 +1117,31 @@ Quality and frame rate are unchanged (same encoder settings; the upscaler's outp
 - The local pointer stays hidden over the picture. Drawing it locally would feel instant, but the target's cursor is part of the HDMI picture, so both would show while moving.
 - Open: capture/encode overlap through the ISP (L7) would save about 10 ms; per-tile gating of the chroma passes would save another 1–2 ms of GPU.
 
+## 25. Input stalls while the picture stays live (2026-10-11)
+
+**Report (PM):** after seconds to minutes of use, keyboard and pointer stop working while the picture still looks live; seconds to minutes later they work again.
+
+**Cause:** every data channel (HID, RPC, serial) shares one SCTP association. pion retransmits a lost packet after an RTO of at least 1 s that doubles on every miss, up to 60 s, and after a timeout the congestion window drops to one packet. So all data channels wait for the backed-off timer. RTP video is separate and recovers at once (NACK, PLI).
+
+**Reproduction:** `JETKVM_DEBUG_BLACKHOLE=20:3` drops all of the session's traffic for 3 s every 20 s; the harness sends a cheap RPC every 100 ms on the same association.
+
+| | Data channels back after the video |
+|---|---|
+| pion default (RTO up to 60 s) | 3.4–3.6 s (longest RPC 6.9 s for a 3.3 s outage; grows with every further miss) |
+| RTO capped at 1 s | 2–700 ms |
+
+**Ruled out:**
+- The app's input path: lock-free, and sends never block.
+- The engine's controller lock: nothing slow runs under it.
+- The device: CPU 73 % idle (its load average of 9 comes from kernel threads in uninterruptible sleep), no transmit drops, no USB errors.
+
+**Changes:**
+- The helper caps the SCTP RTO at 1 s (`sctpRTOMax`).
+- It logs stalls of the input channels: `input data channels stalled`, then `recovered` with the duration.
+- The fork firmware caps its side too (D09, `release/0.5.9-fork.2`).
+
+**Open:** what drops the packets on this wired LAN is unknown; the stall log will show how often it happens.
+
 ## Appendix A: Key sources
 
 - `jetkvm/kvm` (`dev` @ `8f6c300`, `release/0.5.9`): https://github.com/jetkvm/kvm. REMB revert: https://github.com/jetkvm/kvm/pull/1693

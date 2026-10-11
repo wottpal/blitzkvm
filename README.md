@@ -132,7 +132,7 @@ Command-line options (also used by the self-tests):
 | `--selftest <seconds>` and `--crash-engine-after`, `--inject-input`, `--exercise-extras`, `--snapshot <png>` | Self-test mode (prints JSON, exits 0 on success) |
 | `--latency-probe <samples>` | Measures input-to-photon latency against `tools/latency-probe/latency.html` on the target (prints JSON, exits) |
 
-Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `JETKVM_ENGINE` points at a helper binary for development. `JETKVM_DESKTOP_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.
+Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `JETKVM_DEBUG_BLACKHOLE=period:duration` (seconds) makes the helper drop all session traffic for `duration` every `period`, to reproduce network hiccups. `JETKVM_ENGINE` points at a helper binary for development. `JETKVM_DESKTOP_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.
 
 Where things live:
 
@@ -197,6 +197,7 @@ Ask the owner before you:
 ## Troubleshooting
 
 - **`external macro implementation type 'SwiftUIMacros…' could not be found`:** you ran `swift build` with the Command Line Tools. Build through `make -C macos …`, which selects Xcode.
+- **Keyboard and pointer stop while the picture stays live, then work again:** the data channels (SCTP) were waiting out a retransmission timer after lost packets. The helper caps that timer at 1 s (plan §25), and so does the fork firmware (D09); `app.log` records `input data channels stalled` and `… recovered` with the duration.
 - **Emulator-backed tests time out in ICE:** set `ICELoopbackOnly: true` on both the emulator config and the client or session config.
 - **`make generate-check` fails right after editing:** expected. It requires a clean tree; commit first or run the other `check` steps directly.
 - **A device shows "not reachable" although it is up, and it uses https:** its certificate may have changed. Choose Try Anyway to see the certificate alert and decide whether to trust the new one.
