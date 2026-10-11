@@ -141,6 +141,35 @@ func TestPacketLossIsRepairedByNACK(t *testing.T) {
 	}
 }
 
+// A wait for a keyframe must ask for one: the patched firmware sends them
+// only on request (or once a minute).
+func TestRequestKeyframeGetsAnIDR(t *testing.T) {
+	srv := startTestServer(t, Config{Width: 640, Height: 360, FPS: 30, GOP: 1800, KeyframeOnRequest: true})
+	var keyframes atomic.Int64
+	c := connectClient(t, client.Config{
+		BaseURL: srv.BaseURL(),
+		OnAccessUnit: func(au video.AccessUnit) {
+			if au.Keyframe {
+				keyframes.Add(1)
+			}
+		},
+	})
+	waitFor := func(n int64, within time.Duration) bool {
+		deadline := time.Now().Add(within)
+		for keyframes.Load() < n && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		return keyframes.Load() >= n
+	}
+	if !waitFor(1, 10*time.Second) {
+		t.Fatal("no initial keyframe")
+	}
+	c.RequestKeyframe()
+	if !waitFor(2, time.Second) {
+		t.Fatalf("no keyframe within 1 s of a request (keyframes=%d)", keyframes.Load())
+	}
+}
+
 func TestConnectFailsFastWhenDeviceNeverAnswers(t *testing.T) {
 	srv := startTestServer(t, Config{Faults: FaultConfig{SignalingSilent: true}})
 	c, err := client.New(client.Config{ICELoopbackOnly: true, BaseURL: srv.BaseURL(), ConnectTimeout: time.Second})

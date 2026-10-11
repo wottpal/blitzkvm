@@ -20,6 +20,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
@@ -53,6 +54,9 @@ type Config struct {
 	FPS        int
 	// GOP is the keyframe interval in frames. Default fps/2, like the device.
 	GOP int
+	// KeyframeOnRequest makes the test pattern send an IDR on RTCP PLI/FIR,
+	// like the patched firmware (stock 0.5.9 ignores both).
+	KeyframeOnRequest bool
 	// ReplayH264 / ReplayH265 are Annex-B clips with access-unit delimiters.
 	// When set they replace the OpenH264 test pattern for that codec.
 	ReplayH264 string
@@ -1211,13 +1215,25 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 		_ = pc.Close()
 		return nil, "", err
 	}
+	keyframeReq := make(chan struct{}, 1)
 	go func() {
 		// Read RTCP so interceptors (NACK responder, reports) see feedback.
-		// Like the device, PLI/FIR are otherwise ignored.
-		buf := make([]byte, 1500)
+		// Like the stock device, PLI/FIR are otherwise ignored.
 		for {
-			if _, _, err := sender.Read(buf); err != nil {
+			packets, _, err := sender.ReadRTCP()
+			if err != nil {
 				return
+			}
+			for _, p := range packets {
+				switch p.(type) {
+				case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+					if s.cfg.KeyframeOnRequest {
+						select {
+						case keyframeReq <- struct{}{}:
+						default:
+						}
+					}
+				}
 			}
 		}
 	}()
@@ -1276,7 +1292,7 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 		if !sess.waitConnected(ctx) {
 			return
 		}
-		if err := s.startVideo(ctx, mimeType, videoTrack); err != nil {
+		if err := s.startVideo(ctx, mimeType, videoTrack, keyframeReq); err != nil {
 			log := logging.Subsystem("emulator")
 			log.Warn().Err(err).Msg("video source failed")
 		}

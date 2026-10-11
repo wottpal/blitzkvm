@@ -38,13 +38,14 @@ func resolveCodec(offerSDP, preference string) string {
 // startVideo feeds track with the configured source for mimeType until ctx ends.
 // H.264 defaults to a live OpenH264 test pattern; H.264 High profile and H.265
 // come from Annex-B replay files (see Config.ReplayH264 / ReplayH265).
-func (s *Server) startVideo(ctx context.Context, mimeType string, track *webrtc.TrackLocalStaticSample) error {
+// keyframeReq carries PLI/FIR requests (see Config.KeyframeOnRequest).
+func (s *Server) startVideo(ctx context.Context, mimeType string, track *webrtc.TrackLocalStaticSample, keyframeReq <-chan struct{}) error {
 	switch mimeType {
 	case webrtc.MimeTypeH264:
 		if s.cfg.ReplayH264 != "" {
 			return startReplay(ctx, s.cfg.ReplayH264, h264AUD, s.cfg.FPS, track)
 		}
-		return startTestPattern(ctx, s.cfg.Width, s.cfg.Height, s.cfg.FPS, s.cfg.GOP, track)
+		return startTestPattern(ctx, s.cfg.Width, s.cfg.Height, s.cfg.FPS, s.cfg.GOP, track, keyframeReq)
 	case webrtc.MimeTypeH265:
 		if s.cfg.ReplayH265 != "" {
 			return startReplay(ctx, s.cfg.ReplayH265, h265AUD, s.cfg.FPS, track)
@@ -62,7 +63,7 @@ func (s *Server) startVideo(ctx context.Context, mimeType string, track *webrtc.
 // Baseline; the OpenH264 encoder cannot produce the device's High profile).
 // Every frame carries a timestamp barcode (see BurnedTimestamp) so latency
 // harnesses can compare capture time against encode time.
-func startTestPattern(ctx context.Context, width, height, fps, gop int, track *webrtc.TrackLocalStaticSample) error {
+func startTestPattern(ctx context.Context, width, height, fps, gop int, track *webrtc.TrackLocalStaticSample, keyframeReq <-chan struct{}) error {
 	params := openh264.NewEncoderParams()
 	params.Width = width
 	params.Height = height
@@ -87,6 +88,8 @@ func startTestPattern(ctx context.Context, width, height, fps, gop int, track *w
 			select {
 			case <-ctx.Done():
 				return
+			case <-keyframeReq:
+				_ = encoder.ForceKeyFrame()
 			case <-ticker.C:
 				if frameIndex%gop == 0 {
 					_ = encoder.ForceKeyFrame()

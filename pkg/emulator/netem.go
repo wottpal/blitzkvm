@@ -23,13 +23,23 @@ type NetemConfig struct {
 	DropSequence []int
 	// Latency delays every outgoing RTP packet by this one-way duration.
 	Latency time.Duration
+	// HoldEvery and HoldFor stall the link without losing anything: for
+	// HoldFor out of every HoldEvery, outgoing RTP is held back and then
+	// released at once, like a Wi-Fi hiccup (scan, AWDL, power save). The
+	// client receives the frames of the stall in one burst.
+	HoldEvery, HoldFor time.Duration
+	// Rate paces outgoing RTP to this many bits per second (0: unlimited),
+	// so a released hold drains at link speed rather than all at once.
+	Rate float64
 	// Seed makes LossRate decisions reproducible when non-zero.
 	Seed uint64
 }
 
 func (c NetemConfig) enabled() bool {
-	return c.LossRate > 0 || c.Latency > 0 || len(c.DropSequence) > 0
+	return c.LossRate > 0 || c.Latency > 0 || len(c.DropSequence) > 0 || c.holds() || c.Rate > 0
 }
+
+func (c NetemConfig) holds() bool { return c.HoldEvery > 0 && c.HoldFor > 0 && c.HoldFor < c.HoldEvery }
 
 type netemFactory struct {
 	cfg   NetemConfig
@@ -56,6 +66,7 @@ func (f *netemFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
 		stats: f.stats,
 		rng:   rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)),
 		drops: drops,
+		start: time.Now(),
 	}, nil
 }
 
@@ -74,11 +85,25 @@ type netemInterceptor struct {
 	started bool
 	highest uint16
 	queues  map[uint32]chan delayedPacket
+	start   time.Time
+}
+
+// due is when a packet sent now leaves: after Latency, or at the end of the
+// current hold.
+func (n *netemInterceptor) due(now time.Time) time.Time {
+	due := now.Add(n.cfg.Latency)
+	if n.cfg.holds() {
+		phase := now.Sub(n.start) % n.cfg.HoldEvery
+		if hold := n.cfg.HoldEvery - n.cfg.HoldFor; phase >= hold {
+			due = due.Add(n.cfg.HoldEvery - phase)
+		}
+	}
+	return due
 }
 
 func (n *netemInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer interceptor.RTPWriter) interceptor.RTPWriter {
 	var queue chan delayedPacket
-	if n.cfg.Latency > 0 {
+	if n.cfg.Latency > 0 || n.cfg.holds() || n.cfg.Rate > 0 {
 		queue = make(chan delayedPacket, 4096)
 		n.mu.Lock()
 		if n.queues == nil {
@@ -87,9 +112,19 @@ func (n *netemInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer 
 		n.queues[info.SSRC] = queue
 		n.mu.Unlock()
 		go func() {
+			var next time.Time // when the link is free (Rate)
 			for p := range queue {
 				if wait := time.Until(p.due); wait > 0 {
 					time.Sleep(wait)
+				}
+				if n.cfg.Rate > 0 {
+					// Sleep only once a millisecond of sending has queued up:
+					// shorter sleeps overshoot.
+					now := time.Now()
+					if wait := next.Sub(now); wait > time.Millisecond {
+						time.Sleep(wait)
+					}
+					next = maxTime(next, now).Add(time.Duration(float64(len(p.payload)*8) / n.cfg.Rate * float64(time.Second)))
 				}
 				_, _ = writer.Write(&p.header, p.payload, p.attrs)
 			}
@@ -104,7 +139,7 @@ func (n *netemInterceptor) BindLocalStream(info *interceptor.StreamInfo, writer 
 		if queue == nil {
 			return writer.Write(header, payload, attrs)
 		}
-		p := delayedPacket{header: header.Clone(), payload: append([]byte(nil), payload...), attrs: attrs, due: time.Now().Add(n.cfg.Latency)}
+		p := delayedPacket{header: header.Clone(), payload: append([]byte(nil), payload...), attrs: attrs, due: n.due(time.Now())}
 		n.mu.Lock()
 		defer n.mu.Unlock()
 		if n.queues[info.SSRC] != queue {
@@ -157,6 +192,13 @@ func (n *netemInterceptor) shouldDrop(seq uint16) bool {
 }
 
 var errNetemClosed = errors.New("netem stream closed")
+
+func maxTime(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
+}
 
 type delayedPacket struct {
 	header  rtp.Header
