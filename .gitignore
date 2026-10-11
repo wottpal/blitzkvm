@@ -1,8 +1,46 @@
-research/
-.cache/
+# Build output
 /jetkvm-desktop
+/jetkvm-engine
+/emulator-serve
+/bin/
 /macos/build/
 /macos/.build/
-/emulator-serve
-/jetkvm-engine
-/bin/
+.cache/
+
+# Local research notes and generated artwork
+research/
+/output/
+
+# macOS
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+
+# Swift Package Manager and Xcode
+.swiftpm/
+xcuserdata/
+*.xcuserstate
+DerivedData/
+
+# Go
+*.test
+*.coverprofile
+/coverage.*
+
+# Python (tools)
+__pycache__/
+*.py[cod]
+.venv/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local secrets
+.env
+.env.*
