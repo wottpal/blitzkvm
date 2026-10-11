@@ -177,6 +177,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// Window) the remote display to suit the window.
     func setScaling(_ mode: ScalingMode) {
         updatePreferences { $0.scaling = mode }
+        if !followsWindow { displayFollower.cancel() }
         if mode == .actualSize || mode == .pixelExact {
             userSizedWindow = false
             fitWindowToRemote()
@@ -214,6 +215,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         follower.currentSize = { [weak self] in
             self?.videoView.currentVideoSize.map { RemoteDisplay.Size(width: Int($0.width), height: Int($0.height)) }
         }
+        follower.isEnabled = { [weak self] in self?.followsWindow ?? false }
         follower.onResize = { [weak self] size in
             guard let self else { return }
             self.hud.show("Resizing \(self.device.name)'s display to \(size)", for: 3)

@@ -11,6 +11,9 @@ final class DisplayFollower {
     private let engine: EngineProcess
     /// The remote's current resolution, if there is a picture.
     var currentSize: () -> RemoteDisplay.Size? = { nil }
+    /// Whether the window still drives the remote (checked again when a
+    /// request is due).
+    var isEnabled: () -> Bool = { true }
     /// A new display mode was sent to the device.
     var onResize: ((RemoteDisplay.Size) -> Void)?
     var onError: ((String) -> Void)?
@@ -38,7 +41,11 @@ final class DisplayFollower {
     private func apply() {
         guard !busy, let size = wanted else { return }
         wanted = nil
-        guard size != currentSize() else {
+        guard isEnabled() else { return }
+        // Nothing to do if the remote already has the size, unless a request
+        // for another size is still being applied (the host would then
+        // switch to that one).
+        guard size != currentSize() || (requested != nil && requested != size) else {
             requested = size
             return
         }

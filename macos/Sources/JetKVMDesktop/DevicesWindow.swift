@@ -155,6 +155,10 @@ struct DeviceEditor: View {
             Picker("Display", selection: $device.scaling) {
                 ForEach(ScalingMode.allCases, id: \.self) { Text($0.title).tag($0) }
             }
+            if device.scaling == .matchWindow {
+                Text("Changes the remote computer's resolution on every resize. A Mac with another monitor then stops using the JetKVM as its main display; use it when the JetKVM is the only display.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Toggle("Adapt stream quality to the network", isOn: $device.adaptiveQuality)
             Toggle("Invert scrolling", isOn: $device.invertScroll)
             HStack {

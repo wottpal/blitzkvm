@@ -120,8 +120,8 @@ final class TextUpscaler {
         region = (origin, width, height)
         var origin = origin
         var frame = SIMD2<Int32>(Int32(rgb.width), Int32(rgb.height))
-        let groups = MTLSize(width: (width + 15) / 16, height: (height + 15) / 16, depth: 1)
-        let threads = MTLSize(width: 16, height: 16, depth: 1)
+        let threads = Self.threadgroup(for: [compare, conv1, conv8, conv4])
+        let groups = MTLSize(width: (width + threads.width - 1) / threads.width, height: (height + threads.height - 1) / threads.height, depth: 1)
         encoder.setComputePipelineState(compare)
         encoder.setTexture(rgb, index: 0)
         encoder.setTexture(input, index: 1)
@@ -146,6 +146,12 @@ final class TextUpscaler {
         pass(conv4, a, detail, 6)
         encoder.endEncoding()
         return detail
+    }
+
+    /// 16×16 threads where every pipeline allows it, else 8×8.
+    static func threadgroup(for pipelines: [MTLComputePipelineState]) -> MTLSize {
+        pipelines.allSatisfy { $0.maxTotalThreadsPerThreadgroup >= 256 }
+            ? MTLSize(width: 16, height: 16, depth: 1) : MTLSize(width: 8, height: 8, depth: 1)
     }
 
     private static let shaderSource = """

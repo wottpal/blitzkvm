@@ -108,7 +108,7 @@ public enum RemoteDisplay {
     /// product, serial, name, audio): the first descriptor becomes the new
     /// timing; other timings, the standard and established modes, and the
     /// CTA extension's video modes are removed, so the host has no other
-    /// mode to pick. Physical size is set to 96 dpi, which hosts treat as
+    /// mode to pick (the CTA preference block that ranks them stays). Physical size is set to 96 dpi, which hosts treat as
     /// a standard-density display. Applying it again gives the same bytes.
     public static func edid(_ edid: [UInt8], advertising size: Size) throws -> [UInt8] {
         let header: [UInt8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
@@ -177,7 +177,9 @@ public enum RemoteDisplay {
 
     /// Drops the CTA-861 extension's video modes (video data block, 4:2:0
     /// blocks, detailed timings) and keeps its other data blocks (audio,
-    /// HDMI, colorimetry…).
+    /// HDMI, colorimetry…). The video format preference block stays: it only
+    /// ranks the removed modes, which hosts then skip (the bytes the device
+    /// and a Mac host accepted, see the tests).
     static func stripCTAVideoModes(_ edid: inout [UInt8], block: Int) {
         let base = block * 128
         let dtdOffset = Int(edid[base + 2])

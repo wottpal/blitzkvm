@@ -9,12 +9,14 @@ import simd
 /// Presents decoded NV12 pixel buffers with Metal, as soon as they arrive, on
 /// a render queue of its own (the main thread never delays a frame).
 ///
-/// The frame is converted to RGB at its own resolution (chroma upsampled with
-/// Catmull-Rom at the position the stream declares), then scaled into the
-/// drawable at physical (Retina) resolution: enlarged with AMD FSR 1 (EASU
-/// edge-adaptive upscaling, then RCAS sharpening), which keeps 1× remote text
-/// crisp without nearest-neighbor stair steps or bilinear blur; shrunk with a
-/// widened Catmull-Rom (antialiased). "Exact Pixels" uses nearest-neighbor at
+/// The frame is converted to RGB at its own resolution (chroma reconstructed
+/// guided by luma, Catmull-Rom where that does not fit), then scaled into a 10-bit
+/// drawable at physical (Retina) resolution. Enlarged by exactly 2× (Actual
+/// Size on Retina), the picture goes through the learned text upscaler
+/// (TextUpscaler.swift); other enlargements use AMD FSR 1 (EASU edge-adaptive
+/// upscaling, then RCAS sharpening), which keeps 1× remote text crisp without
+/// nearest-neighbor stair steps or bilinear blur. Shrinking uses a widened
+/// Catmull-Rom (antialiased). "Exact Pixels" uses nearest-neighbor at
 /// whole-number scales instead.
 class VideoView: NSView {
     var scalingMode: ScalingMode {
@@ -155,7 +157,8 @@ class VideoView: NSView {
     // chroma edges back where the luma edges are. A back-projection step
     // keeps the result consistent with the transmitted chroma where the model
     // does not hold (photos). Measured on device frames: colored text
-    // 28 -> 46 dB, no region worse than 0.3 dB (plan section 23).
+    // 28 -> 46 dB at QP 10, 51 dB on a still refresh; no region worse than
+    // 0.4 dB (plan section 23).
     //
     // The JetKVM's 4:2:0 chroma: horizontal [1 2 1]/4 centered on even
     // columns, the average of two rows ("left" siting).
@@ -467,7 +470,8 @@ class VideoView: NSView {
         }
         guard let drawable = metalLayer.nextDrawable(), let commandBuffer = commandQueue.makeCommandBuffer() else { return }
         let layout = encode(s, into: drawable.texture, commandBuffer: commandBuffer)
-        commandBuffer.addCompletedHandler { [weak self] cb in self?.recordGPUTime(cb.gpuEndTime - cb.gpuStartTime) }
+        let upscaled = state.withLock { $0.textUpscaling }
+        commandBuffer.addCompletedHandler { [weak self] cb in self?.recordGPUTime(cb.gpuEndTime - cb.gpuStartTime, upscaled: upscaled) }
         commandBuffer.present(drawable)
         commandBuffer.commit()
         state.withLock {
@@ -478,28 +482,34 @@ class VideoView: NSView {
 
     /// JETKVM_GPU_TIMING=1 logs the average GPU time per rendered frame.
     private static let gpuTiming = ProcessInfo.processInfo.environment["JETKVM_GPU_TIMING"] == "1"
-    private let gpuTimes = Locked((total: 0.0, count: 0))
+    private let gpuTimes = Locked((total: 0.0, count: 0, upscaledTotal: 0.0, upscaledCount: 0, slowWindows: 0))
     /// Set when frames with the text upscaler take too long on this GPU.
     private let textUpscalerTooSlow = Locked(false)
     /// The text upscaler costs about 2 ms per frame on an M4 Max for a
-    /// 3000×2000 view; a GPU that needs more than this on average for the
-    /// whole frame falls back to FSR for the rest of the session.
+    /// 3000×2000 view. A GPU that needs more than this for whole frames that
+    /// ran it, over three windows of 120 frames in a row (not a moment of
+    /// contention), falls back to FSR for the rest of the session.
     private static let frameBudget = 0.008
 
-    private func recordGPUTime(_ seconds: Double) {
-        let average = gpuTimes.withLock { t -> Double? in
+    private func recordGPUTime(_ seconds: Double, upscaled: Bool) {
+        let report = gpuTimes.withLock { t -> (all: Double, upscaled: Double?, tooSlow: Bool)? in
             t.total += seconds
             t.count += 1
+            if upscaled {
+                t.upscaledTotal += seconds
+                t.upscaledCount += 1
+            }
             guard t.count == 120 else { return nil }
-            defer { t = (0, 0) }
-            return t.total / Double(t.count)
+            let upscaledAverage = t.upscaledCount >= 60 ? t.upscaledTotal / Double(t.upscaledCount) : nil
+            t.slowWindows = upscaledAverage.map { $0 > Self.frameBudget } == true ? t.slowWindows + 1 : 0
+            defer { t = (0, 0, 0, 0, t.slowWindows) }
+            return (t.total / Double(t.count), upscaledAverage, t.slowWindows >= 3)
         }
-        guard let average else { return }
-        if Self.gpuTiming { AppLog.log(String(format: "render: %.2f ms GPU per frame", average * 1000)) }
-        let upscaling = state.withLock { s in s.textUpscaling }
-        if upscaling && average > Self.frameBudget && !textUpscalerTooSlow.withLock({ $0 }) {
+        guard let report else { return }
+        if Self.gpuTiming { AppLog.log(String(format: "render: %.2f ms GPU per frame", report.all * 1000)) }
+        if report.tooSlow, let upscaledAverage = report.upscaled, !textUpscalerTooSlow.withLock({ $0 }) {
             textUpscalerTooSlow.withLock { $0 = true }
-            AppLog.log(String(format: "text upscaler off: %.1f ms GPU per frame on this GPU, using FSR", average * 1000))
+            AppLog.log(String(format: "text upscaler off: %.1f ms GPU per frame on this GPU, using FSR", upscaledAverage * 1000))
         }
     }
 
@@ -697,10 +707,11 @@ class VideoView: NSView {
             }
         }
         guard let t = chromaTextures, let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        let group = TextUpscaler.threadgroup(for: [chromaSitedPipeline, chromaFitPipeline, chromaFitMeanPipeline, chromaResidualPipeline])
         func dispatch(_ pipeline: MTLComputePipelineState) {
             encoder.setComputePipelineState(pipeline)
-            let group = MTLSize(width: 16, height: 16, depth: 1)
-            encoder.dispatchThreadgroups(MTLSize(width: (w + 15) / 16, height: (h + 15) / 16, depth: 1), threadsPerThreadgroup: group)
+            encoder.dispatchThreadgroups(MTLSize(width: (w + group.width - 1) / group.width, height: (h + group.height - 1) / group.height, depth: 1),
+                                         threadsPerThreadgroup: group)
         }
         encoder.setTexture(luma, index: 0)
         encoder.setTexture(t.sited, index: 1)
