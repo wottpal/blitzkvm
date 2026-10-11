@@ -986,6 +986,86 @@ macOS keys the display arrangement to the whole display configuration, not to ve
 
 **Firmware:** with the PM's approval, the encoder-patch build (`48af72f7…`) is now installed persistently on the PM's device via `jetkvm_app.update`. The stock app is backed up on the device (`/userdata/jetkvm/jetkvm_app.stock-0.5.9`) and locally. Auto Update stays on, so an upstream release newer than 0.5.9 will replace the patched build.
 
+## 23. Picture quality, round 2 (2026-10-11)
+
+**Ask (PM):** raise the numbers (text, gradients), keep the frame rate high, and make still screens converge to near 1:1 without a high idle bitrate.
+
+**Baseline:** the "maximum" level on the PM's LAN, from the §21 work:
+
+| Measure | Value |
+|---|---|
+| Light text (luma) | 53.2 dB |
+| Dark text (luma) | 47.8 dB |
+| Colored text (RGB, as displayed) | 28.1 dB |
+| Gray gradient (luma) | 49.8 dB |
+| Idle | 0.54 Mbit/s (a 235 KB keyframe every 4 s) |
+| Scrolling | 48.4 dB at 7.6 Mbit/s |
+
+### Findings (measured on the device unless noted)
+
+| # | Finding | Consequence |
+|---|---|---|
+| R1 | P-frames never refine a still picture. After a change they stay empty even with the QP floor at 0: the encoder skips blocks whose residual is small, at any QP | Still quality has to come from an intra frame |
+| R2 | Changing RC parameters live (`SetRcParam`) restarts MPP rate control (`MPP_ENC_SET_RC_CFG` in dmesg). Scrolling that starts after it dropped from 48 to 41–47 dB | Nothing at runtime touches RC parameters |
+| R3 | Reading capture buffers from the CPU goes through an uncached mapping: 1.6 ms per frame for every 16th line, 4.5 ms with a cache flush | Stillness is read from encoder output sizes instead |
+| R4 | ROI absolute QPs are clamped to the frame type's QP floor (a refresh at "QP 2" stayed at 264 KB until the floor moved) | The I-frame floor is permanently `stillQp`; P-frames keep `minQp` |
+| R5 | A QP floor of 0 counts as unset (results like QP 10) | `stillQp` is 1–51 |
+| R6 | Frames already queued when the refresh ROI goes off still use it. Read as activity, they caused a refresh every 1.5 s | Cool-down of 4 frames after a refresh |
+| R7 | The JetKVM's 4:2:0 chroma is [1 2 1]/4 horizontally on even columns plus a two-row average. It matches the stream within 57 dB on text | The app's chroma reconstruction models exactly that filter |
+| R8 | The HDMI bridge truncates luma: Y = 16 + ⌊(66R + 129G + 25B)/256⌋, which matches every gray step of the ramp | The app adds half a code value above black |
+| R9 | The Finder screen changed ~15% of its pixels every frame (±5). That was the animated wallpaper behind translucent windows, not dithering; the opaque test page is static except ±2 in its gradients | Cost-based stillness handles both |
+| R10 | Restoring the default EDID after the §22 tests needed a reboot; a plain `reboot` hangs while the test build runs (`RkLunch-stop.sh` waits for `jetkvm_app`) | DEPLOY.md: kill the test build first |
+
+### Design
+- **Firmware (still refresh):** after 30 cheap P-frames following any activity, a whole-frame ROI with absolute QP `stillQp` is set and a keyframe is requested. "Cheap" means below 1,500 bytes, or an eighth of the per-frame budget. Refreshes are at least 1.5 s apart, and other keyframes count as activity.
+- **Firmware (other changes):** the GOP is 60 s, the frame socket limit is raised to 3.1 MB, and super frames re-encode above 2.5 MiB.
+- **Engine:** the quality ladder gains `stillQp`. Maximum uses 1, high 4, balanced 8 and low 17; minimal skips the refresh, because a 0.2–0.4 MB burst would turn into loss on a slow link.
+- **App, chroma from luma:** a 3×3 linear fit per chroma site, the fit's mean applied to full-resolution luma, and one back-projection step.
+- **App, other changes:** a luma correction for the bridge's truncation, a 10-bit layer, and the 2× text upscaler (below).
+
+### Results on the device
+
+**Maximum level** (the scorer mirrors the app's conversion):
+
+| Measure | Before | After |
+|---|---|---|
+| Light text | 53.2 dB | 60.5 dB |
+| Small text | 53.5 dB | 60.5 dB |
+| Dark text (luma) | 47.8 dB | 48.7 dB; 56.3 dB with the luma correction |
+| Colored text (RGB) | 28.1 dB | 51.4 dB |
+| Dark colored text (RGB) | 28.9 dB | 43.8 dB |
+| Gray gradient (RGB) | 47.1 dB | 50.3 dB |
+| Color gradient (RGB) | 44.0 dB | 46.5 dB |
+| Photo-like area (luma) | 46.5 dB | 52.1 dB |
+| Idle | 0.54 Mbit/s | 0.07 Mbit/s |
+| Scrolling 120 / 1080 px/s | 48.4 / 48.4 dB | 49.2 / 48.5 dB |
+| Scrolling right after a refresh | 48.3 dB | 48.8 dB |
+
+Frame rate stays at 60 fps throughout.
+
+**Balanced level:**
+
+| Measure | Before | After |
+|---|---|---|
+| Light text | 42.3 dB | 56.3 dB |
+| Dark text | 41.7 dB | 48.5 dB |
+| Idle | — | 0.04 Mbit/s |
+
+### 2× enlargement
+The reference is the test pattern drawn natively at 2× (`make_pattern.swift OUT 2`).
+- **Classical filters:** they all land within 0.2 dB of each other, and FSR's sharpening strength doesn't matter.
+- **Text upscaler:** a small network trained on CoreText 1×/2× pairs (`tools/text-upscaler`) raises SSIM from 0.955 to 0.972 on text, 0.941 to 0.965 on dark text and 0.957 to 0.978 on colored text. The table is in that README.
+- **Performance:** my first Metal kernels spilled registers (11 ms). An MPS attempt cost about the same; its output was wrong, and I abandoned it rather than debug it further. The final 8-channel kernels cost about +2 ms per changed frame for 3000×2000 on an M4 Max and nothing on unchanged frames (a GPU compare pass). Over 8 ms per frame, the app falls back to FSR.
+
+### Decisions (worth revisiting)
+- The still refresh is on in the firmware by default (`stillQp` 8 for clients without a governor, such as the web UI), and the GOP defaults to 60 s.
+- The refresh fires after 0.5 s of quiet, at most every 1.5 s. A typing session therefore costs a refresh per pause: up to ~2 Mbit/s at QP 1 on maximum, which is fine on a LAN.
+- No deband filter. Still screens now reach 52 dB on gradients, and a deband filter risks softening text. Banding during motion at the lower levels remains.
+- No 4:4:4 (the RV1106 encoder has no 4:4:4 mode) and no full-range bridge output: that would need register writes behind the kernel driver.
+- The text upscaler is used only at exactly 2×; other scales keep FSR.
+- Match Window is opt-in (§22).
+- ⌘Space did not reach the remote because Accessibility was not granted to the app. It now asks once, re-checks every second while captured, and taps at the HID level ahead of every hotkey (Raycast, Spotlight).
+
 ## Appendix A: Key sources
 
 - `jetkvm/kvm` (`dev` @ `8f6c300`, `release/0.5.9`): https://github.com/jetkvm/kvm. REMB revert: https://github.com/jetkvm/kvm/pull/1693

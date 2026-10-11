@@ -81,7 +81,7 @@ View modes (View menu ⌘1–⌘5, or the menu in the status bar), saved per dev
 
 | Mode | Shows the remote screen | Notes |
 |---|---|---|
-| Actual Size (default) | One remote pixel per point: the size a monitor of that resolution would show it | 2× on Retina, upscaled with FSR. The remote resolution stays as it is; the window sizes itself to it, and a smaller window pans with the pointer. |
+| Actual Size (default) | One remote pixel per point: the size a monitor of that resolution would show it | 2× on Retina, enlarged by the text upscaler (below). The remote resolution stays as it is; the window sizes itself to it, and a smaller window pans with the pointer. |
 | Scale to Fit | As large as the window allows | FSR when enlarging, a widened Catmull-Rom when shrinking |
 | Pixel for Pixel | One remote pixel per physical pixel | Tiny on Retina; for pixel inspection |
 | Largest Whole Multiple | The largest whole multiple that fits | Always exact (nearest-neighbor) pixels |
@@ -91,11 +91,22 @@ View modes (View menu ⌘1–⌘5, or the menu in the status bar), saved per dev
 
 Full screen: the menu bar, and with it the window's title bar and buttons, slides in when the pointer rests at the top edge, so you can leave full screen with the mouse. The Dock stays hidden because the bottom edge belongs to the remote.
 
-Enlarging uses AMD FSR 1 (EASU edge-adaptive upscaling + RCAS sharpening, `FSR.swift`): crisp 1× text without stair steps or blur. View › Exact Pixels at Whole-Number Scales switches to nearest-neighbor where the scale is a whole number.
+**Enlarging, exactly 2× (Actual Size on Retina):** a small neural network trained on macOS text (`TextUpscaler.swift`, `tools/text-upscaler`). It learned from CoreText drawing the same layouts at 1× and natively at 2×. Glyphs come out closer to how a Retina screen draws them: SSIM against a native 2× rendering is 0.972 on text, against 0.955 for FSR. There are no stair steps and no blur. While the picture is unchanged it costs nothing extra; a GPU too slow for it falls back to FSR.
+
+**Enlarging at any other scale:** AMD FSR 1 (EASU edge-adaptive upscaling plus RCAS sharpening, `FSR.swift`).
+
+View › Exact Pixels at Whole-Number Scales switches to nearest-neighbor where the scale is a whole number.
+
+**Picture pipeline** (`VideoView.swift`):
+- **Chroma:** the JetKVM sends color at half resolution. The app rebuilds it from the full-resolution luma, since within a few pixels desktop content mixes two colors. Colored text measures 51 dB against 28 dB with plain upsampling.
+- **Luma:** the HDMI bridge truncates luma. The app adds back half a code value, which gains 2–3 dB on small text and gradients.
+- **Output:** the picture is computed in floating point and drawn to a 10-bit layer, so gradients pick up no extra 8-bit rounding.
 
 Mouse: hovering over the remote picture puts the remote pointer exactly there (USB absolute pointer), also while another app is active; your own pointer is hidden over the picture, so only the remote one shows. A Mac maps that absolute pointer onto its **main display only**: on a Mac target the JetKVM's display must be the main display (System Settings › Displays), or the pointer never shows on it.
 
-Stream quality (Device › Stream Quality) is **Automatic** by default: the engine watches packet loss, round-trip growth and dropped frames and walks a quality ladder (`pkg/session/autoquality.go`), down at once when the link struggles and up after 20 clean seconds. Manual presets set the device's quality factor (a JetKVM setting shared by all its clients). The encoder uses VBR, so higher factors only cost bandwidth while the screen changes. Static text sharpness on stock firmware 0.5.9 is limited by the encoder's QP floor, not the bitrate; the optional encoder patch fixes that (see the plan's §21).
+Stream quality (Device › Stream Quality) is **Automatic** by default: the engine watches packet loss, round-trip growth and dropped frames and walks a quality ladder (`pkg/session/autoquality.go`), down at once when the link struggles and up after 20 clean seconds. Manual presets set the device's quality factor (a JetKVM setting shared by all its clients). The encoder uses VBR, so higher factors only cost bandwidth while the screen changes. Static text sharpness on stock firmware 0.5.9 is limited by the encoder's QP floor, not the bitrate. The optional encoder patch (`firmware/`) fixes that (plan §21).
+
+The patch also brings **still screens to near-lossless** (plan §23). Half a second after the screen stops changing, the device sends one keyframe at a very low QP (QP 1 at the maximum level, up to QP 17 at "low"). On the maximum level, text then measures 60 dB, against 53 dB before and 33 dB on stock firmware. The empty frames that follow keep it, and a still screen costs 0.07 Mbit/s.
 
 Colors: the JetKVM's HDMI bridge outputs BT.601 YCbCr while firmware 0.5.9 tags HD streams BT.709, so the app always decodes BT.601 (`VideoView.colorParams`; `JETKVM_COLOR_MATRIX=709` restores the declared matrix).
 
