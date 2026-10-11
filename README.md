@@ -104,9 +104,19 @@ View › Exact Pixels at Whole-Number Scales switches to nearest-neighbor where 
 
 Mouse: hovering over the remote picture puts the remote pointer exactly there (USB absolute pointer), also while another app is active; your own pointer is hidden over the picture, so only the remote one shows. A Mac maps that absolute pointer onto its **main display only**: on a Mac target the JetKVM's display must be the main display (System Settings › Displays), or the pointer never shows on it.
 
-Stream quality (Device › Stream Quality) is **Automatic** by default: the engine watches packet loss, round-trip growth and dropped frames and walks a quality ladder (`pkg/session/autoquality.go`), down at once when the link struggles and up after 20 clean seconds. Manual presets set the device's quality factor (a JetKVM setting shared by all its clients). The encoder uses VBR, so higher factors only cost bandwidth while the screen changes. Static text sharpness on stock firmware 0.5.9 is limited by the encoder's QP floor, not the bitrate. The optional encoder patch (`firmware/`) fixes that (plan §21).
+Stream quality (Device › Stream Quality) is **Automatic** by default: the engine watches packet loss, round-trip growth and dropped frames and walks a quality ladder (`pkg/session/autoquality.go`), down at once when the link struggles and up after 20 clean seconds. Manual presets set the device's quality factor (a JetKVM setting shared by all its clients). The encoder uses VBR, so higher factors only cost bandwidth while the screen changes. Static text sharpness on stock firmware 0.5.9 is limited by the encoder's QP floor, not the bitrate. The fork firmware [wottpal/kvm](https://github.com/wottpal/kvm) fixes that (plan §21; its `FORK.md` lists every change, `firmware/` has the install steps).
 
-The patch also brings **still screens to near-lossless** (plan §23). Half a second after the screen stops changing, the device sends one keyframe at a very low QP (QP 1 at the maximum level, up to QP 17 at "low"). On the maximum level, text then measures 60 dB, against 53 dB before and 33 dB on stock firmware. The empty frames that follow keep it, and a still screen costs 0.07 Mbit/s.
+The fork also brings **still screens to near-lossless** (plan §23). Half a second after the screen stops changing, the device sends one keyframe at a very low QP (QP 1 at the maximum level, up to QP 17 at "low"). On the maximum level, text then measures 60 dB, against 53 dB before and 33 dB on stock firmware. The empty frames that follow keep it, and a still screen costs 0.07 Mbit/s.
+
+**Latency** (plan §24, measured with `tools/latency-probe` at 60 Hz, LAN):
+
+| From | To | Before | Now |
+|---|---|---|---|
+| Key press | Frame on screen, window | 142 ms | 87 ms |
+| Key press | Frame on screen, full screen | — | 72 ms |
+| Pointer move | Remote cursor on screen, window / full screen | ~100 ms | 70 / 66 ms |
+
+The app hands each frame to the window server as soon as the GPU is done instead of waiting for its own vsync (the window server still flips at vblank and keeps only the newest frame, so nothing tears), takes the newest frame after the drawable rather than before, and runs the text upscaler only on the tiles that changed. What remains is mostly outside the app: the target's own input-to-display time, one HDMI frame of capture (16.7 ms) and the encoder's fixed 13 ms per 1080p frame.
 
 Colors: the JetKVM's HDMI bridge outputs BT.601 YCbCr while firmware 0.5.9 tags HD streams BT.709, so the app always decodes BT.601 (`VideoView.colorParams`; `JETKVM_COLOR_MATRIX=709` restores the declared matrix).
 
@@ -120,6 +130,7 @@ Command-line options (also used by the self-tests):
 | `--view-only` | Never send keyboard or mouse input |
 | `--scale actualSize\|fit\|pixelExact\|integer`, `--profile mac\|pc`, `--window-size 1280x720` | View and input overrides |
 | `--selftest <seconds>` and `--crash-engine-after`, `--inject-input`, `--exercise-extras`, `--snapshot <png>` | Self-test mode (prints JSON, exits 0 on success) |
+| `--latency-probe <samples>` | Measures input-to-photon latency against `tools/latency-probe/latency.html` on the target (prints JSON, exits) |
 
 Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `JETKVM_ENGINE` points at a helper binary for development. `JETKVM_DESKTOP_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.
 
@@ -213,6 +224,6 @@ Flags: `--password-stdin`, `--password-env NAME` (default `JETKVM_PASSWORD`), `-
   - §19: implementation status.
   - §20: execution report (divergences, takeaways).
 - [`third_party/openh264-go/README.md`](third_party/openh264-go/README.md): the vendored OpenH264 bindings.
-- Firmware source: [github.com/jetkvm/kvm](https://github.com/jetkvm/kvm). Upstream develops on `dev`; releases are on `release/X.Y.Z` branches.
+- Firmware: the fork [github.com/wottpal/kvm](https://github.com/wottpal/kvm) (`FORK.md`: every difference from upstream, releases, procedures). Upstream [github.com/jetkvm/kvm](https://github.com/jetkvm/kvm) develops on `dev`; releases are on `release/X.Y.Z` branches.
 
 License: MIT (see [`LICENSE`](LICENSE)).

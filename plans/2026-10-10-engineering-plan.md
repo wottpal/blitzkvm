@@ -1069,6 +1069,54 @@ The reference is the test pattern drawn natively at 2× (`make_pattern.swift OUT
 - Match Window is opt-in (§22).
 - ⌘Space did not reach the remote because Accessibility was not granted to the app. It now asks once, re-checks every second while captured, and taps at the HID level ahead of every hotkey (Raycast, Spotlight).
 
+## 24. Latency (2026-10-11)
+
+**Ask (PM):** keep the quality and frame-rate gains, cut the time from a key press or pointer move to seeing it, and find which quality or frame-rate concessions buy large latency gains.
+
+**Method:** the app's `--latency-probe N` (`LatencyProbe.swift`, `tools/latency-probe`). The target shows a page whose square flips on every key press; the app sends the key, finds the first decoded frame with the change, and takes that frame's `MTLDrawable.presentedTime`. A pointer mode moves the pointer and waits for the cursor. The target's own input-to-display time is part of every sample. The device side was timed with an instrumented build (capture, encode and handoff per frame). Target: Mac mini over HDMI at 1080p60; client: M4 Max on a 60 Hz display; LAN.
+
+### Where the time went (keystroke, before)
+
+| Stage | Time |
+|---|---|
+| Target: input → change on HDMI (browser) | ~25–35 ms (not ours) |
+| Capture: one HDMI frame (V4L2 timestamp → DQBUF) | 16.7 ms, constant |
+| Encode (DQBUF → bitstream out) | 12.9 ms, constant for every frame, even empty ones |
+| Device handoff, network, engine, IPC, decode | ~3 ms (engine receive → decoded: 1.8 ms) |
+| **Decode → on screen** | **52–76 ms**: render queue ~4, `nextDrawable` wait ~16, GPU ~8.5, then ~24 to the screen |
+| Total, key press → on screen | **142 ms** median |
+
+### Findings
+
+| # | Finding | Consequence |
+|---|---|---|
+| L1 | With `displaySyncEnabled = true`, each present waits for our own vsync, and the second drawable stays held for a refresh, so `nextDrawable` blocks ~16 ms | Display sync off: decode → screen 52 → 18 ms (window), 48 → 7 ms (full screen) |
+| L2 | Without display sync, presents still land on vblank: present minus GPU-done jumps by whole refreshes (p90 +16/+33 ms) and never lands mid-scan; the window server keeps the newest frame | No tearing; it is the default now (`JETKVM_DISPLAY_SYNC=1` for A/B) |
+| L3 | `render()` took the frame before the blocking `nextDrawable()` | Drawable first, then the frame |
+| L4 | The text upscaler re-ran on the whole picture on any change: 8.5 ms of GPU per changed frame (GPU clocks stay low at this load), FSR 4.2 ms | Per-tile change flags (16×16, plus one tile of border): bit-exact against a full run (GPU test), 4.6 ms for the probe's large change, little for typing |
+| L5 | A third drawable only queues: decode → screen 78 ms | Keep 2 |
+| L6 | Encode time is the hardware's (VEPU at 396 MHz): 12.9 ms with SAO off, deblocking off, any scene mode; H.264 12.1 ms | Nothing to gain; H.265 stays (PM: no H.264) |
+| L7 | Capture → encode overlap (rockit VI + wrap buffer, DVBM) is wired from the ISP's main path; the HDMI path is raw VICAP (`stream_cif_mipi_id0`) without the ISP | Not feasible without re-plumbing capture; research item |
+| L8 | Still-refresh keyframes next to a keystroke: no measurable penalty (gap sweep on a busy desktop page; medians within noise) | No input-aware deferral |
+| L9 | Every native start rewrote the EDID (upstream #1476): HDMI hot-plug, and a Mac with two displays rebound the absolute pointer to the other one | Fork D08: skip the write when the bridge already has the EDID |
+
+### Results (median, 60 Hz)
+
+| From | To | Before | After |
+|---|---|---|---|
+| Key press | On screen, window | 142 ms | 87 ms |
+| Key press | On screen, full screen | — | 72 ms |
+| Pointer move | Cursor on screen, window | ~100 ms (display sync on) | 70 ms |
+| Pointer move | Cursor on screen, full screen | — | 66 ms |
+
+Quality and frame rate are unchanged (same encoder settings; the upscaler's output is bit-identical).
+
+### Decisions (worth revisiting)
+- No concession on quality or frame rate was needed: the large gains were in presentation, and the device's 30 ms (one frame of capture plus encoding) is fixed by hardware.
+- Rejected: H.264 (−0.8 ms encode, PM said no), a third drawable, encoder speed knobs (no effect), input-aware refresh deferral (no measured penalty).
+- The local pointer stays hidden over the picture. Drawing it locally would feel instant, but the target's cursor is part of the HDMI picture, so both would show while moving.
+- Open: capture/encode overlap through the ISP (L7) would save about 10 ms; per-tile gating of the chroma passes would save another 1–2 ms of GPU.
+
 ## Appendix A: Key sources
 
 - `jetkvm/kvm` (`dev` @ `8f6c300`, `release/0.5.9`): https://github.com/jetkvm/kvm. REMB revert: https://github.com/jetkvm/kvm/pull/1693
