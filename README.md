@@ -91,7 +91,7 @@ View modes (View menu ⌘1–⌘5, or the menu in the status bar), saved per dev
 
 Full screen: the menu bar, and with it the window's title bar and buttons, slides in when the pointer rests at the top edge, so you can leave full screen with the mouse. The Dock stays hidden because the bottom edge belongs to the remote.
 
-**Enlarging, exactly 2× (Actual Size on Retina):** a small neural network trained on macOS text (`TextUpscaler.swift`, `tools/text-upscaler`). It learned from CoreText drawing the same layouts at 1× and natively at 2×. Glyphs come out closer to how a Retina screen draws them: SSIM against a native 2× rendering is 0.972 on text, against 0.955 for FSR. There are no stair steps and no blur. While the picture is unchanged it costs nothing extra; a GPU too slow for it falls back to FSR.
+**Enlarging, exactly 2× (Actual Size on Retina):** a small neural network trained on macOS text (`TextUpscaler.swift`, `tools/text-upscaler`). It learned from CoreText drawing the same layouts at 1× and natively at 2×. Glyphs come out closer to how a Retina screen draws them: SSIM against a native 2× rendering is 0.972 on text, against 0.955 for FSR. There are no stair steps and no blur. The smallest text (9–12 px) gains structure (SSIM 0.940 vs 0.934) but loses 0.5 dB PSNR against FSR (`tools/text-upscaler/README.md`). While the picture is unchanged it costs nothing extra; a GPU too slow for it falls back to FSR.
 
 **Enlarging at any other scale:** AMD FSR 1 (EASU edge-adaptive upscaling plus RCAS sharpening, `FSR.swift`).
 

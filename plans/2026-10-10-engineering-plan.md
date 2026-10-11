@@ -1015,10 +1015,12 @@ macOS keys the display arrangement to the whole display configuration, not to ve
 | R8 | The HDMI bridge truncates luma: Y = 16 + ⌊(66R + 129G + 25B)/256⌋, which matches every gray step of the ramp | The app adds half a code value above black |
 | R9 | The Finder screen changed ~15% of its pixels every frame (±5). That was the animated wallpaper behind translucent windows, not dithering; the opaque test page is static except ±2 in its gradients | Cost-based stillness handles both |
 | R10 | Restoring the default EDID after the §22 tests needed a reboot; a plain `reboot` hangs while the test build runs (`RkLunch-stop.sh` waits for `jetkvm_app`) | DEPLOY.md: kill the test build first |
+| R11 | The review found that typing never triggered a refresh: a typed glyph costs 530–1,000 bytes, below the first design's 1,500-byte "change" threshold, and empty P-frames range 150–460 bytes by screen | Change = cost above a measured baseline, summed over ~3 s (a caret blinks below it) |
+| R12 | With the keyframe floor at `stillQp`, PLI keyframes on a still desktop grow from 87 to 103 KB (default parameters) and from 136 to 165 KB (maximum level) | Accepted: moving the floor per refresh would restart RC (R2) |
 
 ### Design
-- **Firmware (still refresh):** after 30 cheap P-frames following any activity, a whole-frame ROI with absolute QP `stillQp` is set and a keyframe is requested. "Cheap" means below 1,500 bytes, or an eighth of the per-frame budget. Refreshes are at least 1.5 s apart, and other keyframes count as activity.
-- **Firmware (other changes):** the GOP is 60 s, the frame socket limit is raised to 3.1 MB, and super frames re-encode above 2.5 MiB.
+- **Firmware (still refresh):** each P-frame's cost above the empty-frame baseline (the smallest frame of the last one to two seconds) feeds two decaying sums. Over ~3 s, 2,000 bytes mark the picture as changed (typing does, a blinking caret doesn't); over ~0.1 s, the sum tells when the changes have stopped. Half a second later a whole-frame ROI with absolute QP `stillQp` is set and a keyframe is requested. Frames above an eighth of the per-frame budget (1,500 bytes at least) and other keyframes count as changes. Refreshes are at least 1.5 s apart; refreshes above 1.5 MiB raise the next ones' QP.
+- **Firmware (other changes):** the GOP is 60 s, the stream buffer and frame socket limit are raised to 2 bytes per pixel of 1920×1200 (4.6 MB), and super frames re-encode above 2.5 MiB.
 - **Engine:** the quality ladder gains `stillQp`. Maximum uses 1, high 4, balanced 8 and low 17; minimal skips the refresh, because a 0.2–0.4 MB burst would turn into loss on a slow link.
 - **App, chroma from luma:** a 3×3 linear fit per chroma site, the fit's mean applied to full-resolution luma, and one back-projection step.
 - **App, other changes:** a luma correction for the bridge's truncation, a 10-bit layer, and the 2× text upscaler (below).
@@ -1055,11 +1057,12 @@ Frame rate stays at 60 fps throughout.
 The reference is the test pattern drawn natively at 2× (`make_pattern.swift OUT 2`).
 - **Classical filters:** they all land within 0.2 dB of each other, and FSR's sharpening strength doesn't matter.
 - **Text upscaler:** a small network trained on CoreText 1×/2× pairs (`tools/text-upscaler`) raises SSIM from 0.955 to 0.972 on text, 0.941 to 0.965 on dark text and 0.957 to 0.978 on colored text. The table is in that README.
-- **Performance:** my first Metal kernels spilled registers (11 ms). An MPS attempt cost about the same; its output was wrong, and I abandoned it rather than debug it further. The final 8-channel kernels cost about +2 ms per changed frame for 3000×2000 on an M4 Max and nothing on unchanged frames (a GPU compare pass). Over 8 ms per frame, the app falls back to FSR.
+- **Performance:** my first Metal kernels spilled registers (11 ms). An MPS attempt cost about the same; its output was wrong, and I abandoned it rather than debug it further. The final 8-channel kernels cost about +2 ms per changed frame for 3000×2000 on an M4 Max and nothing on unchanged frames (a GPU compare pass). A GPU that needs over 8 ms for frames that run it, three 120-frame windows in a row, falls back to FSR.
 
 ### Decisions (worth revisiting)
 - The still refresh is on in the firmware by default (`stillQp` 8 for clients without a governor, such as the web UI), and the GOP defaults to 60 s.
-- The refresh fires after 0.5 s of quiet, at most every 1.5 s. A typing session therefore costs a refresh per pause: up to ~2 Mbit/s at QP 1 on maximum, which is fine on a LAN.
+- The refresh fires after 0.5 s of quiet, at most every 1.5 s. A typing session therefore costs a refresh per pause (~300 KB at QP 1 on maximum for a Terminal window): up to ~2 Mbit/s, which is fine on a LAN. An idle blinking caret causes none.
+- The keyframe floor stays at `stillQp` permanently, so loss-recovery keyframes are ~20% larger (R12).
 - No deband filter. Still screens now reach 52 dB on gradients, and a deband filter risks softening text. Banding during motion at the lower levels remains.
 - No 4:4:4 (the RV1106 encoder has no 4:4:4 mode) and no full-range bridge output: that would need register writes behind the kernel driver.
 - The text upscaler is used only at exactly 2×; other scales keep FSR.
