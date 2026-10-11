@@ -1,15 +1,18 @@
 // Renders the 1920x1080 ground-truth test image (sRGB, 1x, grayscale text
 // antialiasing as macOS draws it) used to score the KVM stream.
+// `make_pattern.swift OUT.png 2` renders the same layout at 2x, as a Retina
+// screen would draw it natively: the reference for enlarging 1x pictures.
 import AppKit
 import CoreText
 
 let W = 1920, H = 1080
+let S = CommandLine.arguments.count > 2 ? Int(CommandLine.arguments[2]) ?? 1 : 1
 let space = CGColorSpace(name: CGColorSpace.sRGB)!
-let ctx = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: W * 4, space: space,
+let ctx = CGContext(data: nil, width: W * S, height: H * S, bitsPerComponent: 8, bytesPerRow: W * S * 4, space: space,
                     bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
-// Top-left origin like a screen.
-ctx.translateBy(x: 0, y: CGFloat(H))
-ctx.scaleBy(x: 1, y: -1)
+// Top-left origin like a screen, in 1x units.
+ctx.translateBy(x: 0, y: CGFloat(H * S))
+ctx.scaleBy(x: CGFloat(S), y: -CGFloat(S))
 ctx.setShouldSmoothFonts(false)
 ctx.setAllowsFontSmoothing(false)
 ctx.setShouldSubpixelPositionFonts(true)
