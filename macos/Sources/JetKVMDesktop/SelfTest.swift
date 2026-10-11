@@ -315,6 +315,8 @@ final class SelfTest {
         ]
         if let firstFrame { report["firstFrameSeconds"] = firstFrame }
         report["freezes"] = ["count": freezes.count, "longestMs": freezes.max() ?? 0, "totalMs": freezes.reduce(0, +)]
+        report["scalingFilter"] = controller.videoView.scalingFilter.rawValue
+        if let fps = controller.snapshot.VideoFPS { report["remoteRefresh"] = fps }
         report["hiddenMs"] = hiddenMs.rounded()
         if hideAfter != nil { report["resumedAfterShowMs"] = resumed ?? -1 }
         report["stallOverlay"] = overlayEvents.map { ["at": ($0.0 * 10).rounded() / 10, "title": $0.1 ?? "hidden"] as [String: Any] }

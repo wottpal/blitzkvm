@@ -157,6 +157,7 @@ public struct SessionSnapshot: Decodable, Equatable {
     public var VideoSignal: String?
     public var VideoWidth: Int?
     public var VideoHeight: Int?
+    public var VideoFPS: Double?
     public var PasteInProgress: Bool?
     public var KeyboardLEDs: Int?
     public var ActiveExtension: String?

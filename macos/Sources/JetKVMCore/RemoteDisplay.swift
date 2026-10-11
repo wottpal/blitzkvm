@@ -6,9 +6,12 @@ import Foundation
 ///
 /// Limits measured on a JetKVM (TC358749 HDMI bridge, RV1106) with a Mac host
 /// (plan section 22):
-/// - 640×400 up to 2176 wide and 1200 high, within the bridge's 165 MHz pixel
-///   clock at 60 Hz (1920×1200, or 2176×900 for a 21:9 window). Wider lines
-///   break the FIFO rule below even at 165 MHz.
+/// - Two links (plan section 28). Above 33 Hz the bridge sends over CSI at
+///   186.25 Mpx/s: up to 2496 wide and 1200 high within its 165 MHz pixel
+///   clock (2432×1004 for a 21:9 window at 60 Hz). At 33 Hz or less its driver
+///   slows the link to 109.7 Mpx/s, and a pixel clock just under that streams
+///   any width up to 3840: 3008×1268 at 25 Hz, limited by the device's
+///   capture buffers (`captureMaxBytes`) and its encoder (~160 Mpx/s).
 /// - Width a multiple of 16: the device's encoder reads lines at a stride
 ///   rounded up to 16 pixels, so other widths come out sheared. Height a
 ///   multiple of 4. An odd height hung the device until it was power-cycled.
@@ -33,28 +36,85 @@ public enum RemoteDisplay {
     }
 
     public static let minimum = Size(width: 640, height: 400)
-    /// Bounds on each side; the pixel clock limits the area within them.
-    public static let maximum = Size(width: 2176, height: 1200)
+    /// Bounds on each side on the fast link (above 33 Hz); the pixel clock
+    /// limits the area within them. 2496 keeps a line's FIFO drift under the
+    /// 291 pixels measured clean (2560×960 at 60 Hz).
+    public static let maximum = Size(width: 2496, height: 1200)
+    /// Bounds on the slow link: lines of at most 4000 pixels stream.
+    public static let slowLinkMaximum = Size(width: 3840, height: 2160)
     public static let maxPixelClockKHz = 165_000
+    /// The encoder (RV1106 VEPU) takes 12.9 ms per 1080p frame.
+    static let maxEncodePixelsPerSecond = 160e6
+    /// Capture buffers of stock firmware and fork releases before D10.
+    public static let defaultCaptureMaxBytes = 1920 * 1080 * 3
+    /// Refresh rates offered, fast link then slow link.
+    public static let refreshRates = [60, 50, 40, 30, 25, 24]
+
+    /// A display mode: size and refresh rate.
+    public struct Mode: Equatable, CustomStringConvertible {
+        public var size: Size
+        public var refresh: Int
+
+        public init(_ size: Size, refresh: Int = 60) {
+            self.size = size
+            self.refresh = refresh
+        }
+
+        public var description: String { "\(size) at \(refresh) Hz" }
+    }
+
+    /// The mode for a view of `width`×`height` remote pixels: the same size
+    /// rounded down to the steps at `refresh` Hz, or the largest of its shape
+    /// that the bridge, the capture buffers and the encoder carry at that
+    /// rate. `refresh` nil picks the largest size and then the highest rate
+    /// that reaches it (60 Hz whenever the view fits at 60 Hz).
+    public static func mode(fitting width: Double, _ height: Double, refresh: Int? = nil,
+                            captureMaxBytes: Int = defaultCaptureMaxBytes) -> Mode {
+        guard let refresh else {
+            let modes = refreshRates.map { mode(fitting: width, height, refresh: $0, captureMaxBytes: captureMaxBytes) }
+            let largest = modes.map { $0.size.width * $0.size.height }.max() ?? 0
+            // The first (highest rate) within 1 % of the largest size.
+            return modes.first { $0.size.width * $0.size.height * 100 >= largest * 99 } ?? modes[0]
+        }
+        guard width > 0, height > 0 else { return Mode(minimum, refresh: refresh) }
+        let bounds = refresh <= slowLinkMaxRefresh ? slowLinkMaximum : maximum
+        // The view's size within the bounds (keeping its shape), then ever
+        // narrower sizes of that shape until one streams.
+        let shrink = max(1, width / Double(bounds.width), height / Double(bounds.height))
+        var size = clamped(width / shrink, height / shrink, maximum: bounds)
+        let aspect = height / width
+        while size.width > minimum.width && !fits(size, refresh: refresh, captureMaxBytes: captureMaxBytes) {
+            let w = size.width - widthStep
+            let h = Int(Double(w) * aspect) / heightStep * heightStep
+            size = Size(width: w, height: min(max(h, minimum.height), bounds.height))
+        }
+        return Mode(size, refresh: refresh)
+    }
+
+    /// Whether `size` streams at `refresh` Hz.
+    public static func fits(_ size: Size, refresh: Int, captureMaxBytes: Int = defaultCaptureMaxBytes) -> Bool {
+        guard size.width * size.height * 2 <= captureMaxBytes,
+              Double(size.width * size.height * refresh) <= maxEncodePixelsPerSecond else { return false }
+        if refresh <= slowLinkMaxRefresh {
+            let t = slowLinkTiming(for: size, refresh: refresh)
+            return size.width <= slowLinkMaximum.width && size.height <= slowLinkMaximum.height
+                && t.pixelClockKHz <= Int(slowLinkPixelClockMHz * 1000)
+        }
+        return size.width <= maximum.width && size.height <= maximum.height
+            && fastLinkTiming(for: size, refresh: refresh).pixelClockKHz <= maxPixelClockKHz
+    }
     public static let widthStep = 16
     public static let heightStep = 4
 
-    /// The display size for a view of `width`×`height` remote pixels: the
-    /// same size rounded down to the steps. Views beyond the limits get the
-    /// largest size of their aspect ratio, which the picture is scaled to.
+    /// The 60 Hz display size for a view of `width`×`height` remote pixels
+    /// (see mode(fitting:)).
     public static func size(fitting width: Double, _ height: Double) -> Size {
-        guard width > 0, height > 0 else { return minimum }
-        var shrink = max(1, width / Double(maximum.width), height / Double(maximum.height))
-        while true {
-            let size = clamped(width / shrink, height / shrink)
-            if timing(for: size).pixelClockKHz <= maxPixelClockKHz || size == minimum { return size }
-            shrink *= 1.005
-        }
+        mode(fitting: width, height, refresh: 60, captureMaxBytes: .max).size
     }
 
     /// `width`×`height` grown to the minimum (keeping its shape) and snapped
     /// down to the steps within the bounds.
-    private static func clamped(_ width: Double, _ height: Double) -> Size {
+    private static func clamped(_ width: Double, _ height: Double, maximum: Size) -> Size {
         var w = width, h = height
         if w < Double(minimum.width) || h < Double(minimum.height) {
             let grow = max(Double(minimum.width) / w, Double(minimum.height) / h)
@@ -79,10 +139,41 @@ public enum RemoteDisplay {
         public var vTotal: Int { height + vBlank }
     }
 
+    /// The bridge's CSI output in megapixels per second (4 lanes, 16 bit per
+    /// pixel). Its driver (tc35874x) runs the link at 745 Mbit/s a lane above
+    /// 33 Hz and at 438.75 Mbit/s a lane at 33 Hz or less.
+    public static let fastCSIMegapixels = 186.25
+    public static let slowCSIMegapixels = 109.6875
+    /// Refresh rates up to this use the slow link.
+    public static let slowLinkMaxRefresh = 33
+    /// Pixel clock for slow-link modes: just under the link's drain rate, so
+    /// a line's pixels leave the FIFO about as fast as they arrive and any
+    /// width streams (2 % margin for clock tolerance).
+    static let slowLinkPixelClockMHz = 107.5
+
+    /// The display timing for `size` at `refresh` Hz (pixels, lines, kHz).
+    public static func timing(for size: Size, refresh: Int = 60) -> Timing {
+        refresh <= slowLinkMaxRefresh ? slowLinkTiming(for: size, refresh: refresh) : fastLinkTiming(for: size, refresh: refresh)
+    }
+
+    /// Slow link: minimal horizontal blanking, lines padded vertically so the
+    /// pixel clock sits just under the link rate.
+    static func slowLinkTiming(for size: Size, refresh: Int) -> Timing {
+        let w = size.width, h = size.height, hz = Double(refresh)
+        let vSync = cvtVSync(width: w, height: h)
+        let hTotal = w + 160
+        let lineMicros = Double(hTotal) / slowLinkPixelClockMHz
+        let minVTotal = h + max(Int(460 / lineMicros) + 1, 3 + vSync + 6)
+        let vTotal = max(minVTotal, Int(slowLinkPixelClockMHz * 1e6 / (hz * Double(hTotal))))
+        let clock10kHz = (hz * Double(vTotal) * Double(hTotal) / 1e4).rounded()
+        return Timing(width: w, height: h, hBlank: hTotal - w, hFrontPorch: 48, hSync: 32,
+                      vBlank: vTotal - h, vFrontPorch: 3, vSync: vSync, pixelClockKHz: Int(clock10kHz) * 10)
+    }
+
     /// CVT 1.2 reduced-blanking vertical timing; lines padded to keep the
     /// pixel clock where the bridge streams cleanly (see the type comment).
-    public static func timing(for size: Size) -> Timing {
-        let w = size.width, h = size.height, hz = 60.0
+    static func fastLinkTiming(for size: Size, refresh: Int) -> Timing {
+        let w = size.width, h = size.height, hz = Double(refresh)
         let vSync = cvtVSync(width: w, height: h)
         let minVBlankMicros = 460.0
         let hPeriod = (1e6 / hz - minVBlankMicros) / Double(h)
@@ -91,11 +182,15 @@ public enum RemoteDisplay {
         // The CSI output (4 lanes, 2980 Mbit/s, 16 bit/pixel) may lead the
         // input by at most ~250 of the FIFO's 300 pixels per line.
         let targetMHz = min(165, max(hz * Double(vTotal * hTotal) / 1e6, 186.25 * (1 - 250 / Double(w))))
-        hTotal = max(hTotal, Int((targetMHz * 1e6 / (hz * Double(vTotal)) / 8).rounded(.up)) * 8)
+        // Lines in steps of 8 pixels, rounded up for the FIFO; at the clock
+        // limit rounded down instead, so the clock stays within it.
+        let lineSteps = targetMHz * 1e6 / (hz * Double(vTotal)) / 8
+        hTotal = max(hTotal, Int(targetMHz < 165 ? lineSteps.rounded(.up) : lineSteps.rounded(.down)) * 8)
         let maxLine = min(4000, w * 15 / 4 / 8 * 8)
         if hTotal > maxLine {
             hTotal = max(w + 160, maxLine)
-            vTotal = max(vTotal, Int((targetMHz * 1e6 / (hz * Double(hTotal))).rounded(.up)))
+            let lines = targetMHz * 1e6 / (hz * Double(hTotal))
+            vTotal = max(vTotal, Int(targetMHz < 165 ? lines.rounded(.up) : lines.rounded(.down)))
         }
         let clock10kHz = (hz * Double(vTotal) * Double(hTotal) / 1e4).rounded()
         return Timing(width: w, height: h, hBlank: hTotal - w, hFrontPorch: 48, hSync: 32,
@@ -122,11 +217,11 @@ public enum RemoteDisplay {
     /// CTA extension's video modes are removed, so the host has no other
     /// mode to pick (the CTA preference block that ranks them stays). Physical size is set to 96 dpi, which hosts treat as
     /// a standard-density display. Applying it again gives the same bytes.
-    public static func edid(_ edid: [UInt8], advertising size: Size) throws -> [UInt8] {
+    public static func edid(_ edid: [UInt8], advertising size: Size, refresh: Int = 60) throws -> [UInt8] {
         let header: [UInt8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
         guard edid.count >= 128, edid.count % 128 == 0, Array(edid[0..<8]) == header else { throw EDIDError.invalid }
         var out = edid
-        let t = timing(for: size)
+        let t = timing(for: size, refresh: refresh)
         let mmWidth = Int((Double(size.width) * 25.4 / 96).rounded())
         let mmHeight = Int((Double(size.height) * 25.4 / 96).rounded())
         out[21] = UInt8(min(255, (mmWidth + 5) / 10))
@@ -141,7 +236,7 @@ public enum RemoteDisplay {
             // Keep display descriptors (name, serial, range limits…); drop
             // timings and dummies.
             guard d[0] == 0, d[1] == 0, d[3] != 0x10 else { continue }
-            if d[3] == 0xFD { widenRangeLimits(&d, for: t) }
+            if d[3] == 0xFD { widenRangeLimits(&d, for: t, refresh: refresh) }
             descriptors.append(d)
         }
         while descriptors.count < 4 { descriptors.append([0, 0, 0, 0x10] + [UInt8](repeating: 0, count: 14)) }
@@ -178,9 +273,9 @@ public enum RemoteDisplay {
 
     /// Range limits must admit the new mode (vertical Hz, horizontal kHz,
     /// pixel clock in 10 MHz).
-    static func widenRangeLimits(_ d: inout [UInt8], for t: Timing) {
+    static func widenRangeLimits(_ d: inout [UInt8], for t: Timing, refresh: Int = 60) {
         let hKHz = t.pixelClockKHz / t.hTotal
-        d[5] = min(d[5], 50)
+        d[5] = min(d[5], UInt8(min(50, refresh - 1)))
         d[6] = max(d[6], 61)
         d[7] = min(d[7], UInt8(max(1, hKHz - 1)))
         d[8] = max(d[8], UInt8(min(255, hKHz + 2)))

@@ -22,6 +22,45 @@ public enum ScalingMode: String, CaseIterable {
     case matchWindow
 }
 
+/// How the picture is resampled to the window (View › Scaling Filter).
+/// Shrinking always averages (antialiased); the choice matters for
+/// enlarging.
+public enum ScalingFilter: String, CaseIterable {
+    /// The learned text upscaler at exactly 2×, FSR 1 at other enlargements.
+    case automatic
+    /// AMD FSR 1: edge-adaptive upscaling (EASU) plus light sharpening (RCAS).
+    case fsr
+    /// FSR 1 with full sharpening.
+    case fsrSharp
+    /// FSR 1's edge-adaptive upscaling alone.
+    case easu
+    /// Lanczos-3: the sharpest classic filter, faint ringing at hard edges.
+    case lanczos
+    /// Catmull-Rom bicubic: sharp, little ringing.
+    case catmullRom
+    /// Each pixel stays a crisp square; only pixels straddling two blend them
+    /// (area-weighted nearest neighbor).
+    case sharpBilinear
+    /// Bilinear: smooth, soft.
+    case bilinear
+    /// Nearest neighbor: exact pixels, uneven at fractional scales.
+    case nearest
+
+    public var menuTitle: String {
+        switch self {
+        case .automatic: return "Automatic (Text Upscaler at 2×, FSR 1 Otherwise)"
+        case .fsr: return "FSR 1 (Edge-Adaptive, Light Sharpening)"
+        case .fsrSharp: return "FSR 1, Strong Sharpening"
+        case .easu: return "FSR 1, No Sharpening"
+        case .lanczos: return "Lanczos-3 (Sharpest Classic)"
+        case .catmullRom: return "Catmull-Rom Bicubic"
+        case .sharpBilinear: return "Sharp Bilinear (Crisp Pixels, Smooth Seams)"
+        case .bilinear: return "Bilinear (Soft)"
+        case .nearest: return "Nearest Neighbor (Exact Pixels)"
+        }
+    }
+}
+
 public struct VideoLayout: Equatable {
     /// Destination rectangle in physical pixels (origin top-left). It may
     /// extend beyond the drawable when the video is larger (panning).

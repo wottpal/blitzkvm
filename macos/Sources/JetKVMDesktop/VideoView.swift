@@ -28,6 +28,11 @@ class VideoView: NSView {
         get { state.withLock { $0.matchScale } }
         set { state.withLock { $0.matchScale = newValue }; redraw() }
     }
+    /// How enlargements are resampled (View › Scaling Filter).
+    var scalingFilter: ScalingFilter {
+        get { state.withLock { $0.filter } }
+        set { state.withLock { $0.filter = newValue }; redraw() }
+    }
     /// Nearest-neighbor at whole-number scales instead of FSR.
     var exactPixels: Bool {
         get { state.withLock { $0.exactPixels } }
@@ -52,6 +57,7 @@ class VideoView: NSView {
     private struct State {
         var mode: ScalingMode = .actualSize
         var exactPixels = false
+        var filter = ScalingFilter.automatic
         var matchScale: Double = 1
         var pan: (x: Double, y: Double) = (0.5, 0.5)
         var pointScale: Double = 2
@@ -303,7 +309,36 @@ class VideoView: NSView {
         return float4(saturate(c + r), 1.0);
     }
 
+    // filter: 0 nearest, 1 Catmull-Rom, 2 Lanczos-3, 3 bilinear, 4 sharp
+    // bilinear (area-weighted nearest).
     struct ScaleParams { float2 origin; float2 scale; int filter; };
+
+    static float lanczos3(float x) {
+        x = abs(x);
+        if (x < 1e-5) return 1.0;
+        if (x >= 3.0) return 0.0;
+        float px = M_PI_F * x;
+        return 3.0 * sin(px) * sin(px / 3.0) / (px * px);
+    }
+
+    static float kernelWeight(int filter, float x) {
+        if (filter == 2) return lanczos3(x);
+        if (filter == 3) return max(0.0, 1.0 - abs(x));
+        return catmullRom(x);
+    }
+
+    static float kernelRadius(int filter) {
+        return filter == 2 ? 3.0 : (filter == 3 ? 1.0 : 2.0);
+    }
+
+    // The two texels an output pixel's footprint (width 1/scale, at most one
+    // texel when enlarging) overlaps, and the share of the first.
+    static void areaTaps(float s, float halfWidth, thread int &i0, thread float &w0) {
+        float lo = s - halfWidth, hi = s + halfWidth;
+        i0 = int(floor(lo));
+        float boundary = float(i0 + 1);
+        w0 = hi <= boundary ? 1.0 : (boundary - lo) / (hi - lo);
+    }
 
     static float4 texel(texture2d<float, access::read> t, int2 p, int2 size) {
         return t.read(uint2(clamp(p, int2(0), size - 1)));
@@ -318,19 +353,33 @@ class VideoView: NSView {
         if (p.filter == 0) {
             return texel(src, int2(floor(s)), size);
         }
+        int filter = p.filter;
+        if (filter == 4) {
+            if (all(p.scale >= 1.0)) {
+                int ix, iy;
+                float wx0, wy0;
+                areaTaps(s.x, 0.5 / p.scale.x, ix, wx0);
+                areaTaps(s.y, 0.5 / p.scale.y, iy, wy0);
+                float4 top = mix(texel(src, int2(ix + 1, iy), size), texel(src, int2(ix, iy), size), wx0);
+                float4 bottom = mix(texel(src, int2(ix + 1, iy + 1), size), texel(src, int2(ix, iy + 1), size), wx0);
+                return mix(bottom, top, wy0);
+            }
+            filter = 1; // shrinking: antialiased like the others
+        }
         float2 center = s - 0.5;                            // texel i centered at i
-        // Shrinking: Catmull-Rom widened by 1/scale averages every source
+        // Shrinking: the kernel widened by 1/scale averages every source
         // texel that falls into the output pixel (no aliasing, no shimmer).
-        float2 widen = clamp(1.0 / p.scale, 1.0, 4.0);
-        int2 lo = int2(ceil(center - 2.0 * widen));
-        int2 hi = min(int2(floor(center + 2.0 * widen)), lo + 16);
-        float wx[17];
+        float radius = kernelRadius(filter);
+        float2 widen = clamp(1.0 / p.scale, 1.0, 12.0 / radius);
+        int2 lo = int2(ceil(center - radius * widen));
+        int2 hi = min(int2(floor(center + radius * widen)), lo + 24);
+        float wx[25];
         float sx = 0;
-        for (int i = lo.x; i <= hi.x; i++) { wx[i - lo.x] = catmullRom((center.x - float(i)) / widen.x); sx += wx[i - lo.x]; }
+        for (int i = lo.x; i <= hi.x; i++) { wx[i - lo.x] = kernelWeight(filter, (center.x - float(i)) / widen.x); sx += wx[i - lo.x]; }
         float4 sum = 0;
         float sy = 0;
         for (int j = lo.y; j <= hi.y; j++) {
-            float wy = catmullRom((center.y - float(j)) / widen.y);
+            float wy = kernelWeight(filter, (center.y - float(j)) / widen.y);
             if (wy == 0.0) continue;
             float4 row = 0;
             for (int i = lo.x; i <= hi.x; i++) row += wx[i - lo.x] * texel(src, int2(i, j), size);
@@ -588,7 +637,9 @@ class VideoView: NSView {
                 let identity = abs(scale - 1) < 0.0001
                 // Whole-multiple mode exists for exact pixels; elsewhere it is a preference.
                 let exactNearest = l.nearest && (s.exactPixels || s.mode == .integer)
-                let upscale = Self.textUpscaling && abs(scale - 2) < 0.0001 && !exactNearest && !textUpscalerTooSlow.withLock({ $0 })
+                let fsrFilter = [.automatic, .fsr, .fsrSharp, .easu].contains(s.filter)
+                let upscale = s.filter == .automatic && Self.textUpscaling && abs(scale - 2) < 0.0001 && !exactNearest
+                    && !textUpscalerTooSlow.withLock({ $0 })
                 state.withLock { $0.textUpscaling = upscale }
                 if upscale, let upscaler = textUpscaler,
                    let (detail, regionOrigin) = enlarge2x(upscaler, source: source, layout: l, visible: (x0, y0, x1, y1),
@@ -603,21 +654,46 @@ class VideoView: NSView {
                         encoder.setFragmentBytes(&params, length: MemoryLayout<ComposeParams>.stride, index: 0)
                         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                     }
-                } else if Self.fsrUpscaling, scale >= 1 && !identity && !exactNearest,
+                } else if fsrFilter, Self.fsrUpscaling || s.filter != .automatic, scale >= 1 && !identity && !exactNearest,
                    let easu = easu(source: source, layout: l, visible: (x0, y0, x1, y1), commandBuffer: commandBuffer) {
-                    var params = FSR.rcasConstants(sharpnessStops: Self.rcasStops, outputOrigin: SIMD2(Int32(x0), Int32(y0)))
-                    draw = { encoder in
-                        encoder.setRenderPipelineState(self.rcasPipeline)
-                        encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
-                        encoder.setFragmentTexture(easu, index: 0)
-                        encoder.setFragmentBytes(&params, length: MemoryLayout<FSR.RcasParams>.stride, index: 0)
-                        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                    if s.filter == .easu {
+                        // The EASU output covers the visible rect pixel for pixel.
+                        var params = ScaleParams(origin: SIMD2(Float(x0), Float(y0)), scale: SIMD2(repeating: 1), filter: 0)
+                        draw = { encoder in
+                            encoder.setRenderPipelineState(self.scalePipeline)
+                            encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+                            encoder.setFragmentTexture(easu, index: 0)
+                            encoder.setFragmentBytes(&params, length: MemoryLayout<ScaleParams>.stride, index: 0)
+                            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                        }
+                    } else {
+                        let stops = s.filter == .fsrSharp ? 0 : Self.rcasStops
+                        var params = FSR.rcasConstants(sharpnessStops: stops, outputOrigin: SIMD2(Int32(x0), Int32(y0)))
+                        draw = { encoder in
+                            encoder.setRenderPipelineState(self.rcasPipeline)
+                            encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+                            encoder.setFragmentTexture(easu, index: 0)
+                            encoder.setFragmentBytes(&params, length: MemoryLayout<FSR.RcasParams>.stride, index: 0)
+                            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                        }
                     }
                 } else {
-                    // Nearest-neighbor at whole-number scales, otherwise shrinking.
-                    let nearest = scale >= 1 && (Self.fsrUpscaling || exactNearest)
+                    // Exact pixels and FSR's identity case use nearest; the
+                    // chosen kernel otherwise (FSR filters shrink with
+                    // Catmull-Rom).
+                    let filter: Int32
+                    switch s.filter {
+                    case _ where exactNearest || (identity && fsrFilter): filter = 0
+                    case .automatic where !Self.fsrUpscaling: filter = 1
+                    case .automatic, .fsr, .fsrSharp, .easu: filter = scale >= 1 ? 0 : 1
+                    case .nearest: filter = 0
+                    case .catmullRom: filter = 1
+                    case .lanczos: filter = 2
+                    case .bilinear: filter = 3
+                    case .sharpBilinear: filter = 4
+                    }
                     var params = ScaleParams(origin: SIMD2(Float(l.x), Float(l.y)), scale: SIMD2(repeating: Float(scale)),
-                                             filter: nearest ? 0 : 1)
+                                             filter: filter)
                     draw = { encoder in
                         encoder.setRenderPipelineState(self.scalePipeline)
                         encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)

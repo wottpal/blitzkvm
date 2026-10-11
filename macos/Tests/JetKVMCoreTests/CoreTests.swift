@@ -360,14 +360,16 @@ final class RemoteDisplayTests: XCTestCase {
         XCTAssertEqual(RemoteDisplay.size(fitting: 1504, 944), S(width: 1504, height: 944))
         XCTAssertEqual(RemoteDisplay.size(fitting: 1511, 947), S(width: 1504, height: 944))
         // Beyond the limits: the largest size of the same shape the pixel
-        // clock allows.
-        XCTAssertEqual(RemoteDisplay.size(fitting: 2400, 1300), S(width: 2128, height: 1160))
+        // clock allows at 60 Hz.
+        XCTAssertEqual(RemoteDisplay.size(fitting: 2400, 1300), S(width: 2144, height: 1160))
         XCTAssertEqual(RemoteDisplay.size(fitting: 500, 300), S(width: 656, height: 400))
-        XCTAssertEqual(RemoteDisplay.size(fitting: 3000, 300), S(width: 2176, height: 400))
+        // Wider than the minimum height allows: narrows until it streams
+        // (this once looped forever).
+        XCTAssertEqual(RemoteDisplay.size(fitting: 3000, 300), S(width: 2496, height: 400))
         // A 40" 21:9 display in full screen (3008×1269 points), with and
         // without the status bar.
-        XCTAssertEqual(RemoteDisplay.size(fitting: 3008, 1247), S(width: 2176, height: 900))
-        XCTAssertEqual(RemoteDisplay.size(fitting: 3008, 1269), S(width: 2160, height: 912))
+        XCTAssertEqual(RemoteDisplay.size(fitting: 3008, 1247), S(width: 2448, height: 1012))
+        XCTAssertEqual(RemoteDisplay.size(fitting: 3008, 1269), S(width: 2432, height: 1024))
         XCTAssertEqual(RemoteDisplay.size(fitting: 2560, 1600), S(width: 1920, height: 1200))
         for (w, h) in [(5000.0, 2000.0), (2400, 1300), (1700, 1700), (4000, 900), (2300, 1000)] {
             let size = RemoteDisplay.size(fitting: w, h)
@@ -375,6 +377,44 @@ final class RemoteDisplayTests: XCTestCase {
             XCTAssertLessThanOrEqual(size.width, RemoteDisplay.maximum.width)
             XCTAssertLessThanOrEqual(size.height, RemoteDisplay.maximum.height)
         }
+    }
+
+    func testModeTakesTheLargestPictureThenTheHighestRate() {
+        typealias S = RemoteDisplay.Size
+        typealias M = RemoteDisplay.Mode
+        let large = 8 << 20
+        // Fits at 60 Hz: stays at 60 Hz.
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 1504, 944, captureMaxBytes: large), M(S(width: 1504, height: 944)))
+        // The 40" full screen: 1:1 at 25 Hz with the fork's capture buffers,
+        // the largest stock buffers allow at 30 Hz otherwise.
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1268, captureMaxBytes: large), M(S(width: 3008, height: 1268), refresh: 25))
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1247), M(S(width: 2736, height: 1132), refresh: 30))
+        // A fixed rate: the largest size of the shape at that rate.
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1247, refresh: 60, captureMaxBytes: large), M(S(width: 2448, height: 1012)))
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1247, refresh: 50, captureMaxBytes: large), M(S(width: 2496, height: 1032), refresh: 50))
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1247, refresh: 30, captureMaxBytes: large), M(S(width: 2832, height: 1172), refresh: 30))
+        for (w, h) in [(6016.0, 2538.0), (3000, 300), (2400, 1350), (900, 3000)] {
+            for refresh in RemoteDisplay.refreshRates {
+                let mode = RemoteDisplay.mode(fitting: w, h, refresh: refresh, captureMaxBytes: large)
+                XCTAssertTrue(RemoteDisplay.fits(mode.size, refresh: refresh, captureMaxBytes: large) || mode.size.width == RemoteDisplay.minimum.width,
+                              "\(w)×\(h) at \(refresh) Hz: \(mode)")
+            }
+        }
+    }
+
+    /// Timings at other rates measured to stream cleanly (2026-10-11). At
+    /// 33 Hz or less the pixel clock sits just under the bridge's slower
+    /// 109.7 Mpx/s CSI rate.
+    func testOtherRefreshTimingsMatchTheOnesVerifiedOnTheDevice() {
+        for (w, h, hz, hTotal, vTotal, clock) in [(2560, 1080, 30, 2720, 1317, 107470), (3008, 1268, 25, 3168, 1357, 107470),
+                                                  (2800, 1172, 30, 2960, 1210, 107450), (2496, 1044, 50, 3080, 1069, 164630)] {
+            let t = RemoteDisplay.timing(for: .init(width: w, height: h), refresh: hz)
+            XCTAssertEqual([t.hTotal, t.vTotal, t.pixelClockKHz], [hTotal, vTotal, clock], "\(w)×\(h) at \(hz) Hz")
+        }
+        XCTAssertFalse(RemoteDisplay.fits(.init(width: 3008, height: 1268), refresh: 30, captureMaxBytes: 8 << 20),
+                       "needs a pixel clock above the slow link")
+        XCTAssertFalse(RemoteDisplay.fits(.init(width: 3008, height: 1268), refresh: 25),
+                       "larger than stock capture buffers")
     }
 
     /// Timings measured to stream cleanly on a JetKVM with a Mac host
@@ -388,6 +428,7 @@ final class RemoteDisplayTests: XCTestCase {
             // Wider than 1920 (2026-10-11, fork firmware, Mac mini host).
             (2176, 900, 792, 26, 10, 164900), (2160, 912, 768, 26, 10, 164790),
             (2112, 1168, 168, 34, 10, 164430), (2048, 1152, 256, 33, 5, 163810),
+            (2448, 1024, 160, 30, 10, 164930),
         ]
         for (w, h, hBlank, vBlank, vSync, clock) in verified {
             let t = RemoteDisplay.timing(for: .init(width: w, height: h))

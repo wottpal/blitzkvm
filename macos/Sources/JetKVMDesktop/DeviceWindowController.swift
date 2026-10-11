@@ -63,7 +63,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// connected or the remote display was last asked to resize.
     private var stallSince: UInt64?
     private var connectedAt: UInt64 = 0
-    private var resizeRequest: (at: UInt64, size: RemoteDisplay.Size)?
+    private var resizeRequest: (at: UInt64, mode: RemoteDisplay.Mode)?
+    /// The device's capture buffer size (getVideoEncoderParams), which bounds
+    /// Match Window's modes; stock firmware's until the device says more.
+    private var captureMaxBytes = RemoteDisplay.defaultCaptureMaxBytes
+    private var slowLinkHintShown = false
     private var isShutDown = false
     private var wasConnected = false
     private var pathMonitor: NWPathMonitor?
@@ -96,6 +100,17 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     static var showsStatusBar: Bool {
         get { UserDefaults.standard.object(forKey: "showStatusBar") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "showStatusBar") }
+    }
+
+    /// View › Scaling Filter, for all device windows.
+    static var scalingFilter: ScalingFilter {
+        get { UserDefaults.standard.string(forKey: "scalingFilter").flatMap(ScalingFilter.init(rawValue:)) ?? .automatic }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "scalingFilter") }
+    }
+
+    /// --scaling-filter (self-tests): instead of the saved choice.
+    var scalingFilterOverride: ScalingFilter? {
+        didSet { videoView?.scalingFilter = scalingFilterOverride ?? Self.scalingFilter }
     }
 
     /// The status bar's current height (0 while hidden).
@@ -173,6 +188,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         input.invertScroll = device.invertScroll
         videoView.scalingMode = device.scaling
         videoView.matchScale = device.matchScale
+        videoView.scalingFilter = scalingFilterOverride ?? Self.scalingFilter
         window?.invalidateCursorRects(for: videoView)
         videoView.exactPixels = device.exactPixels
         refreshStatus()
@@ -223,6 +239,38 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         matchRemoteToWindow()
     }
 
+    /// Match Window: a fixed refresh rate, or nil for the largest picture.
+    func setMatchRefresh(_ refresh: Int?) {
+        updatePreferences { $0.matchWindowRefresh = refresh }
+        matchRemoteToWindow()
+    }
+
+    /// The mode this window asks for at `refresh` (nil: Automatic).
+    func matchMode(refresh: Int?) -> RemoteDisplay.Mode {
+        let scale = device.matchScale
+        return RemoteDisplay.mode(fitting: Double(videoView.bounds.width) / scale, Double(videoView.bounds.height) / scale,
+                                  refresh: refresh, captureMaxBytes: captureMaxBytes)
+    }
+
+    /// The window's full size in remote pixels (what 1:1 would need).
+    var matchFullSize: RemoteDisplay.Size {
+        let scale = device.matchScale
+        return RemoteDisplay.Size(width: Int(Double(videoView.bounds.width) / scale) / RemoteDisplay.widthStep * RemoteDisplay.widthStep,
+                                  height: Int(Double(videoView.bounds.height) / scale) / RemoteDisplay.heightStep * RemoteDisplay.heightStep)
+    }
+
+    /// Learns the device's capture buffer size (fork firmware with D10
+    /// reports it) and matches the window again if it allows more.
+    private func learnCaptureLimit() {
+        Task { @MainActor in
+            struct Status: Decodable { var captureMaxBytes: Int? }
+            guard let status = try? await engine.call("getVideoEncoderParams", as: Status.self),
+                  let bytes = status.captureMaxBytes, bytes != captureMaxBytes else { return }
+            captureMaxBytes = bytes
+            matchRemoteToWindow()
+        }
+    }
+
     /// Changing the view mode resizes the window to suit it, or (Match
     /// Window) the remote display to suit the window.
     func setScaling(_ mode: ScalingMode) {
@@ -246,7 +294,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         let scale = CGFloat(device.matchScale) // window points per remote pixel
         if !userSizedWindow {
             fitWindowToRemote()
-        } else if followsWindow, displayFollower.requested == RemoteDisplay.Size(width: Int(size.width), height: Int(size.height)),
+        } else if followsWindow, displayFollower.requested?.size == RemoteDisplay.Size(width: Int(size.width), height: Int(size.height)),
                   (0..<CGFloat(RemoteDisplay.widthStep) * scale).contains(videoView.bounds.width - size.width * scale),
                   (0..<CGFloat(RemoteDisplay.heightStep) * scale).contains(videoView.bounds.height - size.height * scale) {
             let content = NSRect(x: 0, y: 0, width: size.width * scale, height: size.height * scale + barHeight)
@@ -264,16 +312,23 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     private func makeDisplayFollower() -> DisplayFollower {
         let follower = DisplayFollower(engine: engine)
-        follower.currentSize = { [weak self] in
-            self?.videoView.currentVideoSize.map { RemoteDisplay.Size(width: Int($0.width), height: Int($0.height)) }
+        follower.currentMode = { [weak self] in
+            guard let self, let size = self.videoView.currentVideoSize else { return nil }
+            let fps = Int((self.snapshot.VideoFPS ?? 60).rounded())
+            return RemoteDisplay.Mode(RemoteDisplay.Size(width: Int(size.width), height: Int(size.height)), refresh: fps)
         }
         follower.isEnabled = { [weak self] in self?.followsWindow ?? false }
         // Keep the picture through the switch; the stall overlay explains
         // the pause.
-        follower.onResize = { [weak self] size in
+        follower.onResize = { [weak self] mode in
+            guard let self else { return }
             let now = DispatchTime.now().uptimeNanoseconds
-            self?.resizeRequest = (now, size)
-            self?.displayHold.withLock { $0 = (CGSize(width: size.width, height: size.height), now + 8_000_000_000) }
+            self.resizeRequest = (now, mode)
+            self.displayHold.withLock { $0 = (CGSize(width: mode.size.width, height: mode.size.height), now + 8_000_000_000) }
+            if mode.refresh < 60 && self.device.matchWindowRefresh == nil && !self.slowLinkHintShown {
+                self.slowLinkHintShown = true
+                self.hud.show("Full resolution: \(mode.size) at \(mode.refresh) Hz  ·  View › Match Window Refresh offers 60 Hz", for: 5)
+            }
         }
         follower.onError = { [weak self] in self?.refreshStatus(extra: $0) }
         return follower
@@ -284,13 +339,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private func matchRemoteToWindow() {
         guard followsWindow, snapshot.Phase == "connected", let window, !window.inLiveResize,
               let current = videoView.currentVideoSize else { return }
-        let scale = device.matchScale
-        let size = RemoteDisplay.size(fitting: Double(videoView.bounds.width) / scale, Double(videoView.bounds.height) / scale)
-        if size != RemoteDisplay.Size(width: Int(current.width), height: Int(current.height)) {
+        let mode = matchMode(refresh: device.matchWindowRefresh)
+        if mode.size != RemoteDisplay.Size(width: Int(current.width), height: Int(current.height)) {
             // The window drives the remote from now on.
             userSizedWindow = true
         }
-        displayFollower.request(size)
+        displayFollower.request(mode)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -590,6 +644,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             wasConnected = true
             connectedAt = DispatchTime.now().uptimeNanoseconds
             matchRemoteToWindow()
+            learnCaptureLimit()
             if let accepted = unverifiedPassword {
                 unverifiedPassword = nil
                 onPasswordAccepted?(self, accepted)
@@ -851,7 +906,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         guard now > lastPicture, now - lastPicture > 250_000_000 else { return nil }
         if let request = resizeRequest, now - request.at < 15_000_000_000 {
             return .init(title: "Resizing the remote display…",
-                         detail: "Switching to \(request.size). The computer re-detects its display.")
+                         detail: "Switching to \(request.mode). The computer re-detects its display.")
         }
         if let signal = snapshot.VideoSignal, !signal.isEmpty, signal != "ready" {
             return .init(title: "No picture from the computer",

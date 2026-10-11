@@ -35,6 +35,9 @@ struct Options {
     var windowSize: (Double, Double)?
     var fullScreen = false
     var matchScale: Double?
+    /// --match-refresh: Hz, or 0 for automatic.
+    var matchRefresh: Int?
+    var scalingFilter: ScalingFilter?
     var scaling: ScalingMode?
     var profile: ModifierProfile?
 
@@ -70,6 +73,8 @@ struct Options {
             case "--view-only": o.viewOnly = true
             case "--scale": o.scaling = next().flatMap(ScalingMode.init(rawValue:))
             case "--match-scale": o.matchScale = next().flatMap(Double.init)
+            case "--match-refresh": o.matchRefresh = next().map { Int($0) ?? 0 }
+            case "--scaling-filter": o.scalingFilter = next().flatMap(ScalingFilter.init(rawValue:))
             case "--full-screen": o.fullScreen = true
             case "--profile": o.profile = next().flatMap(ModifierProfile.init(rawValue:))
             case "--window-size":
@@ -104,6 +109,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var adHocDeviceIDs = Set<String>()
     private var selfTest: SelfTest?
     private var latencyProbe: LatencyProbe?
+    /// View › Match Window Refresh (rebuilt when opened).
+    private var refreshMenu: NSMenu?
 
     init(options: Options) {
         self.options = options
@@ -159,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if saved == nil { adHocDeviceIDs.insert(device.id) }
         if let scaling = options.scaling { device.scaling = scaling }
         if let scale = options.matchScale { device.matchScale = scale }
+        if let refresh = options.matchRefresh { device.matchWindowRefresh = refresh == 0 ? nil : refresh }
         if let profile = options.profile { device.modifierProfile = profile.rawValue }
         if isSelfTest {
             // Self-tests never touch the device library or Keychain.
@@ -227,6 +235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let controller = DeviceWindowController(device: device, address: address, password: password, engineURL: engineURL)
         controller.input.viewOnly = options.viewOnly
+        controller.scalingFilterOverride = options.scalingFilter
         controller.reprobeAddresses = reprobe
         if !isSelfTest {
             controller.onConnected = { [weak self] c in self?.recordConnection(c.device) }
@@ -445,6 +454,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let matchScaleItem = NSMenuItem(title: "Match Window Scale", action: nil, keyEquivalent: "")
         matchScaleItem.submenu = matchScale
         view.addItem(matchScaleItem)
+        // Rebuilt when opened: each rate shows the size the window gets.
+        let matchRefresh = NSMenu(title: "Match Window Refresh")
+        matchRefresh.delegate = self
+        refreshMenu = matchRefresh
+        let matchRefreshItem = NSMenuItem(title: "Match Window Refresh", action: nil, keyEquivalent: "")
+        matchRefreshItem.submenu = matchRefresh
+        view.addItem(matchRefreshItem)
+        let filters = NSMenu(title: "Scaling Filter")
+        for filter in ScalingFilter.allCases {
+            let i = item(filter.menuTitle, #selector(setScalingFilter(_:)))
+            i.representedObject = filter.rawValue
+            filters.addItem(i)
+            if filter == .automatic { filters.addItem(.separator()) }
+        }
+        let filtersItem = NSMenuItem(title: "Scaling Filter", action: nil, keyEquivalent: "")
+        filtersItem.submenu = filters
+        view.addItem(filtersItem)
         view.addItem(item("Exact Pixels at Whole-Number Scales", #selector(toggleExactPixels)))
         view.addItem(.separator())
         view.addItem(item("Show Status Bar", #selector(toggleStatusBar), key: "/"))
@@ -494,6 +520,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleExactPixels() { current?.updatePreferences { $0.exactPixels.toggle() } }
     @objc private func setMatchScale(_ sender: NSMenuItem) {
         if let scale = sender.representedObject as? Double { current?.setMatchScale(scale) }
+    }
+    @objc private func setMatchRefresh(_ sender: NSMenuItem) {
+        let refresh = sender.representedObject as? Int
+        current?.setMatchRefresh(refresh == 0 ? nil : refresh)
+    }
+    @objc private func setScalingFilter(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let filter = ScalingFilter(rawValue: raw) else { return }
+        DeviceWindowController.scalingFilter = filter
+        windows.forEach { $0.videoView.scalingFilter = filter }
     }
     @objc private func toggleStatusBar() {
         DeviceWindowController.showsStatusBar.toggle()
@@ -562,6 +597,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+extension AppDelegate: NSMenuDelegate {
+    /// Match Window Refresh: what each rate gives the current window, e.g.
+    /// "60 Hz · 2432×1004" or "25 Hz · 3008×1268 (Full Size)".
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === refreshMenu else { return }
+        menu.removeAllItems()
+        func entry(_ title: String, _ refresh: Int) -> NSMenuItem {
+            let i = NSMenuItem(title: title, action: #selector(setMatchRefresh(_:)), keyEquivalent: "")
+            i.target = self
+            i.representedObject = refresh
+            return i
+        }
+        guard let c = current else {
+            menu.addItem(entry("Automatic (Largest Picture)", 0))
+            return
+        }
+        let full = c.matchFullSize
+        func label(_ mode: RemoteDisplay.Mode) -> String {
+            "\(mode.size)" + (mode.size == full ? " (Full Size)" : "")
+        }
+        let automatic = c.matchMode(refresh: nil)
+        menu.addItem(entry("Automatic (Largest Picture): \(automatic.refresh) Hz · \(label(automatic))", 0))
+        menu.addItem(.separator())
+        for refresh in RemoteDisplay.refreshRates {
+            menu.addItem(entry("\(refresh) Hz · \(label(c.matchMode(refresh: refresh)))", refresh))
+        }
+    }
+}
+
 extension AppDelegate: NSMenuItemValidation {
     /// Checks the active extension port; actions on the device need a session.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -573,6 +637,13 @@ extension AppDelegate: NSMenuItemValidation {
         case #selector(toggleExactPixels):
             menuItem.state = c?.device.exactPixels == true ? .on : .off
             return c != nil
+        case #selector(setMatchRefresh(_:)):
+            let chosen = c?.device.matchWindowRefresh ?? 0
+            menuItem.state = chosen == menuItem.representedObject as? Int ? .on : .off
+            return c?.device.scaling == .matchWindow
+        case #selector(setScalingFilter(_:)):
+            menuItem.state = DeviceWindowController.scalingFilter.rawValue == menuItem.representedObject as? String ? .on : .off
+            return true
         case #selector(setMatchScale(_:)):
             menuItem.state = c?.device.matchScale == menuItem.representedObject as? Double ? .on : .off
             return c?.device.scaling == .matchWindow
