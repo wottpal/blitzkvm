@@ -3,7 +3,7 @@
 > **Superseded by the fork [wottpal/kvm](https://github.com/wottpal/kvm)** (since 2026-10-11). The fork carries these
 > changes as reviewed pull requests on upstream `dev` (divergences D03–D07 in its `FORK.md`), plus D08 (no HDMI
 > re-plug when the app restarts) and D09 (data channels recover within a second after a network hiccup), and is
-> the source of the installed build (`release/0.5.9-fork.3`). This patch stays as the same changes against
+> the source of the installed build (`release/0.5.9-fork.4`). This patch stays as the same changes against
 > `release/0.5.9`, without D08 and D09.
 
 `jetkvm-0.5.9-desktop-encoder.patch` applies to [`jetkvm/kvm`](https://github.com/jetkvm/kvm) at tag `release/0.5.9`. It changes how the device encodes desktop content and adds runtime encoder control for the app. Measurements and the reasoning behind each change are in the plan's §21.

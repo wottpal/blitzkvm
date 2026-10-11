@@ -1278,6 +1278,62 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
   - one 6 MiB frame limit, a 4096-packet NACK history and a serialised stream restart.
   - It is installed persistently on the PM's device.
 
+## 28. Full resolution for large windows: the bridge's two CSI links (2026-10-11)
+
+**Ask (PM):** in full screen on a 40" display (3008×1269 points), Match Window reached only 2160×912, even at a 50 % scale. The PM wants the full resolution, a choice of refresh rates, and a choice of scaling filters to experiment with.
+
+**Why 2160×912.** The cap was in the app's sizing model, not in the bridge's driver, which accepts up to 10000 px and 310 MHz (`v4l2-ctl --get-dv-timings-cap`). Reading the bridge over I²C (`/dev/i2c-4`, 0x0f, read-only) and its driver source (rockchip-linux `drivers/media/i2c/tc35874x.c`) explains it:
+
+- **Line FIFO:** `FIFOCTL` = 300. The bridge starts sending each line over CSI once 300 pixels are buffered.
+- **Fast link, above 33 Hz:** `PLLCTL0` = 0x4089, 27 MHz × 138 / 5 = 745.2 Mbit/s a lane, 4 lanes, 16 bit per pixel: the bridge drains 186.25 Mpx/s.
+  - HDMI fills the FIFO at the pixel clock, at most 165 MHz. So the FIFO runs dry after about 300 / (1 − clock / 186.25) pixels.
+  - §22 had budgeted 250 px of drift, which gave 2176. Measured clean: 2400×1012 at 165 MHz (268 px drift) and 2560×960 (291 px). The fast-link width limit is now 2496 (about 286 px).
+  - At 60 Hz the 165 MHz clock then bounds the area: a 21:9 window gets 2448×1024 at 60 Hz, 2496×1044 at 50 Hz.
+- **Slow link, 33 Hz or less:** the driver switches the PLL on every format change (`format_change` → `s_dv_timings` → `set_pll`): `PLLCTL0` = 0x1040, 27 / 2 × 65 / 2 = 438.75 Mbit/s a lane, which drains 109.7 Mpx/s.
+  - A pixel clock just under that (107.5 MHz, 2 % margin) drains each line about as fast as it arrives: 60 px of drift for a 3008-px line.
+  - So any width up to the bridge's 4000-px lines streams. Horizontal blanking stays minimal, and vertical blank lines set the clock.
+- **Other limits:**
+  - Capture buffers: upstream's are 1920×1080×3 bytes, so 3.1 megapixels at YUYV.
+  - The encoder: 12.9 ms per 1080p frame, about 160 Mpx/s.
+  - Video CMA: 48 MiB.
+
+**Measured on the device** (Mac mini host, fork firmware, H.265):
+
+| Mode | Link | Pixel clock | Result |
+|---|---|---|---|
+| 2560×1080 at 30 Hz | slow | 107.47 MHz | clean (fits upstream's buffers) |
+| 3008×1268 at 25 Hz | slow | 107.47 MHz | clean, 1:1 for the PM's full screen; video CMA 42.6 of 48 MiB with 8 MiB buffers |
+| 2800×1172 at 30 Hz | slow | 107.45 MHz | clean, 0 decode errors (app e2e, Automatic) |
+| 2400×1012 at 60 Hz | fast | 165.39 MHz | clean (268 px drift) |
+| 2560×960 at 60 Hz | fast | 165.04 MHz | clean (291 px drift) |
+| 2448×1024 at 60 Hz | fast | 164.93 MHz | clean, 0 decode errors (app e2e) |
+| 2496×1044 at 50 Hz | fast | 164.63 MHz | clean, 0 decode errors (app e2e) |
+
+**Firmware:**
+- **D10 (`release/0.5.9-fork.4`, fork `4a68d63`, SHA-256 `9052cccccf3d…`, installed persistently).** The capture buffers grow to 8 MiB each, for up to 4.19 megapixels, and `getVideoEncoderParams` reports `captureMaxBytes`.
+- **No FIFO change.** Raising `FIFOCTL` would only help very wide 60 Hz shapes, and the driver rewrites it on every timing query.
+
+**App:**
+- **`RemoteDisplay.mode(fitting:refresh:captureMaxBytes:)`**
+  - Searches each refresh rate (60, 50 and 40 Hz on the fast link; 30, 25 and 24 Hz on the slow) for the largest size of the window's shape that the bridge, the capture buffers and the encoder carry.
+  - The search steps the width down, so it always ends. The earlier shrink loop could spin forever on very wide shapes.
+  - Automatic picks the largest picture, then the highest rate that reaches it, so a window that fits at 60 Hz stays at 60 Hz. The PM's full screen gets 3008×1244 at 25 Hz with D10, or 2736×1132 at 30 Hz with stock buffers.
+- **Timings:**
+  - At the 165 MHz cap, padding now rounds down: rounding up had pushed 2400-wide modes to 165.39 MHz and excluded them.
+  - Every timing verified earlier is unchanged, and all are pinned in `RemoteDisplayTests`.
+- **View › Match Window Refresh:** Automatic, then each rate with the size the window gets at it, e.g. "60 Hz · 2448×1024", "25 Hz · 3008×1268 (Full Size)". Saved per device.
+  - A one-time hint explains a drop below 60 Hz.
+  - The resize overlay names the mode it switches to.
+- **View › Scaling Filter** (global; the default is unchanged):
+  - Automatic, which uses the text upscaler at 2× and FSR 1 otherwise;
+  - FSR 1, strong-sharpening FSR 1, FSR 1 without sharpening;
+  - Lanczos‑3, Catmull‑Rom, sharp bilinear (area-weighted nearest neighbor), bilinear, nearest neighbor.
+  - Shrinking stays antialiased: the kernel is widened by 1/scale.
+  - Checked on the emulator pattern at 2.34×: each filter renders, with the expected character (Lanczos rings faintly, bilinear is soft, nearest and sharp bilinear are crisp).
+- **Self-test options:** `--match-refresh <Hz|auto>` and `--scaling-filter <name>`.
+
+**Trade-off:** 25–30 Hz roughly halves motion smoothness, and the remote pointer is part of the picture. It is offered only when the window cannot be shown 1:1 at 60 Hz, it is said once, and 60 Hz stays one menu choice away.
+
 ## Appendix A: Key sources
 
 - `jetkvm/kvm` (`dev` @ `8f6c300`, `release/0.5.9`): https://github.com/jetkvm/kvm. REMB revert: https://github.com/jetkvm/kvm/pull/1693
