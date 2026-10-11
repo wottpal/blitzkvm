@@ -7,8 +7,8 @@ This is a JetKVM app built from `release/0.5.9` plus `desktop-encoder.patch`. Th
 | | |
 |---|---|
 | Binary | `bin/jetkvm_app` of a `jetkvm/kvm` checkout at `release/0.5.9` with the patch applied (README.md) |
-| SHA-256 | `48af72f75c7cd9da821e7b0538c90216e318cf0b177773916e284a6a7bdc464c` (the build tested on the device on 2026-10-10; your build may differ) |
-| Size | 31,465,064 bytes |
+| SHA-256 | `0b29e087326bc038f89fb04223559087b33aa82e996dad3d27930665cc8ca897` (the build tested and installed on the device on 2026-10-11; your build may differ) |
+| Size | 31,469,192 bytes |
 | Type | ELF 32-bit ARM EABI5, dynamically linked, interpreter `/lib/ld-uClibc.so.0`; NEEDED `librockit.so`, `librockchip_mpp.so.1`, `librga.so` (from `/oem/usr/lib` on the device) |
 | Reported version | `0.5.9` (`make build_release`, not a `-dev` build) |
 | Toolchain | `kvm-native-buildkit` from `jetkvm/rv1106-system` release `v0.2.8` (the "latest" asset at build time) |
@@ -17,19 +17,21 @@ Encoder defaults are compiled in. The environment of the app process overrides t
 
 | Env | RPC field | Default | Range | Effect |
 |---|---|---|---|---|
-| `JETKVM_VENC_GOP_SECONDS` | `gopSeconds` | `4` | 0.5-60 (decimals OK) | IDR interval = encode fps x seconds. An invalid env value falls back to 0.5 s, the upstream cadence. |
+| `JETKVM_VENC_GOP_SECONDS` | `gopSeconds` | `60` | 0.5-300 (decimals OK) | IDR interval = encode fps x seconds. Keyframes also come on demand (session start, PLI/FIR, RPC, still refresh). An invalid env value falls back to 0.5 s, the upstream cadence. |
 | `JETKVM_VENC_MIN_QP` | `minQp` | `18` | 8-40 | Frame/I QP floor (Rockchip default is about 26-28) |
 | `JETKVM_VENC_MAX_QP` | `maxQp` | `42` | minQp-51 | QP ceiling (I-frame ceiling = max-2) |
 | `JETKVM_VENC_AQ` | `aq` | `0` / false | 0/1 | `1`/true keeps Rockchip texture AQ (+8 QP on text) |
 | `JETKVM_VENC_MAX_FPS` | `maxFps` | `0` | 0-120 | Encode at min(maxFps, source fps); 0 = source fps. Frames are dropped evenly in the capture loop and RC/GOP use the encode rate. |
 | (none) | `bitrateKbps` | `0` | 0 or 100-50000 | VBR target; 0 = derived from the quality factor |
 | (none) | `maxBitrateKbps` | `0` | 0 or 100-50000, >= target | VBR max; 0 = 1.5x the target |
+| `JETKVM_VENC_STILL_QP` | `stillQp` | `8` | 1-51 | QP of the still refresh keyframe and the keyframe QP floor; `minQp` or more turns the refresh off. 0 is rejected: rockit treats a zero floor as unset. |
 
 **Logging:** the native subprocess never loads the config, so it logs at ERROR unless `JETKVM_LOG_*` env says otherwise. `setDefaultLogLevel` only changes the main process. The encoder lines below are therefore emitted at a dedicated always-on level (C `log_notice`, shown as `INF`), and the patch's RC failures are logged as errors. Each encoder (re)start logs `configured VENC GOP` and `configured VENC RC`. Each runtime change logs `encoder params set`, followed by `applied VENC params live`, or `live VENC update failed, restarting the stream` if it fell back. For IDR verification, `JETKVM_LOG_INFO=native` adds `VENC IDR frame: N bytes` for every IDR.
 
 Always on:
 - **BT.601-matrix color tagging at every resolution.** The VUI (H.264 and H.265) uses matrix_coefficients = 6 (BT.601) with colour_primaries = 1 and transfer_characteristics = 1 (BT.709, about sRGB, because the content is an sRGB desktop), limited range. V4L2 uses `REC709` / `XFER_FUNC_709` / `YCBCR_ENC_601`, limited range. Upstream tagged streams above 576 lines with the BT.709 matrix. The TC358749 bridge always converts to BT.601 limited YCbCr: rv1106-system `tc35874x.c` writes `MASK_VOUT_COLOR_601_YCBCR_LIMITED` for UYVY. Measured against a test image, the decoded colors match the BT.601 matrix within 0.5 code values; the BT.709 matrix was off by about 8. This only changes the tags; the bridge does the conversion. The log shows `configured VENC VUI as limited-range, BT.601 matrix, BT.709 primaries/transfer`.
-- A super-frame re-encode above 800 KiB, which stays below the 1,036,800 B frame-socket limit.
+- A super-frame re-encode above 2.5 MiB, below the frame-socket limit of 3,110,400 B (raised from 1,036,800 in `internal/native/proxy.go`).
+- The still refresh (README.md). `JETKVM_LOG_INFO=native` logs each one: `still refresh: keyframe N bytes at qp Q`.
 - An on-demand IDR when a WebRTC session reaches `connected`, on RTCP PLI/FIR, and on the `requestKeyframe` RPC. There are at most 2 per second; extra requests coalesce. The native side tries these paths in order:
   1. `RK_MPI_VENC_RequestIDR(ch, RK_TRUE)`. The shipped librockit returns `0xa0048008` (NOT_SUPPORT) for every instant request.
   2. `RK_MPI_VENC_RequestIDR(ch, RK_FALSE)`. librockit sends the encoder node an `intra_refresh` command and always returns 0, whether or not it worked.
@@ -53,7 +55,7 @@ BIN=path/to/kvm/bin/jetkvm_app   # built per README.md
 DEV=root@<DEVICE_IP>
 ```
 
-## 1. Non-persistent test (rollback = reboot)
+## 1. Non-persistent test (rollback = stop it, then reboot)
 
 These steps mirror the default (non `-i`) path of `scripts/dev_deploy.sh`. That path:
 - writes the binary to `/userdata/jetkvm/bin/jetkvm_app_debug`
@@ -89,15 +91,15 @@ Verify:
 ```sh
 ssh $DEV "grep -E 'configured VENC|encoder params set|RequestIDR|keyframe' /tmp/jetkvm_app_debug.log | tail -20"
 # expect (visible at the default log level):
-#   configured VENC GOP: 240 frames (4.0 s at 60 of 60 fps), bitrate 4000 kbps (max 6000)
-#   configured VENC RC: qp 18-42 (I max 40), aq off
+#   configured VENC GOP: 3600 frames (60.0 s at 60 of 60 fps), bitrate 4000 kbps (max 6000)
+#   configured VENC RC: qp 18-42 (I 8-40), aq off
 # with JETKVM_LOG_DEBUG=native also:
 #   requested keyframe ... reason=session_connected | pli | fir | rpc
 ```
 
-Then connect with the macOS app or a browser. The first picture should appear immediately. A static screen should drop to near-zero bitrate between the 4 s IDRs.
+Then connect with the macOS app or a browser. The first picture should appear immediately. A static screen should drop to near-zero bitrate (0.04-0.08 Mbit/s), and half a second after it stops changing, one refresh keyframe makes it near-lossless.
 
-**Rollback:** `ssh $DEV reboot`, or Settings > General > Reboot. Optionally clean up afterwards with `ssh $DEV rm /userdata/jetkvm/bin/jetkvm_app_debug`. `/tmp` is RAM, so the log disappears on reboot.
+**Rollback:** `ssh $DEV 'killall jetkvm_app_debug; reboot'`. Stop the test build first: the shutdown script (`RkLunch-stop.sh`) waits for a process named `jetkvm_app`, so a plain `reboot` hangs while the test build runs. A hardware watchdog reset follows the kill in any case. Optionally clean up afterwards with `ssh $DEV rm /userdata/jetkvm/bin/jetkvm_app_debug`. `/tmp` is RAM, so the log disappears on reboot.
 
 ## 2. Persistent install (with backup)
 
@@ -146,13 +148,13 @@ These methods use the same JSON-RPC 2.0 transport as every other device RPC: the
 | Method | `params` | Result |
 |---|---|---|
 | `getVideoEncoderParams` | none | status object (below) |
-| `setVideoEncoderParams` | `{"params": {"minQp": int, "maxQp": int, "gopSeconds": float, "aq": bool, "maxFps": int, "bitrateKbps": int, "maxBitrateKbps": int}}` (every field optional) | status object after the change |
+| `setVideoEncoderParams` | `{"params": {"minQp": int, "maxQp": int, "gopSeconds": float, "aq": bool, "maxFps": int, "bitrateKbps": int, "maxBitrateKbps": int, "stillQp": int}}` (every field optional) | status object after the change |
 | `requestKeyframe` | none | `null`; queues an IDR through the same path as PLI (at most 2/s, coalesced) |
 
 Status object (the first seven fields are the settable params; `0` bitrates mean "auto"):
 
 ```json
-{"minQp":18,"maxQp":42,"gopSeconds":4,"aq":false,"maxFps":0,"bitrateKbps":0,"maxBitrateKbps":0,
+{"minQp":18,"maxQp":42,"gopSeconds":60,"aq":false,"maxFps":0,"bitrateKbps":0,"maxBitrateKbps":0,"stillQp":8,
  "sourceFps":60,"encodeFps":60,"gopFrames":240,
  "effectiveBitrateKbps":4000,"effectiveMaxBitrateKbps":6000,"codec":"h264","streaming":true}
 ```
