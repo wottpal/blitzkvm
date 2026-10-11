@@ -1,14 +1,14 @@
 # Deploying the desktop-encoder JetKVM build
 
-This is a JetKVM app built from `release/0.5.9` plus `desktop-encoder.patch`. The steps below are conservative. Test it non-persistently first. Only install it persistently once it behaves.
+This is a JetKVM app built from the fork [wottpal/kvm](https://github.com/wottpal/kvm) (its `FORK.md` has the build steps; earlier builds were `release/0.5.9` plus `desktop-encoder.patch`). The steps below are conservative. Test it non-persistently first. Only install it persistently once it behaves.
 
 ## The artifact
 
 | | |
 |---|---|
-| Binary | `bin/jetkvm_app` of a `jetkvm/kvm` checkout at `release/0.5.9` with the patch applied (README.md) |
-| SHA-256 | `34b0e0226d2c0292683c1a3a78c7da31cf5530d606f1e02d625c733f7d7f2170` (the build tested and installed on the device on 2026-10-11; your build may differ) |
-| Size | 31,469,192 bytes |
+| Binary | `bin/jetkvm_app` of `wottpal/kvm` at tag `release/0.5.9-fork.1` (`make build_release VERSION=0.5.9`) |
+| SHA-256 | `578ed5f58523cd5a5d40833061b093104edbe9ba48f4075767c69985c59b453e` (the build tested and installed on the device on 2026-10-11; your build may differ) |
+| Size | 31,534,728 bytes |
 | Type | ELF 32-bit ARM EABI5, dynamically linked, interpreter `/lib/ld-uClibc.so.0`; NEEDED `librockit.so`, `librockchip_mpp.so.1`, `librga.so` (from `/oem/usr/lib` on the device) |
 | Reported version | `0.5.9` (`make build_release`, not a `-dev` build) |
 | Toolchain | `kvm-native-buildkit` from `jetkvm/rv1106-system` release `v0.2.8` (the "latest" asset at build time) |
