@@ -1849,6 +1849,16 @@ func (c *Controller) ReleaseAllInput() error {
 	return errors.Join(current.ReleaseAllKeys(), current.ReleasePointerButtons())
 }
 
+// RequestKeyframe asks the device for a keyframe (see client.RequestKeyframe).
+func (c *Controller) RequestKeyframe() {
+	c.mu.RLock()
+	current := c.current
+	c.mu.RUnlock()
+	if current != nil {
+		current.RequestKeyframe()
+	}
+}
+
 func (c *Controller) SendWheel(wheelY, wheelX int8) error {
 	current := c.clientIfConnected()
 	if current == nil {

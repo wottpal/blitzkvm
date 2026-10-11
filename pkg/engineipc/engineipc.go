@@ -76,10 +76,10 @@ func ParseAccessUnit(payload []byte) (AccessUnitHeader, []byte, error) {
 type Command struct {
 	ID int64 `json:"id,omitempty"`
 	// Cmd is one of: connect, disconnect, reconnect, rpc, paste,
-	// cancelPaste, releaseAll, ping, serialSend, setExtension (Text),
-	// setSerialSettings (Params: session.SerialSettings), upload,
-	// cancelUpload, setAutoQuality (AutoQuality), setQualityLevel
-	// (QualityLevel).
+	// cancelPaste, releaseAll, ping, requestKeyframe, serialSend,
+	// setExtension (Text), setSerialSettings (Params:
+	// session.SerialSettings), upload, cancelUpload, setAutoQuality
+	// (AutoQuality), setQualityLevel (QualityLevel).
 	Cmd      string `json:"cmd"`
 	BaseURL  string `json:"baseURL,omitempty"`
 	Password string `json:"password,omitempty"`

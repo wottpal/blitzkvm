@@ -200,12 +200,19 @@ type Client struct {
 	macroMu    sync.Mutex
 	macroState chan bool
 
+	videoSSRC       atomic.Uint32
+	lastKeyframeReq atomic.Int64 // unix nanos
+
 	statsMu      sync.Mutex
 	stats        StatsSnapshot
 	statsHistory []statsSample
+	// hidBytesSent counts bytes handed to the input channels; minus their
+	// buffered amount it gives the bytes the device has acknowledged.
+	hidBytesSent atomic.Uint64
 	// Input stall watch (monitor goroutine only).
 	inputStallSince  time.Time
 	inputStallLogged bool
+	inputAcked       uint64
 	rttNanos         atomic.Int64
 
 	closeCh        chan struct{}
@@ -700,14 +707,8 @@ func (c *Client) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		sink = video.SinkFunc(func(video.AccessUnit) {})
 	}
 	frames, _ := sink.(video.FrameSource)
-	ssrc := uint32(track.SSRC())
-	asm := video.NewAssembler(codec, sink.Push, func() {
-		// JetKVM 0.5.9 ignores PLI/FIR (it sends an IDR every 0.5 s anyway),
-		// but asking is harmless and future-proof.
-		if pc := c.peer(); pc != nil {
-			_ = pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: ssrc}})
-		}
-	})
+	c.videoSSRC.Store(uint32(track.SSRC()))
+	asm := video.NewAssembler(codec, sink.Push, c.RequestKeyframe)
 	c.videoMu.Lock()
 	c.videoSink = sink
 	c.frames = frames
@@ -906,7 +907,34 @@ func (c *Client) sendHID(dc *webrtc.DataChannel, msg hidrpc.Message) error {
 	if err != nil {
 		return err
 	}
-	return dc.Send(data)
+	if err := dc.Send(data); err != nil {
+		return err
+	}
+	c.hidBytesSent.Add(uint64(len(data)))
+	return nil
+}
+
+// minKeyframeRequestInterval spaces PLIs: a keyframe takes a few frames to
+// arrive, and the patched firmware coalesces requests to two a second.
+const minKeyframeRequestInterval = 250 * time.Millisecond
+
+// RequestKeyframe asks the device for an IDR frame (RTCP PLI). Anything that
+// drops frames until the next keyframe must ask: the patched firmware sends
+// keyframes only on request (or once a minute), so waiting freezes the
+// picture. JetKVM 0.5.9 ignores PLI but sends an IDR every 0.5 s anyway.
+// Safe from any goroutine; requests within 250 ms of the last are dropped.
+func (c *Client) RequestKeyframe() {
+	ssrc := c.videoSSRC.Load()
+	pc := c.peer()
+	if ssrc == 0 || pc == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := c.lastKeyframeReq.Load()
+	if now-last < int64(minKeyframeRequestInterval) || !c.lastKeyframeReq.CompareAndSwap(last, now) {
+		return
+	}
+	_ = pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: ssrc}})
 }
 
 // SendKeypress sends a 0x05 key press/release. While any non-modifier key is
@@ -1364,33 +1392,41 @@ func (c *Client) Stats() StatsSnapshot {
 	return stats
 }
 
-// watchInputChannels logs when the input data channels stop draining
-// (bytes stay unacknowledged for over a second, an SCTP retransmission
-// stall) and how long it lasted, so a stuck keyboard or pointer leaves a
-// trace in the app log.
+// watchInputChannels logs when the input data channels stop draining (data
+// waits and no byte has been acknowledged for over a second, an SCTP
+// retransmission stall) and how long it lasted, so a stuck keyboard or
+// pointer leaves a trace in the app log. Unacknowledged data alone is
+// normal: SCTP delays acknowledgements by up to 200 ms.
 func (c *Client) watchInputChannels(now time.Time) {
 	ch := c.ch.Load()
 	if ch == nil {
 		return
 	}
+	sent := c.hidBytesSent.Load()
 	var buffered uint64
 	for _, dc := range []*webrtc.DataChannel{ch.hid, ch.hidUnreliable} {
 		if dc != nil && dc.ReadyState() == webrtc.DataChannelStateOpen {
 			buffered += dc.BufferedAmount()
 		}
 	}
+	acked := sent - min(buffered, sent)
+	progressed := acked != c.inputAcked
+	c.inputAcked = acked
 	log := logging.Subsystem("client")
 	switch {
-	case buffered == 0:
+	case buffered == 0 || progressed:
 		if c.inputStallLogged {
 			log.Error().Dur("stalled", now.Sub(c.inputStallSince)).Msg("input data channels recovered")
 		}
 		c.inputStallSince, c.inputStallLogged = time.Time{}, false
+		if buffered > 0 {
+			c.inputStallSince = now
+		}
 	case c.inputStallSince.IsZero():
 		c.inputStallSince = now
 	case !c.inputStallLogged && now.Sub(c.inputStallSince) >= time.Second:
 		c.inputStallLogged = true
-		log.Error().Uint64("bufferedBytes", buffered).Msg("input data channels stalled: data unacknowledged for over a second")
+		log.Error().Uint64("bufferedBytes", buffered).Msg("input data channels stalled: nothing acknowledged for over a second")
 	}
 }
 

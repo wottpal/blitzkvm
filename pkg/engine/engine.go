@@ -27,10 +27,12 @@ import (
 const (
 	snapshotInterval = 100 * time.Millisecond
 	statsInterval    = time.Second
-	// videoQueueDepth bounds access units waiting for the app. If the app
-	// falls behind, units are dropped until the next keyframe rather than
-	// building latency.
-	videoQueueDepth = 16
+	// videoQueueDepth bounds access units waiting for the app: one second
+	// at 60 fps. Bursts (frames released together after a repaired loss or
+	// a network hiccup) must fit, since dropping costs a keyframe. Only an
+	// app that stopped reading overflows it; units are then dropped until a
+	// requested keyframe arrives rather than building latency.
+	videoQueueDepth = 60
 	// defaultRPCWait bounds an app-initiated RPC. Some take long on the
 	// device: mountWithHTTP checks the URL (up to 10 s) before mounting.
 	defaultRPCWait = 30 * time.Second
@@ -48,6 +50,10 @@ type Engine struct {
 	video        chan []byte
 	needKeyframe atomic.Bool
 	droppedUnits atomic.Uint64
+	// waitSince is when the current keyframe wait began (zero for the one
+	// at session start, which is expected and not logged).
+	waitMu    sync.Mutex
+	waitSince time.Time
 
 	uploadMu sync.Mutex
 	uploads  map[int64]context.CancelFunc
@@ -165,6 +171,11 @@ func (e *Engine) command(cmd engineipc.Command) error {
 		}
 		e.reply(cmd.ID, err, "")
 	case "ping":
+		e.reply(cmd.ID, nil, "")
+	case "requestKeyframe":
+		if c := e.controller(); c != nil {
+			c.RequestKeyframe()
+		}
 		e.reply(cmd.ID, nil, "")
 	case "serialSend":
 		err := errors.New("not connected")
@@ -332,9 +343,11 @@ func (e *Engine) onAccessUnit(au video.AccessUnit) {
 	if e.needKeyframe.Load() {
 		if !au.Keyframe {
 			e.droppedUnits.Add(1)
+			e.requestKeyframe()
 			return
 		}
 		e.needKeyframe.Store(false)
+		e.endKeyframeWait()
 	}
 	var flags byte
 	if au.Keyframe {
@@ -353,7 +366,30 @@ func (e *Engine) onAccessUnit(au video.AccessUnit) {
 	case e.video <- frame:
 	default:
 		e.droppedUnits.Add(1)
+		e.waitMu.Lock()
+		e.waitSince = time.Now()
+		e.waitMu.Unlock()
 		e.needKeyframe.Store(true)
+		e.requestKeyframe()
+		log := logging.Subsystem("engine")
+		log.Error().Msg("video queue full: dropping until a keyframe")
+	}
+}
+
+func (e *Engine) requestKeyframe() {
+	if c := e.controller(); c != nil {
+		c.RequestKeyframe()
+	}
+}
+
+func (e *Engine) endKeyframeWait() {
+	e.waitMu.Lock()
+	since := e.waitSince
+	e.waitSince = time.Time{}
+	e.waitMu.Unlock()
+	if !since.IsZero() {
+		log := logging.Subsystem("engine")
+		log.Error().Dur("waited", time.Since(since)).Msg("video resumed at a keyframe")
 	}
 }
 
