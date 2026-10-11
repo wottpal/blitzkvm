@@ -53,6 +53,8 @@ class VideoView: NSView {
         var frameSerial: UInt64 = 0
         var renderPending = false
         var presented = 0
+        /// The last frame went through the text upscaler.
+        var textUpscaling = false
     }
 
     private let state = Locked(State())
@@ -63,6 +65,8 @@ class VideoView: NSView {
     private var scalePipeline: MTLRenderPipelineState!
     private var easuPipeline: MTLRenderPipelineState!
     private var rcasPipeline: MTLRenderPipelineState!
+    private var compose2xPipeline: MTLRenderPipelineState!
+    private lazy var textUpscaler = TextUpscaler(device: device)
     private var chromaSitedPipeline: MTLComputePipelineState!
     private var chromaFitPipeline: MTLComputePipelineState!
     private var chromaFitMeanPipeline: MTLComputePipelineState!
@@ -83,9 +87,10 @@ class VideoView: NSView {
     /// without a dark rim around light text on dark backgrounds.
     /// JETKVM_RCAS_STOPS overrides it (A/B checks).
     private static let rcasStops = Float(ProcessInfo.processInfo.environment["JETKVM_RCAS_STOPS"] ?? "") ?? 0.5
-    /// JETKVM_UPSCALER=catmull enlarges with Catmull-Rom instead of FSR (A/B
-    /// checks).
+    /// JETKVM_UPSCALER=fsr uses FSR at 2× too, =catmull enlarges with
+    /// Catmull-Rom instead of FSR (A/B checks).
     private static let fsrUpscaling = ProcessInfo.processInfo.environment["JETKVM_UPSCALER"] != "catmull"
+    private static let textUpscaling = fsrUpscaling && ProcessInfo.processInfo.environment["JETKVM_UPSCALER"] != "fsr"
 
     private static let shaderSource = """
     #include <metal_stdlib>
@@ -272,6 +277,23 @@ class VideoView: NSView {
         return float4(saturate(rgb), 1.0);
     }
 
+    struct ComposeParams { float2 origin; int2 regionOrigin; };
+
+    // Exactly 2x with the text upscaler (TextUpscaler.swift): bilinear RGB
+    // plus the network's sub-pixel luma detail on every channel (luma
+    // changes, chroma stays).
+    fragment float4 compose2x_fragment(VOut in [[stage_in]],
+                                       texture2d<float> rgb [[texture(0)]],
+                                       texture2d<half, access::read> detail [[texture(1)]],
+                                       sampler s [[sampler(0)]],
+                                       constant ComposeParams &p [[buffer(0)]]) {
+        float2 d = in.position.xy - p.origin;
+        float3 c = rgb.sample(s, d * 0.5 / float2(rgb.get_width(), rgb.get_height())).rgb;
+        int2 sub = int2(floor(d)) & 1;
+        float r = float(detail.read(uint2(int2(floor(d * 0.5)) - p.regionOrigin))[sub.y * 2 + sub.x]);
+        return float4(saturate(c + r), 1.0);
+    }
+
     struct ScaleParams { float2 origin; float2 scale; int filter; };
 
     static float4 texel(texture2d<float, access::read> t, int2 p, int2 size) {
@@ -365,6 +387,7 @@ class VideoView: NSView {
         chromaFitMeanPipeline = try kernel("chroma_fit_mean")
         chromaResidualPipeline = try kernel("chroma_residual")
         scalePipeline = try pipeline("scale_fragment", metalLayer.pixelFormat)
+        compose2xPipeline = try pipeline("compose2x_fragment", metalLayer.pixelFormat)
         // FSR keeps upstream's code in a library of its own; exact resolve
         // keeps flat areas exactly flat (upstream darkens white by 0.2%).
         let options = MTLCompileOptions()
@@ -444,11 +467,39 @@ class VideoView: NSView {
         }
         guard let drawable = metalLayer.nextDrawable(), let commandBuffer = commandQueue.makeCommandBuffer() else { return }
         let layout = encode(s, into: drawable.texture, commandBuffer: commandBuffer)
+        commandBuffer.addCompletedHandler { [weak self] cb in self?.recordGPUTime(cb.gpuEndTime - cb.gpuStartTime) }
         commandBuffer.present(drawable)
         commandBuffer.commit()
         state.withLock {
             if let layout { $0.layout = layout }
             if s.frame != nil { $0.presented += 1 }
+        }
+    }
+
+    /// JETKVM_GPU_TIMING=1 logs the average GPU time per rendered frame.
+    private static let gpuTiming = ProcessInfo.processInfo.environment["JETKVM_GPU_TIMING"] == "1"
+    private let gpuTimes = Locked((total: 0.0, count: 0))
+    /// Set when frames with the text upscaler take too long on this GPU.
+    private let textUpscalerTooSlow = Locked(false)
+    /// The text upscaler costs about 2 ms per frame on an M4 Max for a
+    /// 3000×2000 view; a GPU that needs more than this on average for the
+    /// whole frame falls back to FSR for the rest of the session.
+    private static let frameBudget = 0.008
+
+    private func recordGPUTime(_ seconds: Double) {
+        let average = gpuTimes.withLock { t -> Double? in
+            t.total += seconds
+            t.count += 1
+            guard t.count == 120 else { return nil }
+            defer { t = (0, 0) }
+            return t.total / Double(t.count)
+        }
+        guard let average else { return }
+        if Self.gpuTiming { AppLog.log(String(format: "render: %.2f ms GPU per frame", average * 1000)) }
+        let upscaling = state.withLock { s in s.textUpscaling }
+        if upscaling && average > Self.frameBudget && !textUpscalerTooSlow.withLock({ $0 }) {
+            textUpscalerTooSlow.withLock { $0 = true }
+            AppLog.log(String(format: "text upscaler off: %.1f ms GPU per frame on this GPU, using FSR", average * 1000))
         }
     }
 
@@ -483,7 +534,23 @@ class VideoView: NSView {
                 let scale = l.width / Double(source.width)
                 let identity = abs(scale - 1) < 0.0001
                 // Whole-multiple mode exists for exact pixels; elsewhere it is a preference.
-                if Self.fsrUpscaling, scale >= 1 && !identity && !(l.nearest && (s.exactPixels || s.mode == .integer)),
+                let exactNearest = l.nearest && (s.exactPixels || s.mode == .integer)
+                let upscale = Self.textUpscaling && abs(scale - 2) < 0.0001 && !exactNearest && !textUpscalerTooSlow.withLock({ $0 })
+                state.withLock { $0.textUpscaling = upscale }
+                if upscale, let upscaler = textUpscaler,
+                   let (detail, regionOrigin) = enlarge2x(upscaler, source: source, layout: l, visible: (x0, y0, x1, y1),
+                                                          commandBuffer: commandBuffer) {
+                    var params = ComposeParams(origin: SIMD2(Float(l.x), Float(l.y)), regionOrigin: regionOrigin)
+                    draw = { encoder in
+                        encoder.setRenderPipelineState(self.compose2xPipeline)
+                        encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+                        encoder.setFragmentTexture(source, index: 0)
+                        encoder.setFragmentTexture(detail, index: 1)
+                        encoder.setFragmentSamplerState(self.linearClampSampler, index: 0)
+                        encoder.setFragmentBytes(&params, length: MemoryLayout<ComposeParams>.stride, index: 0)
+                        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                    }
+                } else if Self.fsrUpscaling, scale >= 1 && !identity && !exactNearest,
                    let easu = easu(source: source, layout: l, visible: (x0, y0, x1, y1), commandBuffer: commandBuffer) {
                     var params = FSR.rcasConstants(sharpnessStops: Self.rcasStops, outputOrigin: SIMD2(Int32(x0), Int32(y0)))
                     draw = { encoder in
@@ -495,7 +562,7 @@ class VideoView: NSView {
                     }
                 } else {
                     // Nearest-neighbor at whole-number scales, otherwise shrinking.
-                    let nearest = scale >= 1 && (Self.fsrUpscaling || (l.nearest && (s.exactPixels || s.mode == .integer)))
+                    let nearest = scale >= 1 && (Self.fsrUpscaling || exactNearest)
                     var params = ScaleParams(origin: SIMD2(Float(l.x), Float(l.y)), scale: SIMD2(repeating: Float(scale)),
                                              filter: nearest ? 0 : 1)
                     draw = { encoder in
@@ -517,6 +584,23 @@ class VideoView: NSView {
         draw?(encoder)
         encoder.endEncoding()
         return layout
+    }
+
+    /// Runs the text upscaler over the source pixels behind the visible part
+    /// of a 2× layout (plus the network's margin); returns its detail texture
+    /// and the source pixel its texel (0, 0) belongs to.
+    private func enlarge2x(_ upscaler: TextUpscaler, source: MTLTexture, layout l: VideoLayout,
+                           visible: (Double, Double, Double, Double),
+                           commandBuffer: MTLCommandBuffer) -> (MTLTexture, SIMD2<Int32>)? {
+        let (x0, y0, x1, y1) = visible
+        let m = TextUpscaler.margin
+        let sx0 = max(Int(((x0 - l.x) / 2).rounded(.down)) - m, 0), sy0 = max(Int(((y0 - l.y) / 2).rounded(.down)) - m, 0)
+        let sx1 = min(Int(((x1 - l.x) / 2).rounded(.up)) + m, source.width), sy1 = min(Int(((y1 - l.y) / 2).rounded(.up)) + m, source.height)
+        guard sx1 > sx0, sy1 > sy0 else { return nil }
+        let origin = SIMD2<Int32>(Int32(sx0), Int32(sy0))
+        guard let detail = upscaler.encode(rgb: source, origin: origin, width: sx1 - sx0, height: sy1 - sy0,
+                                           commandBuffer: commandBuffer) else { return nil }
+        return (detail, origin)
     }
 
     /// FSR EASU pass: upscales `source` into a texture holding the visible
@@ -711,6 +795,11 @@ class VideoView: NSView {
         var origin: SIMD2<Float>
         var scale: SIMD2<Float>
         var filter: Int32
+    }
+
+    struct ComposeParams {
+        var origin: SIMD2<Float>
+        var regionOrigin: SIMD2<Int32>
     }
 
     /// Video-range YCbCr → RGB, and where chroma sits relative to luma:
