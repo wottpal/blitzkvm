@@ -41,6 +41,8 @@ const (
 	defaultConnectTimeout = 15 * time.Second
 	// keepAliveInterval matches the device's expected HID keepalive rate.
 	keepAliveInterval = 50 * time.Millisecond
+	// sctpRTOMax caps SCTP's retransmission backoff (see newAPI).
+	sctpRTOMax = time.Second
 	// macroChunkSteps / macroChunkGrace mirror the upstream web UI: macros go
 	// out in chunks of at most 128 wire steps, and a chunk may take its step
 	// delays plus this grace before the paste is aborted.
@@ -201,7 +203,10 @@ type Client struct {
 	statsMu      sync.Mutex
 	stats        StatsSnapshot
 	statsHistory []statsSample
-	rttNanos     atomic.Int64
+	// Input stall watch (monitor goroutine only).
+	inputStallSince  time.Time
+	inputStallLogged bool
+	rttNanos         atomic.Int64
 
 	closeCh        chan struct{}
 	closeOnce      sync.Once
@@ -354,6 +359,14 @@ func (c *Client) newAPI() (*webrtc.API, error) {
 	if c.cfg.ICELoopbackOnly {
 		restrictICEToLoopback(&se)
 	}
+	// SCTP (all data channels: keyboard, pointer, RPC) retransmits a lost
+	// packet after an RTO that doubles on every miss, up to 60 s by default.
+	// After a network hiccup the video resumes at once, but input stays
+	// stuck until the backed-off timer fires: measured after a 3.3 s outage,
+	// 3.6 s more, and minutes after longer ones. Capped at 1 s (pion's
+	// minimum RTO) it is back within 0.7 s.
+	se.SetSCTPRTOMax(sctpRTOMax)
+	applyDebugBlackhole(&se)
 	return webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(se)), nil
 }
 
@@ -1351,6 +1364,36 @@ func (c *Client) Stats() StatsSnapshot {
 	return stats
 }
 
+// watchInputChannels logs when the input data channels stop draining
+// (bytes stay unacknowledged for over a second, an SCTP retransmission
+// stall) and how long it lasted, so a stuck keyboard or pointer leaves a
+// trace in the app log.
+func (c *Client) watchInputChannels(now time.Time) {
+	ch := c.ch.Load()
+	if ch == nil {
+		return
+	}
+	var buffered uint64
+	for _, dc := range []*webrtc.DataChannel{ch.hid, ch.hidUnreliable} {
+		if dc != nil && dc.ReadyState() == webrtc.DataChannelStateOpen {
+			buffered += dc.BufferedAmount()
+		}
+	}
+	log := logging.Subsystem("client")
+	switch {
+	case buffered == 0:
+		if c.inputStallLogged {
+			log.Error().Dur("stalled", now.Sub(c.inputStallSince)).Msg("input data channels recovered")
+		}
+		c.inputStallSince, c.inputStallLogged = time.Time{}, false
+	case c.inputStallSince.IsZero():
+		c.inputStallSince = now
+	case !c.inputStallLogged && now.Sub(c.inputStallSince) >= time.Second:
+		c.inputStallLogged = true
+		log.Error().Uint64("bufferedBytes", buffered).Msg("input data channels stalled: data unacknowledged for over a second")
+	}
+}
+
 func (c *Client) monitorStats() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -1369,6 +1412,7 @@ func (c *Client) collectStats(now time.Time) {
 	if pc == nil || pc.ConnectionState() == webrtc.PeerConnectionStateClosed {
 		return
 	}
+	c.watchInputChannels(now)
 	report := pc.GetStats()
 	var snap StatsSnapshot
 	// RTT of the pair ICE actually uses; other succeeded pairs (other
