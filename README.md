@@ -58,6 +58,7 @@ Run root targets from the repository root and macOS targets with `make -C macos 
 | `make -C macos test` | Swift unit tests (`JetKVMCoreTests`) |
 | `make -C macos selftest` | End to end: the app against the emulator (video, injected input, helper crash recovery) |
 | `make -C macos selftest-extras` | End to end over http and https: virtual media (upload, mount, eject, delete), serial console, address probing with certificate pins |
+| `make -C macos selftest-stalls` | End to end with the fork's keyframe policy: the picture may stand still no longer than a link stall, and resumes once a hidden window is shown |
 | `make -C macos run DEVICE=jetkvm.local` | Builds and opens the app connected to a device |
 | `make -C macos install` | Copies the app to `/Applications` |
 | `make -C macos notarize` | Notarizes with the Xcode account and staples; leaves `macos/build/JetKVM-Desktop.zip` (see Signing) |
@@ -66,7 +67,7 @@ Focused checks, by what you changed:
 
 - When you edit `pkg/emulator`, `pkg/client`, `pkg/session` or `pkg/engine`, run `go test -race -count=1 ./pkg/<package>`. If you touched video, NACK or netem code, also run `make test-timing`.
 - When you edit `macos/Sources/JetKVMCore`, run `make -C macos test`.
-- When you edit `macos/Sources/JetKVMDesktop`, `pkg/engineipc` or engine commands, run `make -C macos selftest` and `make -C macos selftest-extras`.
+- When you edit `macos/Sources/JetKVMDesktop`, `pkg/engineipc` or engine commands, run `make -C macos selftest` and `make -C macos selftest-extras`. If you touched video, the decoder or keyframe handling, also run `make -C macos selftest-stalls`.
 - Before you push, run `make check` (or its steps individually while the tree is dirty, since `generate-check` needs a clean tree).
 
 A passing self-test prints a JSON report and ends with `selftest passed: …`. Any other ending is a failure.
@@ -87,7 +88,7 @@ View modes (View menu ⌘1–⌘5, or the menu in the status bar), saved per dev
 | Largest Whole Multiple | The largest whole multiple that fits | Always exact (nearest-neighbor) pixels |
 | Match Window (opt-in) | The remote display takes the window's size, one remote pixel per point | Resize the window (or go full screen) and the target switches its resolution to match within a few seconds. Only for targets where the JetKVM is the only display; details below. |
 
-**Match Window** (opt-in, explained once when chosen) changes the JetKVM's EDID (the display description the target reads over HDMI). The app keeps the device's identity, name and audio, and replaces its modes with a single mode of the window's size. The target re-detects the display, and the picture pauses for 2–5 s. The device saves the EDID, so the target keeps that resolution after the app quits. JetKVM web UI › Settings › Video › EDID (JetKVM Default) restores the default. Sizes run from 640×400 to 1920×1200: larger windows (wide or Retina-sized screens in full screen) get the largest mode of their shape, scaled to fill. Widths are multiples of 16 and heights multiples of 4, so a window can be up to 15 × 3 points larger than the remote. In a window, the app closes that gap by snapping the window to the remote; in full screen it stays as a thin border. View-only sessions never change the EDID. The limits are measured on the hardware (`RemoteDisplay.swift`, plan §22); an odd height hangs the device. **On a Mac with another monitor, do not use it:** macOS treats every new size as a new display with the default arrangement. The JetKVM display is then no longer the main display, so it shows an empty desktop and the absolute pointer cannot reach it. Only sizes that were previously made main come back main.
+**Match Window** (opt-in, explained once when chosen) changes the JetKVM's EDID (the display description the target reads over HDMI). The app keeps the device's identity, name and audio, and replaces its modes with a single mode of the window's size. The target re-detects the display, and the picture pauses for 2–5 s. The device saves the EDID, so the target keeps that resolution after the app quits. JetKVM web UI › Settings › Video › EDID (JetKVM Default) restores the default. Sizes run from 640×400 up to 2176 wide and 1200 high, within the HDMI bridge's 165 MHz pixel clock (1920×1200, 2048×1152, or 2176×900 for a 21:9 screen). Larger windows (wide or Retina-sized screens in full screen) get the largest mode of their shape, scaled to fill. View › Match Window Scale sets how large the remote desktop looks: 100% is one remote pixel per window point, 200% doubles everything (half the resolution), 50% halves it (twice the resolution, up to the limits). It is saved per device. While the target switches modes it sends black frames; the app keeps showing the last picture until the new size arrives. Widths are multiples of 16 and heights multiples of 4, so a window can be up to 15 × 3 points larger than the remote. In a window, the app closes that gap by snapping the window to the remote; in full screen it stays as a thin border. View-only sessions never change the EDID. The limits are measured on the hardware (`RemoteDisplay.swift`, plan §22); an odd height hangs the device. **On a Mac with another monitor, do not use it:** macOS treats every new size as a new display with the default arrangement. The JetKVM display is then no longer the main display, so it shows an empty desktop and the absolute pointer cannot reach it. Only sizes that were previously made main come back main.
 
 Full screen: the menu bar, and with it the window's title bar and buttons, slides in when the pointer rests at the top edge, so you can leave full screen with the mouse. The Dock stays hidden because the bottom edge belongs to the remote.
 
@@ -95,7 +96,9 @@ Full screen: the menu bar, and with it the window's title bar and buttons, slide
 
 **Enlarging at any other scale:** AMD FSR 1 (EASU edge-adaptive upscaling plus RCAS sharpening, `FSR.swift`).
 
-View › Exact Pixels at Whole-Number Scales switches to nearest-neighbor where the scale is a whole number.
+View › Exact Pixels at Whole-Number Scales switches to nearest-neighbor where the scale is a whole number. View › Show Status Bar (⌘/) hides the status line in every window. A window keeps its picture size; in full screen the picture gains the line, and Match Window follows.
+
+When the picture stalls for more than about half a second (connecting, a display resize, a stream that paused, no HDMI signal), a large overlay says why and what happens next. The last picture stays underneath, dimmed. Keyboard and pointer keep working.
 
 **Picture pipeline** (`VideoView.swift`):
 - **Chroma:** the JetKVM sends color at half resolution. The app rebuilds it from the full-resolution luma, since within a few pixels desktop content mixes two colors. Colored text measures 51 dB against 28 dB with plain upsampling.
@@ -128,8 +131,8 @@ Command-line options (also used by the self-tests):
 |---|---|
 | `--device <address>` | Connect to an address instead of showing the device library |
 | `--view-only` | Never send keyboard or mouse input |
-| `--scale actualSize\|fit\|pixelExact\|integer`, `--profile mac\|pc`, `--window-size 1280x720` | View and input overrides |
-| `--selftest <seconds>` and `--crash-engine-after`, `--inject-input`, `--exercise-extras`, `--snapshot <png>` | Self-test mode (prints JSON, exits 0 on success) |
+| `--scale actualSize\|fit\|pixelExact\|integer\|matchWindow`, `--match-scale 1.5`, `--profile mac\|pc`, `--window-size 1280x720`, `--full-screen` | View and input overrides |
+| `--selftest <seconds>` and `--crash-engine-after`, `--inject-input`, `--exercise-extras`, `--snapshot <png>`, `--hide-after <seconds>`, `--max-freeze-ms <ms>`, `--set-quality-after 4:low,9:maximum`, `--toggle-status-bar-after <seconds>` | Self-test mode (prints JSON, exits 0 on success). The window floats above other windows and never captures your own keyboard or pointer; only `--inject-input` sends input |
 | `--latency-probe <samples>` | Measures input-to-photon latency against `tools/latency-probe/latency.html` on the target (prints JSON, exits) |
 
 Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `JETKVM_DEBUG_BLACKHOLE=period:duration` (seconds) makes the helper drop all session traffic for `duration` every `period`, to reproduce network hiccups. `JETKVM_ENGINE` points at a helper binary for development. `JETKVM_DESKTOP_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.
@@ -197,7 +200,9 @@ Ask the owner before you:
 ## Troubleshooting
 
 - **`external macro implementation type 'SwiftUIMacros…' could not be found`:** you ran `swift build` with the Command Line Tools. Build through `make -C macos …`, which selects Xcode.
-- **Keyboard and pointer stop while the picture stays live, then work again:** the data channels (SCTP) were waiting out a retransmission timer after lost packets. The helper caps that timer at 1 s (plan §25), and so does the fork firmware (D09); `app.log` records `input data channels stalled` and `… recovered` with the duration.
+- **The picture stands still while the status bar still shows frames arriving:** something waited for a keyframe without asking for one. With the fork's keyframes on demand, that froze the picture for up to a minute (plan §26). Every wait now asks for a keyframe and normally ends within tens of milliseconds. `app.log` names each wait and how long it lasted (`video resumed at a keyframe after …`), and a watchdog logs `video watchdog: …` if frames arrive but none decode or reach the screen.
+- **The picture stops after changing Stream Quality (or on its own, with Automatic):** fork firmware before 2026-10-11 stopped encoding when a quality change switched between 60 and 30 fps, until the stream restarted (plan §27). Install the current fork build.
+- **Keyboard and pointer stop while the picture stays live, then work again:** the data channels (SCTP) were waiting out a retransmission timer after lost packets. The helper caps that timer at 1 s (plan §25), and so does the fork firmware (D09). `app.log` records `input data channels stalled` and `… recovered` with the duration. Builds before plan §26 also logged false alarms there while the pointer moved.
 - **Emulator-backed tests time out in ICE:** set `ICELoopbackOnly: true` on both the emulator config and the client or session config.
 - **`make generate-check` fails right after editing:** expected. It requires a clean tree; commit first or run the other `check` steps directly.
 - **A device shows "not reachable" although it is up, and it uses https:** its certificate may have changed. Choose Try Anyway to see the certificate alert and decide whether to trust the new one.

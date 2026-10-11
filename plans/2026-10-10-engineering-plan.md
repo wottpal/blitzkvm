@@ -1140,7 +1140,143 @@ Quality and frame rate are unchanged (same encoder settings; the upscaler's outp
 - It logs stalls of the input channels: `input data channels stalled`, then `recovered` with the duration.
 - The fork firmware caps its side too (D09, `release/0.5.9-fork.2`).
 
-**Open:** what drops the packets on this wired LAN is unknown; the stall log will show how often it happens.
+**Open:** what drops the packets on this wired LAN is unknown. The stall log raised false alarms until §26 fixed it; read older `input data channels stalled` lines with that in mind.
+
+## 26. The picture freezes while frames arrive (2026-10-11)
+
+**Report (PM, with a screen recording):** the app is barely usable because it often gets stuck. The mirrored screen stands still for up to 30 s, and neither pointer nor keyboard seem to work. There is no clear way to trigger it.
+
+**Evidence:**
+- In the recording, a clock on the remote screen stays at the same second for about 23 s, then jumps ahead.
+- Meanwhile the status bar keeps showing 60 fps, 0.7–2.2 Mbit/s and an RTT of 2 ms.
+- So frames kept arriving and the app stopped showing them. Input most likely arrived; it just could not be seen.
+
+**Cause:** four places in the app dropped frames "until the next keyframe" and never asked for one:
+
+| Where | Trigger |
+|---|---|
+| Decoder backlog (`maxQueued`, 6 units) | Any burst of 7 or more frames: a link or scheduling hiccup of about 100 ms, after which the held-back frames arrive together |
+| Engine queue (`videoQueueDepth`, 16 units) | A burst of 17 or more frames |
+| Decoder paused while the window is hidden | Showing the window again (another Space, app or tab in front, minimized) |
+| Decoder session errors | A VideoToolbox session invalidated, a session that could not be created, and decode errors (no wait, but corrupt references) |
+
+On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes only on request, or once a minute (D04, D07), so each of these became a freeze of up to 60 s. The stats count received frames, so they kept showing 60 fps.
+
+**Reproduction (emulator):**
+- The emulator now models the fork's keyframe policy: `--keyframe-on-request` (an IDR on PLI/FIR) and `--gop 3600`.
+- It also models link stalls: `--hold-every`/`--hold-for` hold outgoing RTP and release it in a burst, drained at `--rate` (a real link drains at link speed; without a rate, loopback overflows the socket buffer).
+- App-side hiccups: the app process was stopped (SIGSTOP) for 300 ms every 3 s.
+- The self-test now reports freezes (gaps of more than 250 ms between decoded frames while the window is shown) and skipped units.
+- Results, 1080p60 over 20 s:
+
+| Scenario | Before | After |
+|---|---|---|
+| 400 ms link stall every 3 s, unpaced | 16 units skipped, then frozen for the remaining 18.0 s | 0 skipped; longest freeze 411 ms (the stall itself) |
+| 400 ms link stall every 3 s, 200 Mbit/s | longest freeze 2.9 s | longest freeze 410 ms |
+| 1.5 s link stall every 5 s, 200 Mbit/s | longest freeze 11.3 s, 17.5 s frozen in total | longest freeze 1.51 s (the stall); 0 skipped and 0 lost over 3 runs of 30 s |
+| App stopped for 300 ms every 3 s | 27 units skipped, then frozen for the remaining 17.8 s | 0 skipped; longest freeze 330 ms |
+| Window minimized for 2 s, then shown | never resumed (frozen for the remaining 12.3 s) | resumed 0.4 s after showing (the restore animation); the keyframe came 14 ms after the request |
+
+**Changes:**
+- `Client.RequestKeyframe` sends a PLI, rate-limited to one per 250 ms; the assembler uses it too. A new engine command `requestKeyframe` exposes it to the app.
+- Every keyframe wait now asks for a keyframe and asks again while it lasts: the engine queue, the decoder (backlog, hidden window, codec change, session errors) and decode errors.
+- Bursts now fit: the decoder backlog and the engine queue each hold 60 units (1 s at 60 fps). Decoding takes about 1 ms a frame, so catching up costs far less than a keyframe.
+- Video watchdog, once a second: if units arrive but none decode for 2 s, it logs and asks for a keyframe. If frames decode but none reach the screen, it logs that too.
+- Logs: `video resumed at a keyframe after N ms (cause)` from the decoder, and `video queue full` / `video resumed at a keyframe` from the engine.
+- `make -C macos selftest-stalls` guards all of this against the emulator. The picture may stand still only about as long as the stall: at most 700 ms for 400 ms stalls, and at most 1 s to resume after the window is shown.
+
+**Correction to §25:** the input-stall log raised false alarms.
+- It flagged any data that stayed unacknowledged across two one-second samples. pion delays SACKs by up to 200 ms, so continuous pointer input almost always has some.
+- On the emulator over loopback, 20 s of continuous pointer input logged a 9 s "stall".
+- Now a stall needs data waiting and no byte acknowledged for over a second. On the same run it logs nothing, and it still catches every 2 s blackhole outage (`JETKVM_DEBUG_BLACKHOLE=6:2`).
+- Most `input data channels stalled` lines in the PM's log (2–6 s, 3–60 bytes, clustered while the pointer moved) were this artifact.
+
+**Open:** what caused the bursts on the PM's wired LAN is not proven. The likely candidates are scheduling hiccups on either end, for example a screen recorder running on the Mac, or the device's single core. The new logs name the cause of every wait.
+
+## 27. Larger Match Window modes, scale, status bar, stall overlay, quality-change stall (2026-10-11)
+
+**Asks (PM):**
+- In full screen on a 40" display, Match Window only reached 1920×792. Can its scaling be adjusted?
+- A View option to hide the status bar (default on). Match Window must follow it.
+- Changing Stream Quality stalls the picture for about 10 s; warn before it.
+- Show a large loading overlay when a stall is known on our side, after a short delay and over the last picture.
+
+**Mode limits.**
+- The 1920-wide cap was the app's own. The bridge driver accepts up to 10000 pixels wide and 310 MHz (`v4l2-ctl --get-dv-timings-cap`).
+- The real limits:
+  - the HDMI pixel clock, 165 MHz;
+  - §22's FIFO rule: the input clock must be at least 186.25 × (1 − 250 / width) MHz, which allows widths up to 2176.
+- `RemoteDisplay.size(fitting:)` now keeps a 2176×1200 box and shrinks a window's shape until its timing fits 165 MHz.
+- Verified on the device (fork firmware, Mac mini host): clean pictures, no shear or stripes, 0 decode errors.
+
+| Mode | Pixel clock | Used for |
+|---|---|---|
+| 2176×900 | 164.9 MHz | PM's full screen, 3008×1247 points (was 1920×792: 28 % more pixels) |
+| 2160×912 | 164.8 MHz | the same with the status bar hidden |
+| 2112×1168 | 164.4 MHz | near the largest area |
+| 2048×1152 | 163.8 MHz | 16:9 windows (was 1920×1080) |
+
+**Match Window Scale** (View menu, saved per device):
+- Window points per remote pixel: 200 %, 150 %, 125 %, 100 % (default), 80 %, 67 %, 50 %.
+- Verified at 150 %: a 1600×900 video area asked for 1056×600, the device switched to it, and the window snapped to 1584×900.
+- 100 % is not labeled "same size as this Mac": that holds only when the remote renders at 1×.
+
+**Show Status Bar** (View, ⌘/, default on, every window):
+- A window keeps its video area and grows or shrinks by the bar.
+- In full screen the video area changes and Match Window follows. Verified: 2176×900 → 2160×912.
+
+**Stream-quality stall.** This was a firmware bug, not an HDMI re-plug.
+- Reproduced with the session harness, one live change at a time:
+  - bitrate-only and QP-only changes were seamless;
+  - `maxFps` 60 → 30 dropped the stream to 0 fps;
+  - neither 60 again nor a keyframe request recovered it.
+- The kernel logged every frame as `frame info no equal set drop: frame [1920, 792, 3840, 800], prep [1920, 792, 1920, 800]`. Changing rate control's frame rate on a running channel made rockit reprogram the input stride in pixels instead of bytes (YUYV).
+- Automatic quality switches between 60 and 30 fps levels, so this also stopped the picture without any user action. The picture came back only when the stream restarted.
+- Fork fix (D06):
+  - rate control keeps the channel's creation frame rate;
+  - the capture loop drops frames as before;
+  - the bitrates are scaled by creation fps / encode fps.
+  - The GOP nudge path uses the same helper.
+- Verified with the harness: 60 → 30 → 60 fps with no dropped frames. In the app, after low → maximum → low, the device still streamed 30 fps (0 before).
+- No confirmation alert: the change is now seamless. On stock firmware the quality factor restarts the pipeline briefly, and the overlay covers that.
+
+**Stall overlay** (`StallOverlay.swift`, checked every 0.1 s):
+- Shown once a stall has lasted 0.6 s; it fades out when the picture returns.
+- The last picture stays underneath, dimmed. The overlay takes no clicks, so input keeps working.
+
+| Situation | Title | Detail |
+|---|---|---|
+| Connecting | Connecting to *name*… | the address |
+| Reconnecting | Reconnecting to *name*… | The connection dropped. Retrying automatically. |
+| Device rebooting | *name* is restarting… | The picture comes back once it is up again. |
+| No first picture yet | Starting video… | Connected to *name*. |
+| Display resize (15 s after a request) | Resizing the remote display… | Switching to W×H. The computer re-detects its display. |
+| HDMI signal not ready | No picture from the computer (no spinner) | HDMI: *state*. It may be asleep or switched off. |
+| Any other gap | Waiting for video… | Connected, but no new picture for N s. |
+
+- During a resize the Mac host sends black frames before it switches modes. Measured mean luma was 0.1 during the switch against 40 normally.
+- The app therefore holds the last picture from the request until a frame of the new size arrives (at most 8 s). With the hold, the screen stays at luma 27–33, the old picture dimmed under the overlay.
+- The resize is reported before `setEDID`, which returns only after the re-plug, about 4 s later.
+- The small "Resizing…" banner is gone; the overlay replaces it.
+
+**Self-tests:**
+- They no longer capture the operator's input. Before this, a self-test window captured keyboard and pointer when it became key, so the first device runs of this round could forward the PM's typing to the target. Only `--inject-input` sends input now.
+- Self-test windows float above other windows, since a covered window stops decoding.
+- Time hidden is excluded from freezes. A `--max-freeze-ms` run that was hidden for more than a quarter of its length fails as inconclusive.
+- New options:
+  - `--full-screen` and `--match-scale` (also outside self-tests);
+  - `--set-quality-after S:level,…`;
+  - `--toggle-status-bar-after S`.
+- The report adds `remoteSize`, `videoArea`, `windowContent`, `statusBar`, `hiddenMs` and the overlay's timeline.
+
+**Open:**
+- After connecting, the first picture takes about 4 s (the device starts its encoder late). The overlay explains the wait; the cause is not investigated.
+- Firmware: `release/0.5.9-fork.3` (fork `5fc9be5`, SHA-256 `88dbed94a6fd…`) carries the fix, plus the fixes from two independent reviews of the whole fork, which found nothing critical:
+  - encoder overrides reset when another session takes over;
+  - the still refresh finds a working keyframe path, and its pacing follows the bitrate and backs off after repair keyframes;
+  - setEDID re-plugs again;
+  - one 6 MiB frame limit, a 4096-packet NACK history and a serialised stream restart.
+  - It is installed persistently on the PM's device.
 
 ## Appendix A: Key sources
 
