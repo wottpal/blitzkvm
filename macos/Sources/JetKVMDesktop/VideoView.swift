@@ -352,7 +352,14 @@ class VideoView: NSView {
         // Two drawables: one on screen, one being rendered. A third would
         // let frames queue up and add a refresh of latency.
         metalLayer.maximumDrawableCount = 2
-        metalLayer.displaySyncEnabled = true
+        // Without display sync, a frame goes to the window server as soon as
+        // the GPU is done; it still flips at vblank and keeps only the newest
+        // frame (no tearing: present times jump by whole refreshes, never land
+        // mid-scan). With display sync, each present waits for our own next
+        // vsync and holds a drawable for a refresh. Measured from decode to
+        // screen at 60 Hz: 52 -> 18 ms in a window, 48 -> 7 ms in full
+        // screen. JETKVM_DISPLAY_SYNC=1 turns it back on (A/B).
+        metalLayer.displaySyncEnabled = ProcessInfo.processInfo.environment["JETKVM_DISPLAY_SYNC"] == "1"
         metalLayer.backgroundColor = NSColor.black.cgColor
         // The remote desktop's pixels are sRGB-encoded (the capture only
         // changes the matrix, not the transfer function). Tagging them sRGB
@@ -437,6 +444,19 @@ class VideoView: NSView {
         redraw()
     }
 
+    /// Called with a frame's serial, its render timeline and the time it
+    /// reached the screen (latency probe).
+    var onPresented: ((UInt64, RenderTimeline) -> Void)?
+    struct RenderTimeline {
+        var renderStart: CFTimeInterval = 0
+        var drawable: CFTimeInterval = 0
+        var committed: CFTimeInterval = 0
+        var gpuDone: CFTimeInterval = 0
+        var presented: CFTimeInterval = 0
+    }
+    /// Serial of the newest frame handed to `display`.
+    var frameSerial: UInt64 { state.withLock { $0.frameSerial } }
+
     /// Hands a new decoded frame to the view. Frames that arrive faster than
     /// they can be drawn replace each other (newest wins).
     func display(_ pixelBuffer: CVPixelBuffer) {
@@ -460,20 +480,37 @@ class VideoView: NSView {
     }
 
     private func render() {
+        var timeline = RenderTimeline(renderStart: CACurrentMediaTime())
+        let size = state.withLock { $0.drawableSize }
+        if size.width > 0, size.height > 0, metalLayer.drawableSize != size {
+            metalLayer.drawableSize = size
+        }
+        // The drawable first, then the frame: one that arrives while
+        // nextDrawable() waits is drawn now rather than a refresh later.
+        let drawable = size.width > 0 && size.height > 0 ? metalLayer.nextDrawable() : nil
         let s = state.withLock { s -> State in
             s.renderPending = false
             return s
         }
-        guard s.drawableSize.width > 0, s.drawableSize.height > 0 else { return }
-        if metalLayer.drawableSize != s.drawableSize {
-            metalLayer.drawableSize = s.drawableSize
-        }
-        guard let drawable = metalLayer.nextDrawable(), let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        guard let drawable, s.drawableSize == size, let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        timeline.drawable = CACurrentMediaTime()
         let layout = encode(s, into: drawable.texture, commandBuffer: commandBuffer)
         let upscaled = state.withLock { $0.textUpscaling }
         commandBuffer.addCompletedHandler { [weak self] cb in self?.recordGPUTime(cb.gpuEndTime - cb.gpuStartTime, upscaled: upscaled) }
+        let probe = onPresented != nil && s.frame != nil ? Locked(timeline) : nil
+        if let probe, let onPresented {
+            let serial = s.frameSerial
+            commandBuffer.addCompletedHandler { _ in probe.withLock { $0.gpuDone = CACurrentMediaTime() } }
+            drawable.addPresentedHandler { d in
+                onPresented(serial, probe.withLock { t -> RenderTimeline in
+                    t.presented = d.presentedTime
+                    return t
+                })
+            }
+        }
         commandBuffer.present(drawable)
         commandBuffer.commit()
+        probe?.withLock { $0.committed = CACurrentMediaTime() }
         state.withLock {
             if let layout { $0.layout = layout }
             if s.frame != nil { $0.presented += 1 }

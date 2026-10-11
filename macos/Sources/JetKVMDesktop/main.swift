@@ -19,6 +19,8 @@ struct Options {
     var selfTestSeconds: Double?
     var crashEngineAfter: Double?
     var snapshotPath: String?
+    /// `--latency-probe N`: measure input-to-photon latency N times (LatencyProbe).
+    var latencyProbe: Int?
     var injectInput = false
     /// Self-test: also upload, mount and eject an image and use the serial
     /// console (emulator only).
@@ -46,6 +48,7 @@ struct Options {
             case "--selftest": o.selfTestSeconds = next().flatMap(Double.init)
             case "--crash-engine-after": o.crashEngineAfter = next().flatMap(Double.init)
             case "--snapshot": o.snapshotPath = next()
+            case "--latency-probe": o.latencyProbe = next().flatMap(Int.init)
             case "--inject-input": o.injectInput = true
             case "--exercise-extras": o.exerciseExtras = true
             case "--view-only": o.viewOnly = true
@@ -82,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Devices typed ad hoc (--device) that are saved on first connect.
     private var adHocDeviceIDs = Set<String>()
     private var selfTest: SelfTest?
+    private var latencyProbe: LatencyProbe?
 
     init(options: Options) {
         self.options = options
@@ -246,6 +250,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             fail("could not start engine: \(error)")
         }
         selfTest?.start()
+        if let samples = options.latencyProbe {
+            latencyProbe = LatencyProbe(controller: controller, samples: samples)
+            latencyProbe?.start()
+        }
     }
 
     /// Persists what a connection learned (device ID, last use) without

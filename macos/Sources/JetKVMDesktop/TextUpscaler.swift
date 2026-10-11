@@ -17,9 +17,10 @@ import Metal
 /// RGBA slices; only the visible part of the picture is computed.
 ///
 /// A still screen still delivers 60 frames a second. Each frame, a compare
-/// pass checks the region's luma against the network's last input and
-/// raises a flag on any difference; the network's kernels return at once
-/// while it is down, so an unchanged picture costs one read of the region.
+/// pass checks the region's luma against the network's last input, per
+/// threadgroup-sized tile; the network runs only on tiles that changed and
+/// their neighbors. An unchanged picture costs one read of the region, and
+/// typing or a moving pointer a few tiles.
 final class TextUpscaler {
     private let device: MTLDevice
     private let conv1: MTLComputePipelineState
@@ -27,11 +28,14 @@ final class TextUpscaler {
     private let conv4: MTLComputePipelineState
     private let compare: MTLComputePipelineState
     private let weights: [MTLBuffer]
-    private var features: (MTLTexture, MTLTexture)?
+    /// One feature map per layer: a tile the network skips keeps every
+    /// layer's previous output, which its recomputed neighbors read.
+    private var features: (MTLTexture, MTLTexture, MTLTexture)?
     private var detail: MTLTexture?
-    /// The luma the network last ran on, and the flag "changed since".
+    /// The luma the network last ran on, and one "changed since" flag per
+    /// threadgroup-sized tile.
     private var input: MTLTexture?
-    private let changed: MTLBuffer
+    private var changed: MTLBuffer?
     /// The source region `detail` covers.
     private var region: (origin: SIMD2<Int32>, width: Int, height: Int)?
 
@@ -47,13 +51,11 @@ final class TextUpscaler {
               let p1 = try? device.makeComputePipelineState(function: f1),
               let p8 = try? device.makeComputePipelineState(function: f8),
               let p4 = try? device.makeComputePipelineState(function: f4),
-              let pc = try? device.makeComputePipelineState(function: fc),
-              let flag = device.makeBuffer(length: 4, options: .storageModePrivate) else { return nil }
+              let pc = try? device.makeComputePipelineState(function: fc) else { return nil }
         conv1 = p1
         conv8 = p8
         conv4 = p4
         compare = pc
-        changed = flag
         typealias W = TextUpscalerWeights
         // 3×3 layers regrouped for half4 dot products over input slices:
         // [out][tap][input slice] × 4 input channels.
@@ -85,6 +87,8 @@ final class TextUpscaler {
     /// since the last run, see above).
     func encode(rgb: MTLTexture, origin: SIMD2<Int32>, width: Int, height: Int,
                 commandBuffer: MTLCommandBuffer) -> MTLTexture? {
+        let threads = Self.threadgroup(for: [compare, conv1, conv8, conv4])
+        let groups = MTLSize(width: (width + threads.width - 1) / threads.width, height: (height + threads.height - 1) / threads.height, depth: 1)
         if features?.0.width != width || features?.0.height != height {
             func make(_ type: MTLTextureType, slices: Int) -> MTLTexture? {
                 let d = MTLTextureDescriptor()
@@ -100,28 +104,29 @@ final class TextUpscaler {
             let lumaDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Float, width: width, height: height, mipmapped: false)
             lumaDescriptor.usage = [.shaderRead, .shaderWrite]
             lumaDescriptor.storageMode = .private
-            guard let a = make(.type2DArray, slices: 2), let b = make(.type2DArray, slices: 2), let r = make(.type2D, slices: 1),
-                  let l = device.makeTexture(descriptor: lumaDescriptor) else {
+            guard let a = make(.type2DArray, slices: 2), let b = make(.type2DArray, slices: 2), let c = make(.type2DArray, slices: 2),
+                  let r = make(.type2D, slices: 1), let l = device.makeTexture(descriptor: lumaDescriptor),
+                  let flags = device.makeBuffer(length: groups.width * groups.height * 4, options: .storageModePrivate) else {
                 features = nil
                 return nil
             }
-            features = (a, b)
+            features = (a, b, c)
             detail = r
             input = l
+            changed = flags
             region = nil
         }
-        guard let (a, b) = features, let detail, let input, let blit = commandBuffer.makeBlitCommandEncoder() else { return nil }
-        // The flag starts raised for a new region (no valid detail yet) and
-        // lowered otherwise; the compare raises it on any change.
+        guard let (a, b, c) = features, let detail, let input, let changed,
+              let blit = commandBuffer.makeBlitCommandEncoder() else { return nil }
+        // Every tile starts dirty for a new region (no valid detail yet) and
+        // clean otherwise; the compare marks the tiles that changed.
         let same = region.map { $0.origin == origin && $0.width == width && $0.height == height } == true
-        blit.fill(buffer: changed, range: 0..<4, value: same ? 0 : 1)
+        blit.fill(buffer: changed, range: 0..<changed.length, value: same ? 0 : 1)
         blit.endEncoding()
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
         region = (origin, width, height)
         var origin = origin
         var frame = SIMD2<Int32>(Int32(rgb.width), Int32(rgb.height))
-        let threads = Self.threadgroup(for: [compare, conv1, conv8, conv4])
-        let groups = MTLSize(width: (width + threads.width - 1) / threads.width, height: (height + threads.height - 1) / threads.height, depth: 1)
         encoder.setComputePipelineState(compare)
         encoder.setTexture(rgb, index: 0)
         encoder.setTexture(input, index: 1)
@@ -142,8 +147,8 @@ final class TextUpscaler {
         }
         pass(conv1, rgb, a, 0)
         pass(conv8, a, b, 2)
-        pass(conv8, b, a, 4)
-        pass(conv4, a, detail, 6)
+        pass(conv8, b, c, 4)
+        pass(conv4, c, detail, 6)
         encoder.endEncoding()
         return detail
     }
@@ -169,17 +174,33 @@ final class TextUpscaler {
 
     static half luma(half3 c) { return dot(c, half3(0.299h, 0.587h, 0.114h)); }
 
-    // Raises the flag where the luma differs from the network's last input.
-    // (Dispatches in one encoder run in order, so the network sees it.)
+    // A tile (one threadgroup) is recomputed when it or a neighbor changed:
+    // every layer's output depends on input up to 5 px away (less than a
+    // tile), and a skipped tile keeps each layer's previous output.
+    static bool tile_dirty(device atomic_uint *changed, uint2 tg, uint2 tiles) {
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int2 t = int2(tg) + int2(dx, dy);
+                if (t.x < 0 || t.y < 0 || t.x >= int(tiles.x) || t.y >= int(tiles.y)) continue;
+                if (atomic_load_explicit(&changed[t.y * int(tiles.x) + t.x], memory_order_relaxed) != 0) return true;
+            }
+        }
+        return false;
+    }
+
+    // Marks the tiles whose luma differs from the network's last input.
+    // (Dispatches in one encoder run in order, so the network sees them.)
     kernel void sr_compare(texture2d<half, access::read> rgb [[texture(0)]],
                            texture2d<half, access::read> input [[texture(1)]],
                            device atomic_uint *changed [[buffer(0)]],
                            constant int2 &origin [[buffer(1)]],
-                           uint2 gid [[thread_position_in_grid]]) {
+                           uint2 gid [[thread_position_in_grid]],
+                           uint2 tg [[threadgroup_position_in_grid]], uint2 tiles [[threadgroups_per_grid]]) {
         if (gid.x >= input.get_width() || gid.y >= input.get_height()) return;
         int2 q = origin + int2(gid);
         if (q.x >= int(rgb.get_width()) || q.y >= int(rgb.get_height())) return;
-        if (luma(rgb.read(uint2(q)).rgb) != input.read(gid).r) atomic_store_explicit(changed, 1u, memory_order_relaxed);
+        if (luma(rgb.read(uint2(q)).rgb) != input.read(gid).r)
+            atomic_store_explicit(&changed[tg.y * tiles.x + tg.x], 1u, memory_order_relaxed);
     }
 
     kernel void sr_conv1(texture2d<half, access::read> rgb [[texture(0)]],
@@ -188,9 +209,10 @@ final class TextUpscaler {
                          constant half *w [[buffer(0)]], constant half *b [[buffer(1)]],
                          constant int2 &origin [[buffer(2)]], constant int2 &frame [[buffer(3)]],
                          device atomic_uint *changed [[buffer(4)]],
-                         uint2 gid [[thread_position_in_grid]]) {
+                         uint2 gid [[thread_position_in_grid]],
+                         uint2 tg [[threadgroup_position_in_grid]], uint2 tiles [[threadgroups_per_grid]]) {
         if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;
-        if (atomic_load_explicit(changed, memory_order_relaxed) == 0) return;
+        if (!tile_dirty(changed, tg, tiles)) return;
         int2 p = origin + int2(gid);
         half4 a0 = half4(b[0], b[1], b[2], b[3]), a1 = half4(b[4], b[5], b[6], b[7]);
         for (int k = 0; k < 25; k++) {
@@ -212,9 +234,10 @@ final class TextUpscaler {
                          constant half4 *w [[buffer(0)]], constant half *b [[buffer(1)]],
                          constant int2 &origin [[buffer(2)]], constant int2 &frame [[buffer(3)]],
                          device atomic_uint *changed [[buffer(4)]],
-                         uint2 gid [[thread_position_in_grid]]) {
+                         uint2 gid [[thread_position_in_grid]],
+                         uint2 tg [[threadgroup_position_in_grid]], uint2 tiles [[threadgroups_per_grid]]) {
         if (gid.x >= in.get_width() || gid.y >= in.get_height()) return;
-        if (atomic_load_explicit(changed, memory_order_relaxed) == 0) return;
+        if (!tile_dirty(changed, tg, tiles)) return;
         half4 a0 = half4(b[0], b[1], b[2], b[3]), a1 = half4(b[4], b[5], b[6], b[7]);
         for (int k = 0; k < 9; k++) {
             int2 q = int2(gid) + int2(k % 3 - 1, k / 3 - 1);
@@ -233,9 +256,10 @@ final class TextUpscaler {
                          constant half4 *w [[buffer(0)]], constant half *b [[buffer(1)]],
                          constant int2 &origin [[buffer(2)]], constant int2 &frame [[buffer(3)]],
                          device atomic_uint *changed [[buffer(4)]],
-                         uint2 gid [[thread_position_in_grid]]) {
+                         uint2 gid [[thread_position_in_grid]],
+                         uint2 tg [[threadgroup_position_in_grid]], uint2 tiles [[threadgroups_per_grid]]) {
         if (gid.x >= in.get_width() || gid.y >= in.get_height()) return;
-        if (atomic_load_explicit(changed, memory_order_relaxed) == 0) return;
+        if (!tile_dirty(changed, tg, tiles)) return;
         half4 a = half4(b[0], b[1], b[2], b[3]);
         for (int k = 0; k < 9; k++) {
             int2 q = int2(gid) + int2(k % 3 - 1, k / 3 - 1);

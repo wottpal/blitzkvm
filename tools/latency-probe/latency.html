@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>latency probe</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  #sq { position: fixed; left: 120px; top: 240px; width: 600px; height: 600px; background: #000; }
+  /* Marker: the probe sends keys only while it sees this mid-gray square. */
+  #mark { position: fixed; left: 900px; top: 240px; width: 300px; height: 300px; background: #808080; }
+  #n { position: fixed; right: 40px; bottom: 30px; color: #444; font: 20px monospace; }
+</style>
+<div id="sq"></div>
+<div id="mark"></div>
+<div id="n">0</div>
+<script>
+  // A keydown flips a large square between black and white (one strong,
+  // localized change per key); the counter shows how many arrived.
+  let on = false, count = 0;
+  const sq = document.getElementById("sq"), n = document.getElementById("n");
+  addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return; // leave browser shortcuts alone
+    e.preventDefault();
+    on = !on;
+    sq.style.background = on ? "#fff" : "#000";
+    n.textContent = ++count;
+  });
+</script>
