@@ -4,6 +4,7 @@
 #   make test       Swift unit tests
 #   make icon       compile the Icon Composer source and standalone fallback
 #   make selftest   end-to-end run against the in-repo emulator
+#   make selftest-stalls   the picture survives link stalls and hidden windows
 #   make run DEVICE=jetkvm.local
 #   make install    copy the app to /Applications
 #   make notarize   notarize (Xcode account) and staple, for use on other Macs
@@ -32,7 +33,7 @@ APP := build/JetKVM Desktop.app
 BUILD_NUMBER := $(shell git -C .. rev-list --count HEAD 2>/dev/null || echo 0)
 EMULATOR_ADDR ?= 127.0.0.1:18080
 
-.PHONY: app engine swift icon test selftest selftest-extras run install notarize clean
+.PHONY: app engine swift icon test selftest selftest-extras selftest-stalls run install notarize clean
 
 engine:
 	cd .. && GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o macos/build/jetkvm-engine ./cmd/jetkvm-engine
@@ -83,6 +84,24 @@ selftest: app
 		test $$status -eq 0 && grep -q '"codec" : "H.265"' build/selftest-h265.json || { cat build/selftest-h265.json; echo "H.265 decode failed"; exit 1; }; \
 	else echo "ffmpeg not installed: H.265 pass skipped"; fi; \
 	echo "selftest passed: video (H.264 live pattern, H.265 clip), keyboard and pointer input, and engine recovery verified"
+
+# The picture must never stand still while frames arrive. Against an
+# emulator with the patched firmware's keyframe policy (one a minute, or on
+# request): 400 ms link stalls whose frames then arrive in a burst, and a
+# window hidden for 2 s and shown again. Each may freeze the picture only
+# about as long as the stall itself.
+selftest-stalls: app
+	cd .. && go build -o macos/build/emulator-serve ./test/emulator-serve
+	@for run in stalls hide; do \
+		./build/emulator-serve serve --listen $(EMULATOR_ADDR) --width 1920 --height 1080 --fps 60 --gop 3600 --keyframe-on-request \
+			$$([ $$run = stalls ] && echo --hold-every 3s --hold-for 400ms --rate 200e6) > /dev/null 2>&1 & pid=$$!; \
+		sleep 1; \
+		"$(APP)/Contents/MacOS/JetKVMDesktop" --device $(EMULATOR_ADDR) --selftest 12 --view-only --h264 \
+			$$([ $$run = stalls ] && echo --max-freeze-ms 700 || echo --hide-after 4 --max-freeze-ms 1000) > build/selftest-$$run.json; status=$$?; \
+		kill $$pid; \
+		test $$status -eq 0 || { cat build/selftest-$$run.json; echo "selftest-stalls ($$run) failed"; exit 1; }; \
+	done
+	@echo "selftest-stalls passed: no freeze beyond a link stall, and the picture resumes when the window is shown"
 
 install: app
 	rm -rf "/Applications/JetKVM Desktop.app"

@@ -163,6 +163,22 @@ final class GeometryTests: XCTestCase {
         XCTAssertEqual([larger.width, larger.height], [4800, 2600])
     }
 
+    func testMatchWindowScaleSetsPointsPerRemotePixel() {
+        // 200%: a 1504×944 remote matched to a 3008×1888-point view.
+        let doubled = VideoLayout.compute(videoWidth: 1504, videoHeight: 944, drawableWidth: 6020, drawableHeight: 3780,
+                                          mode: .matchWindow, pointScale: 2, matchScale: 2)
+        XCTAssertEqual([doubled.width, doubled.height], [6016, 3776])
+        XCTAssertTrue(doubled.nearest)
+        // 50%: half a point per remote pixel, one physical pixel on Retina.
+        let half = VideoLayout.compute(videoWidth: 2048, videoHeight: 1152, drawableWidth: 2048, drawableHeight: 1152,
+                                       mode: .matchWindow, pointScale: 2, matchScale: 0.5)
+        XCTAssertEqual([half.width, half.height], [2048, 1152])
+        let window = preferredContentSize(videoWidth: 1504, videoHeight: 944, pointScale: 2, mode: .matchWindow, matchScale: 1.5,
+                                          available: (3008, 1600), extraHeight: 0)
+        XCTAssertEqual(window?.width, 2256)
+        XCTAssertEqual(window?.height, 1416)
+    }
+
     func testIntegerScaleUsesWholeMultiples() {
         let layout = VideoLayout.compute(videoWidth: 1280, videoHeight: 720, drawableWidth: 3000, drawableHeight: 2000, mode: .integer)
         XCTAssertEqual(layout.width, 2560)
@@ -343,10 +359,22 @@ final class RemoteDisplayTests: XCTestCase {
         typealias S = RemoteDisplay.Size
         XCTAssertEqual(RemoteDisplay.size(fitting: 1504, 944), S(width: 1504, height: 944))
         XCTAssertEqual(RemoteDisplay.size(fitting: 1511, 947), S(width: 1504, height: 944))
-        // Beyond the limits: the closest size of the same shape.
-        XCTAssertEqual(RemoteDisplay.size(fitting: 2400, 1300), S(width: 1920, height: 1040))
+        // Beyond the limits: the largest size of the same shape the pixel
+        // clock allows.
+        XCTAssertEqual(RemoteDisplay.size(fitting: 2400, 1300), S(width: 2128, height: 1160))
         XCTAssertEqual(RemoteDisplay.size(fitting: 500, 300), S(width: 656, height: 400))
-        XCTAssertEqual(RemoteDisplay.size(fitting: 3000, 300), S(width: 1920, height: 400))
+        XCTAssertEqual(RemoteDisplay.size(fitting: 3000, 300), S(width: 2176, height: 400))
+        // A 40" 21:9 display in full screen (3008×1269 points), with and
+        // without the status bar.
+        XCTAssertEqual(RemoteDisplay.size(fitting: 3008, 1247), S(width: 2176, height: 900))
+        XCTAssertEqual(RemoteDisplay.size(fitting: 3008, 1269), S(width: 2160, height: 912))
+        XCTAssertEqual(RemoteDisplay.size(fitting: 2560, 1600), S(width: 1920, height: 1200))
+        for (w, h) in [(5000.0, 2000.0), (2400, 1300), (1700, 1700), (4000, 900), (2300, 1000)] {
+            let size = RemoteDisplay.size(fitting: w, h)
+            XCTAssertLessThanOrEqual(RemoteDisplay.timing(for: size).pixelClockKHz, RemoteDisplay.maxPixelClockKHz, "\(size)")
+            XCTAssertLessThanOrEqual(size.width, RemoteDisplay.maximum.width)
+            XCTAssertLessThanOrEqual(size.height, RemoteDisplay.maximum.height)
+        }
     }
 
     /// Timings measured to stream cleanly on a JetKVM with a Mac host
@@ -357,6 +385,9 @@ final class RemoteDisplayTests: XCTestCase {
             (1920, 1080, 512, 31, 5, 162120), (1920, 1200, 272, 35, 6, 162430),
             (960, 540, 2640, 98, 5, 137810), (800, 500, 2200, 212, 6, 128160),
             (640, 400, 1760, 389, 6, 113620),
+            // Wider than 1920 (2026-10-11, fork firmware, Mac mini host).
+            (2176, 900, 792, 26, 10, 164900), (2160, 912, 768, 26, 10, 164790),
+            (2112, 1168, 168, 34, 10, 164430), (2048, 1152, 256, 33, 5, 163810),
         ]
         for (w, h, hBlank, vBlank, vSync, clock) in verified {
             let t = RemoteDisplay.timing(for: .init(width: w, height: h))

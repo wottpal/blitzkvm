@@ -293,6 +293,13 @@ final class EngineProcess {
         send(command: EngineCommand(cmd: "setQualityLevel", qualityLevel: name))
     }
 
+    /// Asks the device for a keyframe. Any thread; no reply.
+    func requestKeyframe() {
+        if let frame = try? EngineProtocol.command(EngineCommand(cmd: "requestKeyframe")) {
+            write(frame)
+        }
+    }
+
     /// Sends a command and waits for its completion. Returns the RPC result
     /// (JSON) for "rpc" commands; throws the engine's or device's error.
     /// `assigned` receives the command's ID before it is sent (to match

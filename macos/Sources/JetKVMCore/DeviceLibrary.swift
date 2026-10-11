@@ -19,6 +19,8 @@ public struct Device: Codable, Equatable, Identifiable {
     public var viewMode: String?
     /// Nearest-neighbor at whole-number scales instead of FSR upscaling.
     public var exactPixelScaling: Bool?
+    /// Match Window: window points per remote pixel; nil means 1.
+    public var matchWindowScale: Double?
     /// Stream quality follows the network; nil means on.
     public var autoQuality: Bool?
     /// The fixed quality level used while automatic quality is off.
@@ -50,6 +52,18 @@ public struct Device: Codable, Equatable, Identifiable {
         get { exactPixelScaling ?? false }
         set { exactPixelScaling = newValue }
     }
+
+    /// Match Window: how large the remote desktop looks, as window points
+    /// per remote pixel. 1 matches a local window; 2 doubles everything (half
+    /// the remote resolution); 0.5 halves it (twice the resolution, up to the
+    /// device's limits).
+    public var matchScale: Double {
+        get { matchWindowScale.flatMap { $0 > 0 ? $0 : nil } ?? 1 }
+        set { matchWindowScale = newValue == 1 ? nil : newValue }
+    }
+
+    /// The Match Window scales offered in menus, largest text first.
+    public static let matchScales: [Double] = [2, 1.5, 1.25, 1, 0.8, 0.67, 0.5]
 
     public var adaptiveQuality: Bool {
         get { autoQuality ?? true }

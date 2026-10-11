@@ -14,8 +14,9 @@ public enum ScalingMode: String, CaseIterable {
     /// with exact (nearest-neighbor) pixels.
     case integer
     /// The remote display takes the window's size (RemoteDisplay): one remote
-    /// pixel per point like actualSize, filling the window. Scaled to fit
-    /// until the remote has followed a resize, and beyond the device's limits.
+    /// pixel per point like actualSize (or per `matchScale` points), filling
+    /// the window. Scaled to fit until the remote has followed a resize, and
+    /// beyond the device's limits.
     /// Opt-in: every new size is a new display to a Mac target, which then
     /// is no longer its main display (plan section 22).
     case matchWindow
@@ -47,9 +48,10 @@ public struct VideoLayout: Equatable {
     /// Computes where the video goes inside a drawable of the given pixel
     /// size. `pointScale` is the display's backing scale factor; `pan` (0...1
     /// per axis) positions a video larger than the drawable. Edges are snapped
-    /// to whole pixels.
+    /// to whole pixels. `matchScale` is Device.matchScale (Match Window).
     public static func compute(videoWidth: Int, videoHeight: Int, drawableWidth: Double, drawableHeight: Double,
-                               mode: ScalingMode, pointScale: Double = 1, pan: (x: Double, y: Double) = (0.5, 0.5)) -> VideoLayout {
+                               mode: ScalingMode, pointScale: Double = 1, matchScale: Double = 1,
+                               pan: (x: Double, y: Double) = (0.5, 0.5)) -> VideoLayout {
         guard videoWidth > 0, videoHeight > 0, drawableWidth > 0, drawableHeight > 0 else {
             return VideoLayout(x: 0, y: 0, width: 0, height: 0, nearest: false)
         }
@@ -64,7 +66,7 @@ public struct VideoLayout: Equatable {
         case .matchWindow:
             // Matched: the view is the remote size plus less than one size
             // step (RemoteDisplay rounds down to whole steps).
-            let natural = max(pointScale, 0.25)
+            let natural = max(pointScale * matchScale, 0.25)
             let slackW = drawableWidth - vw * natural, slackH = drawableHeight - vh * natural
             let matched = slackW >= 0 && slackH >= 0 && slackW < Double(RemoteDisplay.widthStep) * natural
                 && slackH < Double(RemoteDisplay.heightStep) * natural
@@ -140,10 +142,15 @@ public struct ScrollAccumulator {
 
 /// Window content size (points) that shows a remote screen at `mode`'s
 /// natural size, shrunk to fit `available` keeping the aspect ratio.
-public func preferredContentSize(videoWidth: Int, videoHeight: Int, pointScale: Double, mode: ScalingMode,
+public func preferredContentSize(videoWidth: Int, videoHeight: Int, pointScale: Double, mode: ScalingMode, matchScale: Double = 1,
                                  available: (width: Double, height: Double), extraHeight: Double) -> (width: Double, height: Double)? {
     guard videoWidth > 0, videoHeight > 0, pointScale > 0 else { return nil }
-    let perPixel: Double = mode == .pixelExact ? 1 / pointScale : 1 // points per remote pixel
+    let perPixel: Double // points per remote pixel
+    switch mode {
+    case .pixelExact: perPixel = 1 / pointScale
+    case .matchWindow: perPixel = matchScale
+    default: perPixel = 1
+    }
     let w = Double(videoWidth) * perPixel
     let h = Double(videoHeight) * perPixel
     let shrink = min(1, available.width / w, (available.height - extraHeight) / h)

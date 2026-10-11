@@ -8,6 +8,7 @@ import VideoToolbox
 /// Metal textures.
 final class VideoDecoder {
     struct Stats {
+        var received = 0
         var decoded = 0
         var errors = 0
         var keyframes = 0
@@ -17,6 +18,10 @@ final class VideoDecoder {
 
     /// Called on VideoToolbox's callback thread.
     var onFrame: ((CVPixelBuffer, AccessUnitHeader) -> Void)?
+    /// Asks the device for a keyframe (decoder queue). Every wait for one
+    /// must ask: the patched firmware sends keyframes only on request (or
+    /// once a minute), so a silent wait freezes the picture for up to that.
+    var onKeyframeNeeded: (() -> Void)?
 
     private let queue = DispatchQueue(label: "jetkvm.decoder", qos: .userInteractive)
     private var session: VTDecompressionSession?
@@ -24,12 +29,16 @@ final class VideoDecoder {
     private var parameterSets: [Data] = []
     private var codec: AccessUnitHeader.Codec?
     private var waitingForKeyframe = true
+    // Why the current wait began, and when its first unit was dropped.
+    private var waitCause = "start"
+    private var waitStarted: UInt64 = 0
+    private var lastKeyframeRequest: UInt64 = 0
     private(set) var stats = Stats()
     private let statsLock = NSLock()
     private var pausedFlag = false
 
     /// While paused (window hidden) units are dropped without decoding;
-    /// decoding resumes at the next keyframe.
+    /// decoding resumes at a keyframe requested once units are wanted again.
     var paused: Bool {
         get { statsLock.lock(); defer { statsLock.unlock() }; return pausedFlag }
         set { statsLock.lock(); pausedFlag = newValue; statsLock.unlock() }
@@ -41,18 +50,22 @@ final class VideoDecoder {
     }
 
     private var queued = 0
-    /// Units allowed to wait for the decoder; beyond that the decoder skips
-    /// to the next keyframe instead of building latency.
-    private let maxQueued = 6
+    /// Units allowed to wait for the decoder: one second at 60 fps. Bursts
+    /// (frames released together after a repaired loss or a network hiccup)
+    /// must fit: decoding takes about 1 ms a frame, so catching up is far
+    /// cheaper than a keyframe. Beyond that the decoder is stuck, and skips
+    /// to a requested keyframe instead of building latency.
+    private let maxQueued = 60
 
     /// Decodes one Annex-B access unit. Safe to call from any thread.
     func decode(_ header: AccessUnitHeader, annexB: Data) {
         statsLock.lock()
+        stats.received += 1
         let backlog = queued
         if backlog < maxQueued || header.keyframe { queued += 1 }
         statsLock.unlock()
         guard backlog < maxQueued || header.keyframe else {
-            queue.async { self.waitingForKeyframe = true }
+            queue.async { self.waitForKeyframe("decoder \(backlog) units behind") }
             bump { $0.skipped += 1 }
             return
         }
@@ -67,8 +80,24 @@ final class VideoDecoder {
     func reset() {
         queue.async {
             self.invalidate()
-            self.waitingForKeyframe = true
+            self.waitForKeyframe("reset")
         }
+    }
+
+    /// Drops units until a keyframe (decoder queue).
+    private func waitForKeyframe(_ cause: String) {
+        guard !waitingForKeyframe else { return }
+        waitingForKeyframe = true
+        waitCause = cause
+        waitStarted = 0
+    }
+
+    /// Rate-limited to one request per 250 ms (decoder queue).
+    private func requestKeyframe() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now &- lastKeyframeRequest >= 250_000_000 else { return }
+        lastKeyframeRequest = now
+        onKeyframeNeeded?()
     }
 
     private func invalidate() {
@@ -83,7 +112,7 @@ final class VideoDecoder {
 
     private func decodeOnQueue(_ header: AccessUnitHeader, annexB: Data) {
         if paused {
-            waitingForKeyframe = true
+            waitForKeyframe("window hidden")
             return
         }
         let annexCodec: AnnexB.Codec = header.codec == .h265 ? .h265 : .h264
@@ -91,19 +120,29 @@ final class VideoDecoder {
         if codec != header.codec {
             invalidate()
             codec = header.codec
-            waitingForKeyframe = true
+            waitForKeyframe("codec change")
         }
         if !split.parameterSets.isEmpty && split.parameterSets != parameterSets {
             // New stream configuration (first keyframe, or a resolution change).
             invalidate()
             guard createSession(parameterSets: split.parameterSets, codec: header.codec) else {
                 bump { $0.errors += 1 }
+                waitForKeyframe("decoder session not created")
+                requestKeyframe()
                 return
             }
         }
         if waitingForKeyframe {
-            guard split.isKeyframe, session != nil else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard split.isKeyframe, session != nil else {
+                if waitStarted == 0 { waitStarted = now }
+                requestKeyframe()
+                return
+            }
             waitingForKeyframe = false
+            if waitStarted != 0 {
+                AppLog.log(String(format: "video resumed at a keyframe after %.0f ms (%@)", Double(now - waitStarted) / 1e6, waitCause))
+            }
         }
         guard let session, let format, !split.lengthPrefixed.isEmpty else { return }
         if split.isKeyframe { bump { $0.keyframes += 1 } }
@@ -134,7 +173,9 @@ final class VideoDecoder {
         let decodeStatus = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sampleBuffer, flags: [], infoFlagsOut: nil) { [weak self] status, _, imageBuffer, _, _ in
             guard let self else { return }
             guard status == noErr, let imageBuffer else {
+                // Later frames reference this one: repair with a keyframe.
                 self.bump { $0.errors += 1 }
+                self.requestKeyframe()
                 return
             }
             let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6
@@ -146,9 +187,10 @@ final class VideoDecoder {
         }
         if decodeStatus != noErr {
             bump { $0.errors += 1 }
+            requestKeyframe()
             if decodeStatus == kVTInvalidSessionErr {
                 invalidate()
-                waitingForKeyframe = true
+                waitForKeyframe("decoder session invalidated")
             }
         }
     }

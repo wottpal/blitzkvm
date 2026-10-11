@@ -23,6 +23,11 @@ class VideoView: NSView {
         get { state.withLock { $0.mode } }
         set { state.withLock { $0.mode = newValue }; redraw() }
     }
+    /// Match Window: window points per remote pixel (Device.matchScale).
+    var matchScale: Double {
+        get { state.withLock { $0.matchScale } }
+        set { state.withLock { $0.matchScale = newValue }; redraw() }
+    }
     /// Nearest-neighbor at whole-number scales instead of FSR.
     var exactPixels: Bool {
         get { state.withLock { $0.exactPixels } }
@@ -47,6 +52,7 @@ class VideoView: NSView {
     private struct State {
         var mode: ScalingMode = .actualSize
         var exactPixels = false
+        var matchScale: Double = 1
         var pan: (x: Double, y: Double) = (0.5, 0.5)
         var pointScale: Double = 2
         var drawableSize = CGSize.zero
@@ -568,7 +574,7 @@ class VideoView: NSView {
         if let source {
             let l = VideoLayout.compute(videoWidth: source.width, videoHeight: source.height,
                                         drawableWidth: size.width, drawableHeight: size.height,
-                                        mode: s.mode, pointScale: s.pointScale, pan: s.pan)
+                                        mode: s.mode, pointScale: s.pointScale, matchScale: s.matchScale, pan: s.pan)
             layout = l
             // Only the visible part of the video rect (it overflows when
             // panning). Layout edges are whole pixels.
@@ -917,7 +923,7 @@ class VideoView: NSView {
             guard let frame = s.frame else { return s.layout }
             return VideoLayout.compute(videoWidth: CVPixelBufferGetWidth(frame), videoHeight: CVPixelBufferGetHeight(frame),
                                        drawableWidth: s.drawableSize.width, drawableHeight: s.drawableSize.height,
-                                       mode: s.mode, pointScale: s.pointScale, pan: s.pan)
+                                       mode: s.mode, pointScale: s.pointScale, matchScale: s.matchScale, pan: s.pan)
         }
     }
 

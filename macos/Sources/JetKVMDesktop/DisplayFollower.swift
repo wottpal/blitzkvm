@@ -14,7 +14,8 @@ final class DisplayFollower {
     /// Whether the window still drives the remote (checked again when a
     /// request is due).
     var isEnabled: () -> Bool = { true }
-    /// A new display mode was sent to the device.
+    /// A new display mode is being sent to the device (the remote's picture
+    /// pauses while it re-detects the display).
     var onResize: ((RemoteDisplay.Size) -> Void)?
     var onError: ((String) -> Void)?
     /// The size last asked of the device.
@@ -57,9 +58,9 @@ final class DisplayFollower {
                 let edid = try RemoteDisplay.edid(current, advertising: size)
                 requested = size
                 if edid != current {
+                    onResize?(size)
                     try await engine.call("setEDID", params: .object(["edid": .string(RemoteDisplay.hex(edid))]))
                     AppLog.log("remote display: asked for \(size)")
-                    onResize?(size)
                 }
             } catch {
                 onError?("could not resize the remote display: \(error.localizedDescription)")

@@ -13,10 +13,20 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private(set) var videoView: CaptureVideoView!
     private let statusLabel = NSTextField(labelWithString: "Starting…")
     private let hud = HintView()
+    private let stallOverlay = StallOverlay()
+    private let statusBar = NSView()
+    private var statusBarHeightConstraint: NSLayoutConstraint!
     private let viewControl = NSPopUpButton(frame: .zero, pullsDown: false)
     private var keyboardHintShown = false
     private(set) var snapshot = SessionSnapshot(Phase: "idle", Status: "starting")
     private(set) var lastStats: [String: Any] = [:]
+    // Video watchdog (main thread): received, decoded and presented counts
+    // at the last stats tick, and seconds without progress.
+    private var watchedReceived = 0
+    private var watchedDecoded = 0
+    private var watchedPresented = 0
+    private var decodeStalledFor = 0
+    private var renderStalledFor = 0
     private var codecName = "–"
     /// The codec of the last access unit ("H.265", "H.264" or "–").
     var currentCodec: String {
@@ -26,6 +36,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     }
     private var password: String?
     var onFrameDecoded: ((CVPixelBuffer, AccessUnitHeader) -> Void)?
+    /// The stall overlay appeared, changed or went away (nil).
+    var onStallOverlay: ((StallOverlay.Content?) -> Void)?
     var onRestart: ((String) -> Void)?
     /// Called when a session connects (to persist device ID, last use).
     var onConnected: ((DeviceWindowController) -> Void)?
@@ -46,6 +58,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private var unverifiedPassword: String?
     private let codecLock = NSLock()
     private var statusTimer: Timer?
+    private var stallTimer: Timer?
+    /// When the current stall began (uptime ns), and when the session last
+    /// connected or the remote display was last asked to resize.
+    private var stallSince: UInt64?
+    private var connectedAt: UInt64 = 0
+    private var resizeRequest: (at: UInt64, size: RemoteDisplay.Size)?
     private var isShutDown = false
     private var wasConnected = false
     private var pathMonitor: NWPathMonitor?
@@ -60,6 +78,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// it by hand.
     private var userSizedWindow = false
     private let videoSize = Locked(CGSize.zero)
+    /// While the remote display switches to a new size, the host sends black
+    /// frames: the last picture stays up until one of the new size arrives
+    /// (or the deadline, uptime ns, passes).
+    private let displayHold = Locked<(size: CGSize, until: UInt64)?>(nil)
+    /// When a frame last reached the view (uptime ns).
+    private let shownAt = Locked<UInt64>(0)
     /// Set when the first probe found no address: keep probing all of them
     /// and switch to the first that answers.
     var reprobeAddresses = false
@@ -67,6 +91,16 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private lazy var displayFollower = makeDisplayFollower()
 
     static let statusBarHeight: CGFloat = 22
+
+    /// View › Show Status Bar, for all device windows.
+    static var showsStatusBar: Bool {
+        get { UserDefaults.standard.object(forKey: "showStatusBar") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "showStatusBar") }
+    }
+
+    /// The status bar's current height (0 while hidden).
+    private var barHeight: CGFloat { statusBar.isHidden ? 0 : Self.statusBarHeight }
+    var isStatusBarVisible: Bool { !statusBar.isHidden }
 
     init(device: Device, address: String, password: String?, engineURL: URL) {
         self.device = device
@@ -88,9 +122,17 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         engine.delegate = self
         decoder.onFrame = { [weak self] buffer, header in
             guard let self else { return }
-            self.videoView.display(buffer)
             self.onFrameDecoded?(buffer, header)
             let size = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
+            let now = DispatchTime.now().uptimeNanoseconds
+            let held = self.displayHold.withLock { hold -> Bool in
+                guard let h = hold else { return false }
+                if h.size == size || now > h.until { hold = nil }
+                return hold != nil
+            }
+            guard !held else { return }
+            self.videoView.display(buffer)
+            self.shownAt.withLock { $0 = now }
             let changed = self.videoSize.withLock { current -> Bool in
                 guard current != size else { return false }
                 current = size
@@ -98,6 +140,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             }
             if changed { DispatchQueue.main.async { self.videoSizeChanged() } }
         }
+        decoder.onKeyframeNeeded = { [weak self] in self?.engine.requestKeyframe() }
         input.send = { [weak self] frame in self?.engine.write(frame) }
         input.onCaptureChange = { [weak self] in self?.captureChanged($0) }
         applyPreferences()
@@ -129,6 +172,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         input.modifierProfile = device.profile
         input.invertScroll = device.invertScroll
         videoView.scalingMode = device.scaling
+        videoView.matchScale = device.matchScale
         window?.invalidateCursorRects(for: videoView)
         videoView.exactPixels = device.exactPixels
         refreshStatus()
@@ -173,6 +217,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         setScaling(mode)
     }
 
+    /// Match Window: window points per remote pixel (Device.matchScale).
+    func setMatchScale(_ scale: Double) {
+        updatePreferences { $0.matchScale = scale }
+        matchRemoteToWindow()
+    }
+
     /// Changing the view mode resizes the window to suit it, or (Match
     /// Window) the remote display to suit the window.
     func setScaling(_ mode: ScalingMode) {
@@ -193,12 +243,14 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         window?.invalidateCursorRects(for: videoView)
         defer { matchRemoteToWindow() }
         guard let window, !window.styleMask.contains(.fullScreen), let size = videoView.currentVideoSize else { return }
+        let scale = CGFloat(device.matchScale) // window points per remote pixel
         if !userSizedWindow {
             fitWindowToRemote()
         } else if followsWindow, displayFollower.requested == RemoteDisplay.Size(width: Int(size.width), height: Int(size.height)),
-                  (0..<CGFloat(RemoteDisplay.widthStep)).contains(videoView.bounds.width - size.width),
-                  (0..<CGFloat(RemoteDisplay.heightStep)).contains(videoView.bounds.height - size.height) {
-            var frame = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: size.width, height: size.height + Self.statusBarHeight))
+                  (0..<CGFloat(RemoteDisplay.widthStep) * scale).contains(videoView.bounds.width - size.width * scale),
+                  (0..<CGFloat(RemoteDisplay.heightStep) * scale).contains(videoView.bounds.height - size.height * scale) {
+            let content = NSRect(x: 0, y: 0, width: size.width * scale, height: size.height * scale + barHeight)
+            var frame = window.frameRect(forContentRect: content)
             frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
             window.setFrame(frame, display: true)
         }
@@ -216,9 +268,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             self?.videoView.currentVideoSize.map { RemoteDisplay.Size(width: Int($0.width), height: Int($0.height)) }
         }
         follower.isEnabled = { [weak self] in self?.followsWindow ?? false }
+        // Keep the picture through the switch; the stall overlay explains
+        // the pause.
         follower.onResize = { [weak self] size in
-            guard let self else { return }
-            self.hud.show("Resizing \(self.device.name)'s display to \(size)", for: 3)
+            let now = DispatchTime.now().uptimeNanoseconds
+            self?.resizeRequest = (now, size)
+            self?.displayHold.withLock { $0 = (CGSize(width: size.width, height: size.height), now + 8_000_000_000) }
         }
         follower.onError = { [weak self] in self?.refreshStatus(extra: $0) }
         return follower
@@ -229,7 +284,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private func matchRemoteToWindow() {
         guard followsWindow, snapshot.Phase == "connected", let window, !window.inLiveResize,
               let current = videoView.currentVideoSize else { return }
-        let size = RemoteDisplay.size(fitting: Double(videoView.bounds.width), Double(videoView.bounds.height))
+        let scale = device.matchScale
+        let size = RemoteDisplay.size(fitting: Double(videoView.bounds.width) / scale, Double(videoView.bounds.height) / scale)
         if size != RemoteDisplay.Size(width: Int(current.width), height: Int(current.height)) {
             // The window drives the remote from now on.
             userSizedWindow = true
@@ -247,7 +303,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         statusLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byTruncatingTail
-        let bar = NSView()
+        let bar = statusBar
         bar.wantsLayer = true
         bar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -265,13 +321,22 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         viewControl.toolTip = "How the remote screen is sized in the window"
         hud.translatesAutoresizingMaskIntoConstraints = false
+        stallOverlay.translatesAutoresizingMaskIntoConstraints = false
         let container = NSView(frame: window.contentLayoutRect)
         view.translatesAutoresizingMaskIntoConstraints = false
         bar.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(view)
+        container.addSubview(stallOverlay)
         container.addSubview(bar)
         container.addSubview(hud)
+        bar.isHidden = !Self.showsStatusBar
+        statusBarHeightConstraint = bar.heightAnchor.constraint(equalToConstant: barHeight)
         NSLayoutConstraint.activate([
+            stallOverlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            stallOverlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stallOverlay.topAnchor.constraint(equalTo: view.topAnchor),
+            stallOverlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            statusBarHeightConstraint,
             hud.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             hud.topAnchor.constraint(equalTo: view.topAnchor, constant: 18),
             hud.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -40),
@@ -284,7 +349,6 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             bar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             bar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             bar.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            bar.heightAnchor.constraint(equalToConstant: Self.statusBarHeight),
             statusLabel.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 8),
             statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: viewControl.leadingAnchor, constant: -8),
             statusLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
@@ -326,6 +390,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             self?.input.ensureEventTap()
             self?.refreshStatus()
         }
+        stallTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.updateStallOverlay() }
         startPathMonitor()
         startReprobing()
     }
@@ -379,6 +444,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         displayFollower.cancel()
         input.setCaptured(false)
         statusTimer?.invalidate()
+        stallTimer?.invalidate()
         reprobeTimer?.invalidate()
         pathMonitor?.cancel()
         mediaWindow?.close()
@@ -434,8 +500,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         let available = window.contentRect(forFrameRect: visible).size
         guard let content = preferredContentSize(videoWidth: Int(size.width), videoHeight: Int(size.height),
                                                  pointScale: Double(window.backingScaleFactor), mode: videoView.scalingMode,
+                                                 matchScale: device.matchScale,
                                                  available: (Double(available.width), Double(available.height)),
-                                                 extraHeight: Double(Self.statusBarHeight)) else { return }
+                                                 extraHeight: Double(barHeight)) else { return }
         var frame = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: content.width, height: content.height))
         // Grow around the current center, then move fully onto the screen.
         frame.origin.x = window.frame.midX - frame.width / 2
@@ -493,7 +560,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
         guard aspectLocked, let size = videoView.currentVideoSize, size.width > 0 else { return frameSize }
-        let bar = Self.statusBarHeight
+        let bar = barHeight
         var content = sender.contentRect(forFrameRect: NSRect(origin: .zero, size: frameSize)).size
         content.height = (content.width * size.height / size.width).rounded() + bar
         return sender.frameRect(forContentRect: NSRect(origin: .zero, size: content)).size
@@ -521,6 +588,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         if snapshot.Phase == "connected" && !wasConnected {
             wasConnected = true
+            connectedAt = DispatchTime.now().uptimeNanoseconds
             matchRemoteToWindow()
             if let accepted = unverifiedPassword {
                 unverifiedPassword = nil
@@ -586,7 +654,38 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func engine(_ engine: EngineProcess, didUpdateStats stats: [String: Any]) {
         lastStats = stats
+        watchVideo()
         refreshStatus()
+    }
+
+    /// Once a second: frames arrive but none decode, or none reach the
+    /// screen. The decoder asks for a keyframe whenever it waits for one;
+    /// this catches what it cannot see (e.g. the engine's own wait) and logs
+    /// render stalls, which a keyframe does not fix.
+    private func watchVideo() {
+        let stats = decoder.snapshot()
+        let presented = videoView.presentedFrames
+        defer { (watchedReceived, watchedDecoded, watchedPresented) = (stats.received, stats.decoded, presented) }
+        let decoded = stats.decoded
+        let arriving = stats.received > watchedReceived
+        guard arriving, !decoder.paused, snapshot.Phase == "connected" else {
+            (decodeStalledFor, renderStalledFor) = (0, 0)
+            return
+        }
+        if decoded == watchedDecoded {
+            // From the second tick: at the first, a unit may just be in flight.
+            decodeStalledFor += 1
+            if decodeStalledFor >= 2 {
+                AppLog.log("video watchdog: frames arrive but none decoded for \(decodeStalledFor) s; requesting a keyframe")
+                engine.requestKeyframe()
+            }
+        } else {
+            decodeStalledFor = 0
+            renderStalledFor = presented == watchedPresented ? renderStalledFor + 1 : 0
+            if renderStalledFor > 0 {
+                AppLog.log("video watchdog: frames decode but none reached the screen for \(renderStalledFor) s")
+            }
+        }
     }
 
     func engine(_ engine: EngineProcess, didFinishCommand id: Int64, error: String?, invalid: String?) {
@@ -668,9 +767,13 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     // MARK: NSWindowDelegate
 
+    /// Focus (and a click) captures keyboard and pointer. Self-tests turn
+    /// this off: the operator's own input must never reach the remote.
+    var capturesOnFocus = true
+
     func windowDidBecomeKey(_ notification: Notification) {
         window?.makeFirstResponder(videoView)
-        input.setCaptured(true)
+        if capturesOnFocus { input.setCaptured(true) }
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -680,11 +783,86 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     }
 
     /// Hidden windows (another tab in front, minimized, covered) stay
-    /// connected but stop decoding; they resume at the next keyframe.
+    /// connected but stop decoding; shown again, the decoder asks for a
+    /// keyframe to resume at.
     func windowDidChangeOcclusionState(_ notification: Notification) {
         guard let window else { return }
         decoder.paused = !window.occlusionState.contains(.visible)
         refreshStatus()
+    }
+
+    /// Shows or hides the status bar. A window keeps its video area; in full
+    /// screen the video area changes, and Match Window resizes the remote
+    /// display to it.
+    func setStatusBarVisible(_ visible: Bool) {
+        guard statusBar.isHidden == visible, let window else { return }
+        let delta = visible ? Self.statusBarHeight : -Self.statusBarHeight
+        statusBar.isHidden = !visible
+        statusBarHeightConstraint.constant = barHeight
+        if !window.styleMask.contains(.fullScreen) && !window.isZoomed {
+            var frame = window.frame
+            frame.size.height += delta
+            frame.origin.y -= delta
+            window.setFrame(frame, display: true)
+        }
+        window.contentView?.layoutSubtreeIfNeeded()
+        matchRemoteToWindow()
+    }
+
+    // MARK: Stall overlay
+
+    /// Every 0.1 s: what the picture is waiting for, shown over the last
+    /// frame once it has lasted long enough not to flicker.
+    private func updateStallOverlay() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let shown = stallOverlay.content
+        defer { if stallOverlay.content != shown { onStallOverlay?(stallOverlay.content) } }
+        guard let reason = stallReason(now: now) else {
+            stallSince = nil
+            stallOverlay.show(nil)
+            return
+        }
+        let since = stallSince ?? now
+        stallSince = since
+        if shown != nil || now - since >= 600_000_000 {
+            stallOverlay.show(reason)
+        }
+    }
+
+    private func stallReason(now: UInt64) -> StallOverlay.Content? {
+        guard !isShutDown, window?.occlusionState.contains(.visible) == true else { return nil }
+        let name = device.name
+        switch snapshot.Phase {
+        case "connected":
+            break
+        case "idle", "connecting":
+            return .init(title: "Connecting to \(name)…", detail: address)
+        case "reconnecting", "disconnected":
+            return .init(title: "Reconnecting to \(name)…", detail: "The connection dropped. Retrying automatically.")
+        case "rebooting":
+            return .init(title: "\(name) is restarting…", detail: "The picture comes back once it is up again.")
+        default:
+            return nil // needs the user: the status bar and alerts explain
+        }
+        // Connected: frames keep coming even from a still screen, so a gap
+        // in what reaches the view is a stall.
+        let pictureAt = shownAt.withLock { $0 }
+        let lastPicture = max(pictureAt, connectedAt)
+        guard now > lastPicture, now - lastPicture > 250_000_000 else { return nil }
+        if let request = resizeRequest, now - request.at < 15_000_000_000 {
+            return .init(title: "Resizing the remote display…",
+                         detail: "Switching to \(request.size). The computer re-detects its display.")
+        }
+        if let signal = snapshot.VideoSignal, !signal.isEmpty, signal != "ready" {
+            return .init(title: "No picture from the computer",
+                         detail: "HDMI: \(signal.replacingOccurrences(of: "_", with: " ")). It may be asleep or switched off.", busy: false)
+        }
+        if pictureAt < connectedAt {
+            return .init(title: "Starting video…", detail: "Connected to \(name).")
+        }
+        let seconds = Int(Double(now - lastPicture) / 1e9)
+        return .init(title: "Waiting for video…",
+                     detail: seconds < 2 ? "Connected, but the picture has paused." : "Connected, but no new picture for \(seconds) s.")
     }
 
     /// In full screen the menu bar (and with it the window's title bar and
@@ -763,7 +941,7 @@ final class CaptureVideoView: VideoView {
 
     override func mouseDown(with event: NSEvent) {
         guard let controller else { return }
-        if !controller.input.captured {
+        if !controller.input.captured && controller.capturesOnFocus {
             controller.input.setCaptured(true)
         }
         routeMouse(event)

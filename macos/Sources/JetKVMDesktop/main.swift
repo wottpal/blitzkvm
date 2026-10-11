@@ -28,7 +28,13 @@ struct Options {
     /// Never sends keyboard or mouse input (safe testing against a device
     /// whose target is this very Mac).
     var viewOnly = false
+    var hideAfter: Double?
+    var maxFreezeMs: Double?
+    var qualityChanges: [(Double, String)] = []
+    var toggleStatusBarAfter: Double?
     var windowSize: (Double, Double)?
+    var fullScreen = false
+    var matchScale: Double?
     var scaling: ScalingMode?
     var profile: ModifierProfile?
 
@@ -50,9 +56,21 @@ struct Options {
             case "--snapshot": o.snapshotPath = next()
             case "--latency-probe": o.latencyProbe = next().flatMap(Int.init)
             case "--inject-input": o.injectInput = true
+            case "--hide-after": o.hideAfter = next().flatMap(Double.init)
+            case "--max-freeze-ms": o.maxFreezeMs = next().flatMap(Double.init)
+            case "--toggle-status-bar-after": o.toggleStatusBarAfter = next().flatMap(Double.init)
+            case "--set-quality-after":
+                // "4:balanced,9:maximum": seconds into the run, ladder level.
+                o.qualityChanges = (next() ?? "").split(separator: ",").compactMap { part in
+                    let p = part.split(separator: ":")
+                    guard p.count == 2, let s = Double(p[0]) else { return nil }
+                    return (s, String(p[1]))
+                }
             case "--exercise-extras": o.exerciseExtras = true
             case "--view-only": o.viewOnly = true
             case "--scale": o.scaling = next().flatMap(ScalingMode.init(rawValue:))
+            case "--match-scale": o.matchScale = next().flatMap(Double.init)
+            case "--full-screen": o.fullScreen = true
             case "--profile": o.profile = next().flatMap(ModifierProfile.init(rawValue:))
             case "--window-size":
                 let parts = (next() ?? "").split(separator: "x").compactMap { Double($0) }
@@ -140,6 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var device = saved ?? Device(name: address, addresses: [address])
         if saved == nil { adHocDeviceIDs.insert(device.id) }
         if let scaling = options.scaling { device.scaling = scaling }
+        if let scale = options.matchScale { device.matchScale = scale }
         if let profile = options.profile { device.modifierProfile = profile.rawValue }
         if isSelfTest {
             // Self-tests never touch the device library or Keychain.
@@ -231,6 +250,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let seconds = options.selfTestSeconds {
             selfTest = SelfTest(controller: controller, seconds: seconds, crashEngineAfter: options.crashEngineAfter, snapshotPath: options.snapshotPath)
             selfTest?.injectInput = options.injectInput
+            selfTest?.hideAfter = options.hideAfter
+            selfTest?.maxFreezeMs = options.maxFreezeMs
+            selfTest?.qualityChanges = options.qualityChanges
+            selfTest?.toggleStatusBarAfter = options.toggleStatusBarAfter
             selfTest?.exerciseExtras = options.exerciseExtras
         }
         if let (w, h) = options.windowSize {
@@ -243,6 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.window?.center()
         }
         controller.showWindow(nil)
+        if options.fullScreen { controller.window?.toggleFullScreen(nil) }
         devicesWindow?.close()
         do {
             try controller.start()
@@ -412,7 +436,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             i.representedObject = mode.rawValue
             view.addItem(i)
         }
+        let matchScale = NSMenu(title: "Match Window Scale")
+        for scale in Device.matchScales {
+            let i = item(Self.matchScaleTitle(scale), #selector(setMatchScale(_:)))
+            i.representedObject = scale
+            matchScale.addItem(i)
+        }
+        let matchScaleItem = NSMenuItem(title: "Match Window Scale", action: nil, keyEquivalent: "")
+        matchScaleItem.submenu = matchScale
+        view.addItem(matchScaleItem)
         view.addItem(item("Exact Pixels at Whole-Number Scales", #selector(toggleExactPixels)))
+        view.addItem(.separator())
+        view.addItem(item("Show Status Bar", #selector(toggleStatusBar), key: "/"))
         view.addItem(.separator())
         view.addItem(item("Fit Window to Remote Screen", #selector(fitWindow), key: "0", mods: [.command, .option]))
         view.addItem(item("Lock Aspect Ratio", #selector(toggleAspectLock)))
@@ -457,6 +492,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let raw = sender.representedObject as? String, let m = ScalingMode(rawValue: raw) { current?.pickScaling(m) }
     }
     @objc private func toggleExactPixels() { current?.updatePreferences { $0.exactPixels.toggle() } }
+    @objc private func setMatchScale(_ sender: NSMenuItem) {
+        if let scale = sender.representedObject as? Double { current?.setMatchScale(scale) }
+    }
+    @objc private func toggleStatusBar() {
+        DeviceWindowController.showsStatusBar.toggle()
+        windows.forEach { $0.setStatusBarVisible(DeviceWindowController.showsStatusBar) }
+    }
+
+    /// "200% (Larger Text)" … "50% (More Space)": how large the remote
+    /// desktop looks compared with a local window.
+    static func matchScaleTitle(_ scale: Double) -> String {
+        let percent = "\(Int((scale * 100).rounded()))%"
+        switch scale {
+        case Device.matchScales.first: return "\(percent) (Larger Text)"
+        case 1: return "\(percent) (Default)"
+        case Device.matchScales.last: return "\(percent) (More Space)"
+        default: return percent
+        }
+    }
 
     /// The engine's quality ladder (pkg/session/autoquality.go), best first.
     static let qualityLevels: [(String, String)] = [
@@ -519,6 +573,12 @@ extension AppDelegate: NSMenuItemValidation {
         case #selector(toggleExactPixels):
             menuItem.state = c?.device.exactPixels == true ? .on : .off
             return c != nil
+        case #selector(setMatchScale(_:)):
+            menuItem.state = c?.device.matchScale == menuItem.representedObject as? Double ? .on : .off
+            return c?.device.scaling == .matchWindow
+        case #selector(toggleStatusBar):
+            menuItem.state = DeviceWindowController.showsStatusBar ? .on : .off
+            return true
         case #selector(toggleInvertScroll):
             menuItem.state = c?.device.invertScroll == true ? .on : .off
             return c != nil

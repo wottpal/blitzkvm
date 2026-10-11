@@ -6,12 +6,27 @@ import JetKVMCore
 /// Against the emulator's test pattern it also measures latency from the
 /// timestamp burned into each frame to the moment the frame is decoded.
 /// `--crash-engine-after S` kills the helper mid-run to prove recovery.
+/// `--hide-after S` minimizes the window for 2 s and measures how soon the
+/// picture resumes once it is shown again. `--max-freeze-ms N` fails the run
+/// if the picture stood still longer than N ms while the window was visible
+/// (a hidden window stops decoding by design, minimized or covered alike).
+/// `--set-quality-after S:level,…` changes the stream quality during the run;
+/// `--toggle-status-bar-after S` shows or hides the status bar (not saved).
 final class SelfTest {
     private weak var controller: DeviceWindowController?
     private let seconds: Double
     private let crashEngineAfter: Double?
     private let snapshotPath: String?
     var injectInput = false
+    var hideAfter: Double?
+    var maxFreezeMs: Double?
+    var qualityChanges: [(Double, String)] = []
+    var toggleStatusBarAfter: Double?
+    private var beforeToggle: [String: Any]?
+    private var shownAt: Date?
+    /// Stall overlay changes: seconds into the run, title (nil: hidden).
+    private var overlayEvents: [(Double, String?)] = []
+    private var resumedAfterShowMs: Double?
     private var inputInjected = false
     /// Also exercises virtual media, the serial console and address probing
     /// through the app's models and windows.
@@ -25,6 +40,16 @@ final class SelfTest {
     private var crashed = false
     private var restartReasons: [String] = []
     private var firstFrameAt: Date?
+    private var lastFrameAt: Date?
+    /// Gaps between decoded frames over 250 ms while the window was visible:
+    /// picture freezes.
+    private var freezesMs: [Double] = []
+    /// Time the window spent hidden (sampled every 50 ms), in total and as
+    /// of the last frame.
+    private var hiddenSince: Date?
+    private var hiddenTotal: TimeInterval = 0
+    private var hiddenAtLastFrame: TimeInterval = 0
+    private var visibilityTimer: Timer?
     private let started = Date()
 
     init(controller: DeviceWindowController, seconds: Double, crashEngineAfter: Double?, snapshotPath: String?) {
@@ -32,7 +57,15 @@ final class SelfTest {
         self.seconds = seconds
         self.crashEngineAfter = crashEngineAfter
         self.snapshotPath = snapshotPath
+        controller.capturesOnFocus = false // only inject() sends input
+        // Hidden windows stop decoding: stay above other apps' windows.
+        controller.window?.level = .floating
         controller.onFrameDecoded = { [weak self] buffer, header in self?.frameDecoded(buffer, header) }
+        controller.onStallOverlay = { [weak self] content in
+            guard let self else { return }
+            self.overlayEvents.append((Date().timeIntervalSince(self.started), content?.title))
+            AppLog.log("selftest: stall overlay \(content?.title ?? "hidden")")
+        }
         controller.onRestart = { [weak self] reason in
             self?.lock.lock()
             self?.restartReasons.append(reason)
@@ -52,10 +85,49 @@ final class SelfTest {
         if injectInput {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.inject() }
         }
+        if let toggleStatusBarAfter {
+            DispatchQueue.main.asyncAfter(deadline: .now() + toggleStatusBarAfter) { [weak self] in
+                guard let self, let c = self.controller else { return }
+                self.beforeToggle = self.windowReport(c)
+                AppLog.log("selftest: status bar \(c.isStatusBarVisible ? "hidden" : "shown")")
+                c.setStatusBarVisible(!c.isStatusBarVisible)
+            }
+        }
+        for (after, level) in qualityChanges {
+            DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in
+                AppLog.log("selftest: stream quality \(level)")
+                self?.controller?.setQualityLevel(level)
+            }
+        }
+        if let hideAfter {
+            DispatchQueue.main.asyncAfter(deadline: .now() + hideAfter) { [weak self] in
+                self?.controller?.window?.miniaturize(nil)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + hideAfter + 2) { [weak self] in
+                self?.controller?.window?.deminiaturize(nil)
+                self?.lock.lock()
+                self?.shownAt = Date()
+                self?.lock.unlock()
+            }
+        }
         if exerciseExtras {
             Task { @MainActor [weak self] in await self?.runExtras() }
         }
+        visibilityTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in self?.sampleVisibility() }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in self?.finish() }
+    }
+
+    private func sampleVisibility() {
+        guard let controller else { return }
+        let hidden = controller.decoder.paused
+        lock.lock()
+        defer { lock.unlock() }
+        if hidden, hiddenSince == nil {
+            hiddenSince = Date()
+        } else if !hidden, let since = hiddenSince {
+            hiddenTotal += Date().timeIntervalSince(since)
+            hiddenSince = nil
+        }
     }
 
     /// Feeds synthetic AppKit events through the real view handlers: types
@@ -173,9 +245,37 @@ final class SelfTest {
         lock.lock()
         decodedFrames += 1
         if firstFrameAt == nil { firstFrameAt = now }
+        if let gap = visibleGap(until: now) { freezesMs.append(gap) }
+        if let shownAt, resumedAfterShowMs == nil { resumedAfterShowMs = now.timeIntervalSince(shownAt) * 1000 }
+        lastFrameAt = now
+        hiddenAtLastFrame = hidden(until: now)
         if crashed { framesAfterCrash += 1 }
         if let latency, latency >= 0, latency < 10_000 { latenciesMs.append(latency) }
         lock.unlock()
+    }
+
+    /// Seconds the window has been hidden up to `now` (lock held).
+    private func hidden(until now: Date) -> TimeInterval {
+        hiddenTotal + (hiddenSince.map { now.timeIntervalSince($0) } ?? 0)
+    }
+
+    /// How long the picture has stood still since the last frame while the
+    /// window was visible, in ms, if that is a freeze (lock held).
+    private func visibleGap(until now: Date) -> Double? {
+        guard let lastFrameAt else { return nil }
+        let gap = now.timeIntervalSince(lastFrameAt) - (hidden(until: now) - hiddenAtLastFrame)
+        return gap > 0.25 ? gap * 1000 : nil
+    }
+
+    private func windowReport(_ c: DeviceWindowController) -> [String: Any] {
+        let content = c.window?.contentLayoutRect.size ?? .zero
+        var r: [String: Any] = [
+            "videoArea": "\(Int(c.videoView.bounds.width))x\(Int(c.videoView.bounds.height))",
+            "windowContent": "\(Int(content.width))x\(Int(content.height))",
+            "statusBar": c.isStatusBarVisible,
+        ]
+        if let size = c.videoView.currentVideoSize { r["remoteSize"] = "\(Int(size.width))x\(Int(size.height))" }
+        return r
     }
 
     private func percentile(_ values: [Double], _ p: Double) -> Double? {
@@ -192,6 +292,10 @@ final class SelfTest {
         let latencies = latenciesMs
         let restarts = restartReasons
         let firstFrame = firstFrameAt.map { $0.timeIntervalSince(started) }
+        var freezes = freezesMs
+        let resumed = resumedAfterShowMs
+        if let gap = visibleGap(until: Date()) { freezes.append(gap) }
+        let hiddenMs = hidden(until: Date()) * 1000
         lock.unlock()
         let stats = controller.decoder.snapshot()
         var report: [String: Any] = [
@@ -202,6 +306,7 @@ final class SelfTest {
             "presentedFrames": controller.videoView.presentedFrames,
             "decodeErrors": stats.errors,
             "keyframes": stats.keyframes,
+            "skippedUnits": stats.skipped,
             "codec": controller.currentCodec,
             "lastDecodeMs": stats.lastDecodeMs,
             "engineRestarts": restarts,
@@ -209,6 +314,13 @@ final class SelfTest {
             "layout": ["w": controller.videoView.layout.width, "h": controller.videoView.layout.height, "nearest": controller.videoView.layout.nearest],
         ]
         if let firstFrame { report["firstFrameSeconds"] = firstFrame }
+        report["freezes"] = ["count": freezes.count, "longestMs": freezes.max() ?? 0, "totalMs": freezes.reduce(0, +)]
+        report["hiddenMs"] = hiddenMs.rounded()
+        if hideAfter != nil { report["resumedAfterShowMs"] = resumed ?? -1 }
+        report["stallOverlay"] = overlayEvents.map { ["at": ($0.0 * 10).rounded() / 10, "title": $0.1 ?? "hidden"] as [String: Any] }
+        report.merge(windowReport(controller)) { $1 }
+        if let beforeToggle { report["beforeStatusBarToggle"] = beforeToggle }
+        let longestFreeze = freezes.max() ?? 0
         if let p50 = percentile(latencies, 0.5), let p95 = percentile(latencies, 0.95) {
             report["encodeToDecodeMsP50"] = p50
             report["encodeToDecodeMsP95"] = p95
@@ -232,6 +344,18 @@ final class SelfTest {
         var ok = decoded > 0 && controller.videoView.presentedFrames > 0
         if crashEngineAfter != nil { ok = ok && afterCrash > 0 && !restarts.isEmpty }
         if exerciseExtras { ok = ok && extrasOK }
+        if let maxFreezeMs {
+            // Hidden time says nothing about freezes; too much makes the run
+            // inconclusive (the intended --hide-after pause aside).
+            let unintended = hiddenMs - (hideAfter == nil ? 0 : 2000)
+            if unintended > seconds * 250 {
+                FileHandle.standardError.write(Data("window hidden for \(Int(hiddenMs)) ms of the run: inconclusive\n".utf8))
+                ok = false
+            } else if longestFreeze > maxFreezeMs {
+                FileHandle.standardError.write(Data("picture froze for \(Int(longestFreeze)) ms (limit \(Int(maxFreezeMs)) ms)\n".utf8))
+                ok = false
+            }
+        }
         controller.shutdown()
         AppLog.flush()
         // _exit: skip atexit/static teardown while VideoToolbox and pipe

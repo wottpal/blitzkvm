@@ -6,8 +6,9 @@ import Foundation
 ///
 /// Limits measured on a JetKVM (TC358749 HDMI bridge, RV1106) with a Mac host
 /// (plan section 22):
-/// - 640×400 … 1920×1200. Above that the pixel clock passes the bridge's
-///   165 MHz at 60 Hz.
+/// - 640×400 up to 2176 wide and 1200 high, within the bridge's 165 MHz pixel
+///   clock at 60 Hz (1920×1200, or 2176×900 for a 21:9 window). Wider lines
+///   break the FIFO rule below even at 165 MHz.
 /// - Width a multiple of 16: the device's encoder reads lines at a stride
 ///   rounded up to 16 pixels, so other widths come out sheared. Height a
 ///   multiple of 4. An odd height hung the device until it was power-cycled.
@@ -32,18 +33,29 @@ public enum RemoteDisplay {
     }
 
     public static let minimum = Size(width: 640, height: 400)
-    public static let maximum = Size(width: 1920, height: 1200)
+    /// Bounds on each side; the pixel clock limits the area within them.
+    public static let maximum = Size(width: 2176, height: 1200)
+    public static let maxPixelClockKHz = 165_000
     public static let widthStep = 16
     public static let heightStep = 4
 
-    /// The display size for a view of `width`×`height` points: the same size
-    /// rounded down to the steps, so one remote pixel per point fills it.
-    /// Views beyond the limits get the closest size of their aspect ratio,
-    /// which the picture is scaled to.
+    /// The display size for a view of `width`×`height` remote pixels: the
+    /// same size rounded down to the steps. Views beyond the limits get the
+    /// largest size of their aspect ratio, which the picture is scaled to.
     public static func size(fitting width: Double, _ height: Double) -> Size {
         guard width > 0, height > 0 else { return minimum }
-        let shrink = max(1, width / Double(maximum.width), height / Double(maximum.height))
-        var w = width / shrink, h = height / shrink
+        var shrink = max(1, width / Double(maximum.width), height / Double(maximum.height))
+        while true {
+            let size = clamped(width / shrink, height / shrink)
+            if timing(for: size).pixelClockKHz <= maxPixelClockKHz || size == minimum { return size }
+            shrink *= 1.005
+        }
+    }
+
+    /// `width`×`height` grown to the minimum (keeping its shape) and snapped
+    /// down to the steps within the bounds.
+    private static func clamped(_ width: Double, _ height: Double) -> Size {
+        var w = width, h = height
         if w < Double(minimum.width) || h < Double(minimum.height) {
             let grow = max(Double(minimum.width) / w, Double(minimum.height) / h)
             w *= grow
