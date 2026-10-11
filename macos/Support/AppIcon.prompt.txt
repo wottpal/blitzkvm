@@ -1,0 +1,6 @@
+Use case: logo-brand.
+Asset type: native macOS app icon concept, square 1024 × 1024 artwork.
+Primary request: an ultra-modern, minimalistic app icon with an agentic feeling, built around ONE fancy, unmistakable mouse pointer arrow pointing toward the upper left. Confident, intelligent, purposeful, beautifully balanced. The cursor is the hero and must remain recognizable at tiny Dock sizes.
+Composition: straight-on, centered macOS rounded-square tile filling approximately 90% of the canvas, transparent outside its silhouette; ample clean space within the tile. Strong, simple silhouette. Production-quality icon artwork.
+Constraints: no text at all, no letters, numbers, labels, watermark, device frames, screenshot, presentation board, grid, or multiple icons. No robot, brain, chat bubble, decorative stars, generic AI sparkle, busy circuitry, or extra objects. Render only ONE finished icon.
+Design direction: a translucent glass cursor on a clean frosted-glass rounded-square tile. The cursor has crisp readable edges, a bright solid inner silhouette, and very subtle spectral refraction at its beveled rim. The shape is minimal and intentional, resembling one beautifully engineered optical object. Modern native macOS material quality, restrained translucency, soft luminous neutral backdrop, no transparent see-through mush, strong Dock-size readability.

@@ -2,6 +2,7 @@
 #
 #   make app        build "build/JetKVM Desktop.app" (arm64)
 #   make test       Swift unit tests
+#   make icon       compile the Icon Composer source and standalone fallback
 #   make selftest   end-to-end run against the in-repo emulator
 #   make run DEVICE=jetkvm.local
 #   make install    copy the app to /Applications
@@ -31,7 +32,7 @@ APP := build/JetKVM Desktop.app
 BUILD_NUMBER := $(shell git -C .. rev-list --count HEAD 2>/dev/null || echo 0)
 EMULATOR_ADDR ?= 127.0.0.1:18080
 
-.PHONY: app engine swift test selftest selftest-extras run install notarize clean
+.PHONY: app engine swift icon test selftest selftest-extras run install notarize clean
 
 engine:
 	cd .. && GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o macos/build/jetkvm-engine ./cmd/jetkvm-engine
@@ -39,13 +40,17 @@ engine:
 swift:
 	swift build -c release --arch arm64
 
-app: engine swift
+icon:
+	sh scripts/make-icon.sh
+
+app: engine swift icon
 	rm -rf "$(APP)"
 	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Helpers" "$(APP)/Contents/Resources"
 	cp "$$(swift build -c release --arch arm64 --show-bin-path)/JetKVMDesktop" "$(APP)/Contents/MacOS/JetKVMDesktop"
 	cp build/jetkvm-engine "$(APP)/Contents/Helpers/jetkvm-engine"
 	sed "s/@BUILD@/$(BUILD_NUMBER)/" Support/Info.plist.in > "$(APP)/Contents/Info.plist"
 	cp Support/AppIcon.icns "$(APP)/Contents/Resources/AppIcon.icns"
+	cp build/icon/Assets.car "$(APP)/Contents/Resources/Assets.car"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.jetkvm-mac.engine "$(APP)/Contents/Helpers/jetkvm-engine"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.jetkvm-mac "$(APP)"
 	codesign --verify --strict --deep "$(APP)"
