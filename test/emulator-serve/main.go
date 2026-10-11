@@ -79,6 +79,7 @@ func main() {
 	serveCmd.Flags().DurationVar(&cfg.Netem.Latency, "latency", 0, "One-way delay added to outgoing RTP packets")
 	serveCmd.Flags().DurationVar(&cfg.RebootDowntime, "reboot-downtime", 20*time.Second, "How long the device is unreachable after a reboot RPC")
 	serveCmd.Flags().BoolVar(&cfg.TLS, "tls", false, "Serve https with a self-signed device CA, like the firmware's self-signed TLS mode")
+	serveCmd.Flags().BoolVar(&cfg.EncoderPatch, "encoder-patch", false, "Answer get/setVideoEncoderParams like firmware with the desktop encoder patch")
 	serveCmd.Flags().IntVar(&cfg.Faults.UploadBytesPerSecond, "upload-rate", 0, "Throttle storage uploads to this many bytes per second")
 	serveCmd.Flags().BoolVar(&logInputs, "log-inputs", false, "Print every received input as a JSON line on stdout")
 

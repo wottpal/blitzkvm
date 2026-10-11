@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
+	"github.com/lkarlslund/jetkvm-desktop/pkg/emulator"
 )
 
 // feed runs the governor over n one-second samples produced by next.
@@ -224,6 +225,45 @@ func TestControllerQualityLevelsOnStockFirmware(t *testing.T) {
 	controller.mu.RUnlock()
 	if kept != chosen {
 		t.Fatalf("automatic off kept %q, want %q", kept, chosen)
+	}
+}
+
+// Firmware with the encoder patch: a level is applied live through
+// setVideoEncoderParams, including the still-screen refresh QP.
+func TestControllerQualityLevelsOnPatchedFirmware(t *testing.T) {
+	srv, ctx, cancel := startEmulatorWith(t, emulator.Config{EncoderPatch: true})
+	defer cancel()
+	controller := New(Config{
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+		Reconnect:       true,
+	})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+
+	for _, name := range []string{"maximum", "minimal"} {
+		if err := controller.SetQualityLevel(ctx, name); err != nil {
+			t.Fatalf("SetQualityLevel(%s): %v", name, err)
+		}
+		l := qualityLadder[levelIndex(name)]
+		s := controller.Snapshot()
+		want := emulator.EncoderParams{MinQP: l.MinQP, MaxQP: emulator.DefaultEncoderParams.MaxQP,
+			GOPSeconds: emulator.DefaultEncoderParams.GOPSeconds, MaxFPS: l.MaxFPS, StillQP: l.StillQP,
+			BitrateKbps: factorKbps(l.Factor, s.VideoWidth, s.VideoHeight)}
+		want.MaxBitrateKbps = want.BitrateKbps * 3 / 2
+		if got := srv.State().EncoderParams; got != want {
+			t.Fatalf("%s: device params %+v, want %+v", name, got, want)
+		}
+		if s.QualityLevel != name {
+			t.Fatalf("%s: snapshot level %q", name, s.QualityLevel)
+		}
+	}
+	// The stock quality factor is left alone on the live path.
+	if f := srv.State().StreamQualityFactor; f != 0.75 {
+		t.Fatalf("quality factor changed to %v", f)
 	}
 }
 

@@ -73,6 +73,10 @@ type Config struct {
 	// TLS serves https with a self-signed device CA, like the firmware's
 	// self-signed TLS mode.
 	TLS bool
+	// EncoderPatch answers getVideoEncoderParams/setVideoEncoderParams like
+	// firmware with the desktop encoder patch (firmware/); stock firmware
+	// does not know them.
+	EncoderPatch bool
 }
 
 type FaultConfig struct {
@@ -126,6 +130,7 @@ type DeviceState struct {
 	StreamQualityFactor float64
 	VideoCodec          string
 	EDID                string
+	EncoderParams       EncoderParams
 	AutoUpdateEnabled   bool
 	KeyboardLEDMask     byte
 	KeyboardModifiers   byte
@@ -326,6 +331,7 @@ func defaultDeviceState() DeviceState {
 		EDID:                 DefaultEDID,
 		StreamQualityFactor:  0.75,
 		VideoCodec:           "auto",
+		EncoderParams:        DefaultEncoderParams,
 		AutoUpdateEnabled:    true,
 		KeysDown:             []byte{0, 0, 0, 0, 0, 0},
 		Hostname:             "jetkvm-emulator",

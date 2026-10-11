@@ -581,6 +581,24 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 		uploadID := fmt.Sprintf("upload_%d", time.Now().UnixNano())
 		srv.uploads[uploadID] = &pendingUpload{filename: filename, size: params.Size}
 		return ok(virtualmedia.UploadStart{AlreadyUploadedBytes: int64(len(file.data)), DataChannel: uploadID}), nil
+	case "getVideoEncoderParams", "setVideoEncoderParams":
+		if !srv.cfg.EncoderPatch {
+			return jsonrpc.NewErrorResponse(req.ID, -32601, "Method not found", nil), nil
+		}
+		if req.Method == "setVideoEncoderParams" {
+			// Omitted fields keep their value; the merged result must be valid.
+			params, _ := req.Params.(map[string]any)
+			raw, _ := json.Marshal(params["params"])
+			merged := st.EncoderParams
+			if err := json.Unmarshal(raw, &merged); err != nil {
+				return failed("params: " + err.Error()), nil
+			}
+			if err := merged.validate(); err != nil {
+				return failed(err.Error()), nil
+			}
+			st.EncoderParams = merged
+		}
+		return ok(st.EncoderParams), nil
 	case "getLocalVersion":
 		return ok(client.LocalVersion{AppVersion: srv.cfg.DeviceVersion, SystemVersion: "0.2.8"}), nil
 	case "getUpdateStatus":

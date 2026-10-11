@@ -22,9 +22,10 @@ import (
 // time after a long clean stretch.
 //
 // On firmware with the desktop encoder patch (setVideoEncoderParams) a level
-// is applied live, without restarting the encoder: bitrate, QP floor and
-// encode frame rate. Stock firmware only takes the stream quality factor,
-// which restarts its video pipeline (a short stall), so levels change rarely.
+// is applied live, without restarting the encoder: bitrate, QP floor, encode
+// frame rate and the still-screen refresh QP. Stock firmware only takes the
+// stream quality factor, which restarts its video pipeline (a short stall),
+// so levels change rarely.
 
 // QualityLevel is one rung of the ladder.
 type QualityLevel struct {
@@ -32,14 +33,21 @@ type QualityLevel struct {
 	Factor float64 // setStreamQualityFactor: 1 = the web UI's "High" (4 Mbit/s target at 1080p)
 	MaxFPS int     // encode frame rate cap; 0 = source rate (patched firmware)
 	MinQP  int     // QP floor (patched firmware); lower = sharper, larger keyframes
+	// StillQP is the QP of the keyframe the patched firmware sends once the
+	// screen has been still for half a second; >= MinQP turns it off.
+	StillQP int
 }
 
 // qualityLadder is ordered from lowest to highest. The values come from the
-// ground-truth sweep (plan §21, tools/quality-bench) on a live device with
-// the encoder patch, H.265, 1080p:
-//   - The QP floor sets static text sharpness: text PSNR 53 dB at QP 10,
-//     48 at 16, 44 at 21, 41 at 24, against 32.5 on stock firmware. A static
-//     screen costs 0.3-0.7 Mbit/s whatever the floor (4 s GOP).
+// ground-truth sweep (plan §21 and §23, tools/quality-bench) on a live device
+// with the encoder patch, H.265, 1080p:
+//   - A still screen gets a near-lossless keyframe at StillQP: text PSNR
+//     60 dB at maximum (QP 1), 56 dB at balanced (QP 8), against 53 and
+//     42 dB without it and 32.5 on stock firmware. With the 60 s GOP a still
+//     screen then costs 0.04-0.08 Mbit/s. The refresh keyframe (0.2-0.4 MB)
+//     is a burst a slow link would turn into loss, so the lowest level
+//     skips it.
+//   - The QP floor sets the sharpness of moving and freshly changed content.
 //   - The bitrate sets quality while the screen moves: scrolling 1080 px/s
 //     gives 49.8 dB at ~8 Mbit/s (factor 3, QP 10) and 46.9 dB at 4.2 Mbit/s
 //     (factor 1, QP 16).
@@ -47,11 +55,11 @@ type QualityLevel struct {
 //     lower bitrate (46.3 dB at 2.3 Mbit/s vs 44.1 at 2.9), so frame rate
 //     goes down before the bitrate does.
 var qualityLadder = []QualityLevel{
-	{Name: "minimal", Factor: 0.25, MaxFPS: 15, MinQP: 26},
-	{Name: "low", Factor: 0.5, MaxFPS: 30, MinQP: 21},
-	{Name: "balanced", Factor: 1, MaxFPS: 60, MinQP: 18},
-	{Name: "high", Factor: 2, MaxFPS: 60, MinQP: 14},
-	{Name: "maximum", Factor: 3, MaxFPS: 60, MinQP: 10},
+	{Name: "minimal", Factor: 0.25, MaxFPS: 15, MinQP: 26, StillQP: 26},
+	{Name: "low", Factor: 0.5, MaxFPS: 30, MinQP: 21, StillQP: 17},
+	{Name: "balanced", Factor: 1, MaxFPS: 60, MinQP: 18, StillQP: 8},
+	{Name: "high", Factor: 2, MaxFPS: 60, MinQP: 14, StillQP: 4},
+	{Name: "maximum", Factor: 3, MaxFPS: 60, MinQP: 10, StillQP: 1},
 }
 
 const (
@@ -258,14 +266,16 @@ func (c *Controller) applyLevel(ctx context.Context, cl *client.Client, level in
 		w, h := c.snapshot.VideoWidth, c.snapshot.VideoHeight
 		c.mu.RUnlock()
 		target := factorKbps(l.Factor, w, h)
+		// Firmware from before the still refresh ignores stillQp.
 		params := map[string]any{"params": map[string]any{
 			"minQp": l.MinQP, "maxFps": l.MaxFPS, "bitrateKbps": target, "maxBitrateKbps": target * 3 / 2,
+			"stillQp": l.StillQP,
 		}}
 		if err := cl.Call(ctx, "setVideoEncoderParams", params, nil); err != nil {
 			log.Warn().Err(err).Msg("set encoder params")
 			return err
 		}
-		log.Info().Str("level", l.Name).Int("kbps", target).Int("maxFps", l.MaxFPS).Int("minQp", l.MinQP).Msg("stream quality (live)")
+		log.Info().Str("level", l.Name).Int("kbps", target).Int("maxFps", l.MaxFPS).Int("minQp", l.MinQP).Int("stillQp", l.StillQP).Msg("stream quality (live)")
 		return nil
 	}
 	// Stock firmware: only the factor, and only when it changes (each change
