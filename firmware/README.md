@@ -19,14 +19,18 @@ A fixed 0.5 s GOP resends a full keyframe twice a second, and the firmware ignor
 - QP floor 18, ceiling 42.
 - Texture AQ off (uniform QP).
 - **Still-screen refresh:** once the screen has been still for half a second after any change, one keyframe is encoded at `stillQp` (default 8), which makes a still picture near-lossless. The following empty P-frames keep it at no cost. Details below.
-- Super-frame re-encode above 2.5 MiB. The native frame socket's limit is raised from 1,036,800 bytes to one raw 1080p frame (3,110,400), because near-lossless refresh keyframes exceed the old limit.
+- Super-frame re-encode above 2.5 MiB. Refreshes set their QP per block, which the re-encode cannot raise, so the stream buffer and the native frame socket's limit are raised from 1,036,800 bytes to 2 bytes per pixel of the largest mode (4,608,000).
 - GOP of 60 s instead of fps/2. Keyframes come on demand (below), and a still screen then costs 0.04-0.08 Mbit/s.
 - Each value has an env override: `JETKVM_VENC_MIN_QP`, `JETKVM_VENC_MAX_QP`, `JETKVM_VENC_AQ`, `JETKVM_VENC_GOP_SECONDS`, `JETKVM_VENC_STILL_QP`.
 
 **How the still refresh works.**
-- **Detection:** it reads the encoder's own output and never touches frame pixels. On a still screen P-frames are nearly empty: below 1,500 bytes, or an eighth of the per-frame budget.
-- **Refresh:** after 30 such frames following any activity, a whole-frame ROI with absolute QP `stillQp` is set and a keyframe is requested. The keyframe QP floor is permanently `stillQp`, since the encoder clamps ROI QPs to the frame type's floor. P-frames keep `minQp`.
-- **Pacing:** refreshes are at least 1.5 s apart.
+- **Detection:** it reads the encoder's own output and never touches frame pixels. On a still screen P-frames are nearly empty (150–460 bytes at QP 10, depending on the screen). Each P-frame's cost above that baseline (the smallest frame of the last one to two seconds, plus 150 bytes of noise) feeds two decaying sums:
+  - Over about 3 s, 2,000 bytes mark the picture as changed. Typing gets there (a glyph costs 530–1,000 bytes); a blinking caret does not.
+  - Over about 0.1 s, the sum tells when the changes have stopped.
+  - A frame above an eighth of the per-frame budget (1,500 bytes at least) is a change on its own, and so is any other keyframe (session start, PLI, GOP).
+- **Refresh:** half a second after the changes stop, a whole-frame ROI with absolute QP `stillQp` is set and a keyframe is requested. The keyframe QP floor is permanently `stillQp`, since the encoder clamps ROI QPs to the frame type's floor. P-frames keep `minQp`.
+- **Pacing:** refreshes are at least 1.5 s apart. A refresh above 1.5 MiB (a photo-heavy screen) raises the QP of the next ones by 6 (up to +24); one below 768 KiB lowers it again.
+- **Trade-off of the permanent keyframe floor:** other keyframes may go below `minQp` too. On a still desktop, measured on the device, keyframes from a PLI were 103 KB instead of 87 KB with the floor at `minQp` (default parameters), 165 KB instead of 136 KB on the app's maximum level. Each one is followed by a refresh half a second later. Moving the floor only for the refresh would restart rate control each time (below).
 
 Three approaches failed, so they are not used:
 - **Lowering the P-frame floor:** P-frames never refine a picture. The encoder skips blocks whose residual is small, at any QP.

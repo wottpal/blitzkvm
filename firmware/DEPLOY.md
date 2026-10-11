@@ -7,7 +7,7 @@ This is a JetKVM app built from `release/0.5.9` plus `desktop-encoder.patch`. Th
 | | |
 |---|---|
 | Binary | `bin/jetkvm_app` of a `jetkvm/kvm` checkout at `release/0.5.9` with the patch applied (README.md) |
-| SHA-256 | `0b29e087326bc038f89fb04223559087b33aa82e996dad3d27930665cc8ca897` (the build tested and installed on the device on 2026-10-11; your build may differ) |
+| SHA-256 | `34b0e0226d2c0292683c1a3a78c7da31cf5530d606f1e02d625c733f7d7f2170` (the build tested and installed on the device on 2026-10-11; your build may differ) |
 | Size | 31,469,192 bytes |
 | Type | ELF 32-bit ARM EABI5, dynamically linked, interpreter `/lib/ld-uClibc.so.0`; NEEDED `librockit.so`, `librockchip_mpp.so.1`, `librga.so` (from `/oem/usr/lib` on the device) |
 | Reported version | `0.5.9` (`make build_release`, not a `-dev` build) |
@@ -30,7 +30,7 @@ Encoder defaults are compiled in. The environment of the app process overrides t
 
 Always on:
 - **BT.601-matrix color tagging at every resolution.** The VUI (H.264 and H.265) uses matrix_coefficients = 6 (BT.601) with colour_primaries = 1 and transfer_characteristics = 1 (BT.709, about sRGB, because the content is an sRGB desktop), limited range. V4L2 uses `REC709` / `XFER_FUNC_709` / `YCBCR_ENC_601`, limited range. Upstream tagged streams above 576 lines with the BT.709 matrix. The TC358749 bridge always converts to BT.601 limited YCbCr: rv1106-system `tc35874x.c` writes `MASK_VOUT_COLOR_601_YCBCR_LIMITED` for UYVY. Measured against a test image, the decoded colors match the BT.601 matrix within 0.5 code values; the BT.709 matrix was off by about 8. This only changes the tags; the bridge does the conversion. The log shows `configured VENC VUI as limited-range, BT.601 matrix, BT.709 primaries/transfer`.
-- A super-frame re-encode above 2.5 MiB, below the frame-socket limit of 3,110,400 B (raised from 1,036,800 in `internal/native/proxy.go`).
+- A super-frame re-encode above 2.5 MiB, below the stream buffer and frame-socket limit of 4,608,000 B (2 bytes per pixel of 1920×1200; raised from 1,036,800 in `internal/native/proxy.go`).
 - The still refresh (README.md). `JETKVM_LOG_INFO=native` logs each one: `still refresh: keyframe N bytes at qp Q`.
 - An on-demand IDR when a WebRTC session reaches `connected`, on RTCP PLI/FIR, and on the `requestKeyframe` RPC. There are at most 2 per second; extra requests coalesce. The native side tries these paths in order:
   1. `RK_MPI_VENC_RequestIDR(ch, RK_TRUE)`. The shipped librockit returns `0xa0048008` (NOT_SUPPORT) for every instant request.
@@ -151,11 +151,11 @@ These methods use the same JSON-RPC 2.0 transport as every other device RPC: the
 | `setVideoEncoderParams` | `{"params": {"minQp": int, "maxQp": int, "gopSeconds": float, "aq": bool, "maxFps": int, "bitrateKbps": int, "maxBitrateKbps": int, "stillQp": int}}` (every field optional) | status object after the change |
 | `requestKeyframe` | none | `null`; queues an IDR through the same path as PLI (at most 2/s, coalesced) |
 
-Status object (the first seven fields are the settable params; `0` bitrates mean "auto"):
+Status object (the first eight fields are the settable params; `0` bitrates mean "auto"):
 
 ```json
 {"minQp":18,"maxQp":42,"gopSeconds":60,"aq":false,"maxFps":0,"bitrateKbps":0,"maxBitrateKbps":0,"stillQp":8,
- "sourceFps":60,"encodeFps":60,"gopFrames":240,
+ "sourceFps":60,"encodeFps":60,"gopFrames":3600,
  "effectiveBitrateKbps":4000,"effectiveMaxBitrateKbps":6000,"codec":"h264","streaming":true}
 ```
 
