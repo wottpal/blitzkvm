@@ -48,6 +48,8 @@ final class LatencyProbe {
     private var engineToDecoded: [Double] = []
     private var decodedAt: CFTimeInterval = 0
     private var misses = 0
+    /// The remote picture's size, from the last decoded frame.
+    private var remoteSize = CGSize(width: 1920, height: 1080)
 
     init(controller: DeviceWindowController, samples: Int) {
         self.controller = controller
@@ -85,6 +87,7 @@ final class LatencyProbe {
         decodedSerial = nil
         let done = results.count + misses >= samples
         let known = bright
+        let size = remoteSize
         if !markerSeen && known != nil {
             aborted = "probe page not on screen (marker missing); no key sent"
         }
@@ -124,8 +127,8 @@ final class LatencyProbe {
             return
         }
         if pointerMode {
-            // Remote is 1920x1080; the device's absolute range is 0...32767.
-            controller.engine.write(EngineProtocol.absolutePointer(x: Int32(point.x * 32767 / 1920), y: Int32(point.y * 32767 / 1080), buttons: 0))
+            // The device's absolute range is 0...32767 across the remote picture.
+            controller.engine.write(EngineProtocol.absolutePointer(x: Int32(point.x * 32767 / size.width), y: Int32(point.y * 32767 / size.height), buttons: 0))
         } else {
             controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
@@ -143,6 +146,7 @@ final class LatencyProbe {
         let isBright = level > 128
         lock.lock()
         defer { lock.unlock() }
+        remoteSize = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
         markerSeen = mark > 100 && mark < 156
         if pointerMode {
             // The arrow's white body sits just below and right of its tip.
@@ -151,7 +155,7 @@ final class LatencyProbe {
             if let sentAt, current == nil, cursor {
                 current = ((now - sentAt) * 1000, nil)
                 decodedAt = now
-                decodedSerial = controller?.videoView.frameSerial
+                decodedSerial = (controller?.videoView.frameSerial ?? 0) &+ 1 // display() numbers this frame next
             }
             bright = isBright
             return
@@ -159,7 +163,7 @@ final class LatencyProbe {
         if let sentAt, current == nil, isBright == expectBright, bright != isBright {
             current = ((now - sentAt) * 1000, nil)
             decodedAt = now
-            decodedSerial = controller?.videoView.frameSerial
+            decodedSerial = (controller?.videoView.frameSerial ?? 0) &+ 1 // display() numbers this frame next
         }
         bright = isBright
     }
