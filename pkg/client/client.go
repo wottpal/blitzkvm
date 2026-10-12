@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/dtls/v3"
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/nack"
 	"github.com/pion/rtcp"
@@ -365,6 +366,16 @@ func (c *Client) newAPI(local []net.IP) (*webrtc.API, error) {
 	}
 
 	se := webrtc.SettingEngine{}
+	// The device encrypts every video packet in pure Go: its ARMv7 core has
+	// no AES instructions, and pion prefers AES-256-GCM, whose GHASH is slow
+	// there too. AES-128 counter mode with an HMAC-SHA1 tag (SHA-1 has ARM
+	// assembly) cut the device's send time for a typing frame by ~10 %.
+	se.SetSRTPProtectionProfiles(dtls.SRTP_AES128_CM_HMAC_SHA1_80)
+	// Retransmissions reuse their original sequence numbers, and pion drops
+	// any SRTP packet more than 64 behind the newest as a replay. On a
+	// 5 Mbit/s link that is 120 ms, less than one NACK round trip on
+	// cellular, so repairs were discarded and every loss became a keyframe.
+	se.SetSRTPReplayProtectionWindow(8192)
 	// Detect dead paths quickly; the device itself gives up after ~5 s.
 	se.SetICETimeouts(4*time.Second, 8*time.Second, time.Second)
 	if c.cfg.ICELoopbackOnly {
