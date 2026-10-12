@@ -439,6 +439,7 @@ final class SelfTest {
         if let firstFrame { report["firstFrameSeconds"] = firstFrame }
         report["freezes"] = ["count": freezes.count, "longestMs": freezes.max() ?? 0, "totalMs": freezes.reduce(0, +)]
         report["scalingFilter"] = controller.videoView.scalingFilter.rawValue
+        report["localPointer"] = controller.videoView.cursorRectPointer?.rawValue ?? "none"
         if let fps = controller.snapshot.VideoFPS { report["remoteRefresh"] = fps }
         if let signal = controller.snapshot.VideoSignal { report["videoSignal"] = signal }
         report["hiddenMs"] = hiddenMs.rounded()

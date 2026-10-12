@@ -575,3 +575,32 @@ final class DoubleCommandPressTests: XCTestCase {
         XCTAssertFalse(press.flagsChanged(commandDown: true, othersDown: false, at: 0.9))
     }
 }
+
+final class PointerRestTests: XCTestCase {
+    func testHidesOnceAfterRestingAndAgainAfterTheNextMove() {
+        var rest = PointerRest()
+        XCTAssertEqual(rest.decide(at: 5, buttonsHeld: false), .idle, "never moved")
+        rest.moved(at: 10)
+        XCTAssertEqual(rest.decide(at: 10.1, buttonsHeld: false), .wait(until: 10 + PointerRest.delay))
+        XCTAssertEqual(rest.decide(at: 10 + PointerRest.delay, buttonsHeld: false), .hide)
+        XCTAssertEqual(rest.decide(at: 11, buttonsHeld: false), .idle, "hidden already")
+        rest.moved(at: 12)
+        XCTAssertEqual(rest.decide(at: 12.2, buttonsHeld: false), .hide)
+    }
+
+    func testEachMovePushesTheRestBack() {
+        var rest = PointerRest()
+        rest.moved(at: 1)
+        rest.moved(at: 1.1)
+        XCTAssertEqual(rest.decide(at: 1 + PointerRest.delay, buttonsHeld: false), .wait(until: 1.1 + PointerRest.delay))
+    }
+
+    func testAHeldButtonKeepsItVisibleUntilTheRelease() {
+        var rest = PointerRest()
+        rest.moved(at: 1) // button down
+        XCTAssertEqual(rest.decide(at: 3, buttonsHeld: true), .idle)
+        rest.moved(at: 4) // button up
+        XCTAssertEqual(rest.decide(at: 4.1, buttonsHeld: false), .wait(until: 4 + PointerRest.delay))
+        XCTAssertEqual(rest.decide(at: 4.2, buttonsHeld: false), .hide)
+    }
+}

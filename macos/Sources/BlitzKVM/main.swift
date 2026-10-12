@@ -38,6 +38,7 @@ struct Options {
     /// --match-refresh: Hz, or 0 for automatic.
     var matchRefresh: Int?
     var scalingFilter: ScalingFilter?
+    var localPointer: LocalPointer?
     var scaling: ScalingMode?
     var profile: ModifierProfile?
     /// Self-test: open JetKVM Setup and run `check`, `install-tailscale`,
@@ -82,6 +83,7 @@ struct Options {
             case "--match-scale": o.matchScale = next().flatMap(Double.init)
             case "--match-refresh": o.matchRefresh = next().map { Int($0) ?? 0 }
             case "--scaling-filter": o.scalingFilter = next().flatMap(ScalingFilter.init(rawValue:))
+            case "--local-pointer": o.localPointer = next().flatMap(LocalPointer.init(rawValue:))
             case "--full-screen": o.fullScreen = true
             case "--profile": o.profile = next().flatMap(ModifierProfile.init(rawValue:))
             case "--setup": o.setup = next()
@@ -265,6 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = DeviceWindowController(device: device, address: address, password: password, engineURL: engineURL)
         controller.input.viewOnly = options.viewOnly
         controller.scalingFilterOverride = options.scalingFilter
+        controller.localPointerOverride = options.localPointer
         controller.reprobeAddresses = reprobe
         controller.showsSetupOnConnect = pendingSetup.remove(device.id) != nil || options.setup != nil
         if !isSelfTest {
@@ -538,6 +541,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.addItem(qualityItem)
         view.addItem(.separator())
         view.addItem(item("Show Status Bar", #selector(toggleStatusBar), key: "/"))
+        let pointers = NSMenu(title: "Local Pointer")
+        for pointer in LocalPointer.allCases {
+            let i = item(pointer.menuTitle, #selector(setLocalPointer(_:)))
+            i.representedObject = pointer.rawValue
+            pointers.addItem(i)
+        }
+        let pointersItem = NSMenuItem(title: "Local Pointer", action: nil, keyEquivalent: "")
+        pointersItem.submenu = pointers
+        view.addItem(pointersItem)
         view.addItem(.separator())
         view.addItem(item("Fit Window to Remote Screen", #selector(fitWindow), key: "0", mods: [.command, .option]))
         view.addItem(item("Lock Aspect Ratio", #selector(toggleAspectLock)))
@@ -597,6 +609,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleStatusBar() {
         DeviceWindowController.showsStatusBar.toggle()
         windows.forEach { $0.setStatusBarVisible(DeviceWindowController.showsStatusBar) }
+    }
+    @objc private func setLocalPointer(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let pointer = LocalPointer(rawValue: raw) else { return }
+        DeviceWindowController.localPointer = pointer
+        windows.forEach { $0.videoView.localPointer = pointer }
     }
 
     /// "200% (Larger Text)" … "50% (More Space)": how large the remote
@@ -731,6 +748,9 @@ extension AppDelegate: NSMenuItemValidation {
             return c?.device.scaling == .matchWindow
         case #selector(toggleStatusBar):
             menuItem.state = DeviceWindowController.showsStatusBar ? .on : .off
+            return true
+        case #selector(setLocalPointer(_:)):
+            menuItem.state = DeviceWindowController.localPointer.rawValue == menuItem.representedObject as? String ? .on : .off
             return true
         case #selector(toggleInvertScroll):
             menuItem.state = c?.device.invertScroll == true ? .on : .off

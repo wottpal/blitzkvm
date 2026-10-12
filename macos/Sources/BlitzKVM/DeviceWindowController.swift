@@ -129,6 +129,17 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         didSet { videoView?.scalingFilter = scalingFilterOverride ?? Self.scalingFilter }
     }
 
+    /// View › Local Pointer, for all device windows.
+    static var localPointer: LocalPointer {
+        get { UserDefaults.standard.string(forKey: "localPointer").flatMap(LocalPointer.init(rawValue:)) ?? .hidden }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "localPointer") }
+    }
+
+    /// --local-pointer (self-tests): instead of the saved choice.
+    var localPointerOverride: LocalPointer? {
+        didSet { videoView?.localPointer = localPointerOverride ?? Self.localPointer }
+    }
+
     /// The status bar's current height (0 while hidden).
     private var barHeight: CGFloat { statusBar.isHidden ? 0 : Self.statusBarHeight }
     var isStatusBarVisible: Bool { !statusBar.isHidden }
@@ -205,6 +216,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         videoView.scalingMode = device.scaling
         videoView.matchScale = device.matchScale
         videoView.scalingFilter = scalingFilterOverride ?? Self.scalingFilter
+        videoView.localPointer = localPointerOverride ?? Self.localPointer
         window?.invalidateCursorRects(for: videoView)
         videoView.exactPixels = device.exactPixels
         refreshStatus()
@@ -1161,20 +1173,90 @@ final class CaptureVideoView: VideoView {
     /// A click into an inactive window also reaches the remote.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    /// Over the remote picture only the remote pointer shows: the local one
-    /// is invisible there (AppKit restores it outside the rect and while the
-    /// window is not key).
+    /// View › Local Pointer: the local pointer over the remote picture (AppKit
+    /// restores the arrow outside it and while the window is not key).
+    var localPointer = LocalPointer.hidden {
+        didSet { if localPointer != oldValue { window?.invalidateCursorRects(for: self) } }
+    }
+    /// What the picture's cursor rect shows, as last set (self-test report).
+    private(set) var cursorRectPointer: LocalPointer?
+    private var pointerRest = PointerRest()
+    private var restTimer: Timer?
+
+    /// Only while pointer input goes to the remote (view-only sessions keep
+    /// it hidden, as before).
+    private var shownPointer: LocalPointer { controller?.input.viewOnly == false ? localPointer : .hidden }
+
     private static let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 1, height: 1), flipped: false) { _ in true },
                                                   hotSpot: .zero)
 
-    override func resetCursorRects() {
+    /// A white ring in a dark outline, legible on any picture, with its
+    /// hotspot at the center; drawn for 1× and 2× displays, so crisp on both.
+    private static let dotCursor: NSCursor = {
+        let size = NSSize(width: 10, height: 10)
+        let image = NSImage(size: size)
+        for scale in [1, 2] {
+            guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width) * scale, pixelsHigh: Int(size.height) * scale,
+                                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { continue }
+            rep.size = size // the context draws in points
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            // 8 pt across the white ring, 9.5 pt across its outline.
+            let ring = NSBezierPath(ovalIn: NSRect(origin: .zero, size: size).insetBy(dx: 1.75, dy: 1.75))
+            NSColor.black.withAlphaComponent(0.75).setStroke()
+            ring.lineWidth = 3
+            ring.stroke()
+            NSColor.white.setStroke()
+            ring.lineWidth = 1.5
+            ring.stroke()
+            NSGraphicsContext.restoreGraphicsState()
+            image.addRepresentation(rep)
+        }
+        return NSCursor(image: image, hotSpot: NSPoint(x: size.width / 2, y: size.height / 2))
+    }()
+
+    private static func cursor(_ pointer: LocalPointer) -> NSCursor {
+        switch pointer {
+        case .hidden: return invisibleCursor
+        case .dot: return dotCursor
+        case .arrow: return .arrow
+        }
+    }
+
+    /// The remote picture in view points (empty before the first frame).
+    private var pictureRect: NSRect {
         let l = currentLayout()
         let scale = pointScale
-        guard l.width > 0, l.height > 0, scale > 0 else { return }
+        guard l.width > 0, l.height > 0, scale > 0 else { return .zero }
         // Physical pixels, origin top-left -> view points, origin bottom-left.
-        let rect = NSRect(x: l.x / scale, y: bounds.height - (l.y + l.height) / scale,
-                          width: l.width / scale, height: l.height / scale).intersection(bounds)
-        if !rect.isEmpty { addCursorRect(rect, cursor: Self.invisibleCursor) }
+        return NSRect(x: l.x / scale, y: bounds.height - (l.y + l.height) / scale,
+                      width: l.width / scale, height: l.height / scale).intersection(bounds)
+    }
+
+    override func resetCursorRects() {
+        let rect = pictureRect
+        cursorRectPointer = rect.isEmpty ? nil : shownPointer
+        if let pointer = cursorRectPointer { addCursorRect(rect, cursor: Self.cursor(pointer)) }
+    }
+
+    /// A shown local pointer hides once it rests over the picture
+    /// (PointerRest), leaving the remote cursor; the next move shows it.
+    private func checkRest() {
+        let now = ProcessInfo.processInfo.systemUptime
+        switch pointerRest.decide(at: now, buttonsHeld: NSEvent.pressedMouseButtons != 0) {
+        case .wait(let until):
+            restTimer = Timer.scheduledTimer(withTimeInterval: until - now, repeats: false) { [weak self] _ in
+                self?.restTimer = nil
+                self?.checkRest()
+            }
+        case .hide:
+            guard shownPointer != .hidden, let window, window.isKeyWindow, NSApp.isActive,
+                  pictureRect.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)) else { return }
+            NSCursor.setHiddenUntilMouseMoves(true)
+        case .idle:
+            break
+        }
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -1194,6 +1276,10 @@ final class CaptureVideoView: VideoView {
             pan = (min(max(fx, 0), 1), min(max(fy, 0), 1))
         }
         controller.input.mouse(event, at: physical, in: currentLayout())
+        if shownPointer != .hidden {
+            pointerRest.moved(at: event.timestamp)
+            if restTimer == nil { checkRest() }
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
