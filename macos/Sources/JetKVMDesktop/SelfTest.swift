@@ -34,6 +34,8 @@ final class SelfTest {
     /// `--setup`: the JetKVM Setup action to run (see Options.setup).
     var setupAction: String?
     var setupSnapshotPath: String?
+    /// Sends the wake-only signal a second into the run (a sleeping target).
+    var wake = false
     private var setupReport: [String: Any]?
     private var setupOK = false
     private var finished = false
@@ -121,6 +123,12 @@ final class SelfTest {
         }
         if setupAction != nil {
             Task { @MainActor [weak self] in await self?.runSetup() }
+        }
+        if wake {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                AppLog.log("selftest: wake signal")
+                self?.controller?.wakeComputer()
+            }
         }
         visibilityTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in self?.sampleVisibility() }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in self?.finish() }
@@ -332,8 +340,14 @@ final class SelfTest {
                 default: return model.tailscale.error != nil && !model.tailscale.isWorking
                 }
             } && model.tailscale.error == nil
-        case "install-firmware":
-            model.installFirmware()
+        case let a where a.hasPrefix("install-firmware"):
+            // install-firmware (the recommended build), =desktop or =stock
+            let kind = a.split(separator: "=").dropFirst().first.flatMap { FirmwareBuild.Kind(rawValue: String($0)) } ?? .desktop
+            guard let build = model.builds.first(where: { $0.build.kind == kind })?.build else {
+                ok = false
+                break
+            }
+            model.installFirmware(build)
             try? await Task.sleep(for: .seconds(1))
             ok = await until(600) { !model.firmware.isWorking } && model.firmware.error == nil
         case let a where a.hasPrefix("password="):

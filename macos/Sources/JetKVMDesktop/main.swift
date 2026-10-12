@@ -45,6 +45,8 @@ struct Options {
     var setup: String?
     /// Self-test: render the setup sheet to this PNG at the end.
     var setupSnapshot: String?
+    /// Self-test: send the wake-only signal once connected (no keystrokes).
+    var wake = false
 
     static func parse(_ args: [String]) -> Options {
         var o = Options()
@@ -84,6 +86,7 @@ struct Options {
             case "--profile": o.profile = next().flatMap(ModifierProfile.init(rawValue:))
             case "--setup": o.setup = next()
             case "--setup-snapshot": o.setupSnapshot = next()
+            case "--wake": o.wake = true
             case "--window-size":
                 let parts = (next() ?? "").split(separator: "x").compactMap { Double($0) }
                 if parts.count == 2 { o.windowSize = (parts[0], parts[1]) }
@@ -293,6 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selfTest?.exerciseExtras = options.exerciseExtras
             selfTest?.setupAction = options.setup
             selfTest?.setupSnapshotPath = options.setupSnapshot
+            selfTest?.wake = options.wake
         }
         if let (w, h) = options.windowSize {
             controller.setContentSizeKeepingIt(NSSize(width: w, height: h))
@@ -428,6 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(item("Capture Keyboard", #selector(toggleCapture)))
         device.addItem(item("Enable System Shortcut Capture…", #selector(requestAccessibility)))
         device.addItem(.separator())
+        device.addItem(item("Wake Computer", #selector(wakeComputer)))
         let power = NSMenu(title: "Power")
         for (title, action) in [("ATX: Press Power Button", "power-short"), ("ATX: Hold Power Button (Force Off)", "power-long"), ("ATX: Press Reset", "reset")] {
             let i = item(title, #selector(atxAction(_:)))
@@ -627,6 +632,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return a.runModal() == .alertFirstButtonReturn
     }
 
+    @objc private func wakeComputer() { current?.wakeComputer() }
+
     @objc private func atxAction(_ sender: NSMenuItem) {
         guard let c = current, let action = sender.representedObject as? String, confirm(sender.title, on: c) else { return }
         c.sendRPC("setATXPowerAction", params: .object(["action": .string(action)]))
@@ -677,6 +684,8 @@ extension AppDelegate: NSMenuItemValidation {
             return c != nil
         case #selector(showSetup):
             return c != nil
+        case #selector(wakeComputer):
+            return c?.snapshot.Phase == "connected" && c?.input.viewOnly == false
         case #selector(toggleExactPixels):
             menuItem.state = c?.device.exactPixels == true ? .on : .off
             return c != nil

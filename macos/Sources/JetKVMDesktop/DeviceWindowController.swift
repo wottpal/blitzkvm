@@ -496,6 +496,22 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         model.refresh()
     }
 
+    /// Wakes the computer: a one-pixel pointer nudge there and back wakes a
+    /// sleeping display, and JetKVM's wake-only USB signal a suspended
+    /// computer (from firmware 0.5.9 on, ordinary input no longer does).
+    func wakeComputer() {
+        engine.write(EngineProtocol.relativePointer(dx: 1, dy: 0, buttons: 0))
+        engine.write(EngineProtocol.relativePointer(dx: -1, dy: 0, buttons: 0))
+        Task {
+            do {
+                try await engine.call("wakeHost")
+                hud.show("Sent a wake signal to \(device.name)", for: 2.5)
+            } catch {
+                hud.show("This JetKVM firmware can't send a wake signal", for: 3)
+            }
+        }
+    }
+
     /// The setup sheet's model, once it has been shown.
     var setup: JetKVMSetupModel? { setupModel }
 
@@ -990,7 +1006,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         if let signal = snapshot.VideoSignal, !signal.isEmpty, signal != "ready" {
             return .init(title: "No picture from the computer",
-                         detail: "HDMI: \(signal.replacingOccurrences(of: "_", with: " ")). It may be asleep or switched off.",
+                         detail: "HDMI: \(signal.replacingOccurrences(of: "_", with: " ")). If it's asleep, Device › Wake Computer wakes it.",
                          symbol: "display.trianglebadge.exclamationmark", busy: false)
         }
         if pictureAt < connectedAt {

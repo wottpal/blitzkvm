@@ -3,7 +3,7 @@
 #   make app        build "build/JetKVM Desktop.app" (arm64)
 #   make test       Swift unit tests
 #   make icon       compile the Icon Composer source and standalone fallback
-#   make firmware   bundle the JetKVM Desktop firmware (FORK_BINARY) for setup
+#   make firmware   bundle the firmware builds JetKVM Setup installs
 #   make selftest   end-to-end run against the in-repo emulator
 #   make selftest-stalls   the picture survives link stalls and hidden windows
 #   make run DEVICE=jetkvm.local
@@ -33,8 +33,9 @@ endef
 APP := build/JetKVM Desktop.app
 BUILD_NUMBER := $(shell git -C .. rev-list --count HEAD 2>/dev/null || echo 0)
 EMULATOR_ADDR ?= 127.0.0.1:18080
-# The JetKVM Desktop firmware build the setup sheet installs, pinned by
-# Support/Firmware.json: the fork's (github.com/wottpal/kvm) bin/jetkvm_app.
+# The firmware builds JetKVM Setup installs, pinned by Support/Firmware.json:
+# the JetKVM Desktop build is the fork's (github.com/wottpal/kvm)
+# bin/jetkvm_app; JetKVM's own release is downloaded once at build time.
 FORK_BINARY ?= $(abspath ../../kvm/bin/jetkvm_app)
 
 .PHONY: app engine swift icon firmware test selftest selftest-extras selftest-stalls run install notarize clean
@@ -59,10 +60,8 @@ app: engine swift icon firmware
 	sed "s/@BUILD@/$(BUILD_NUMBER)/" Support/Info.plist.in > "$(APP)/Contents/Info.plist"
 	cp Support/AppIcon.icns "$(APP)/Contents/Resources/AppIcon.icns"
 	cp build/icon/Assets.car "$(APP)/Contents/Resources/Assets.car"
-	if [ -f build/firmware/jetkvm_app.gz ]; then \
-		mkdir -p "$(APP)/Contents/Resources/Firmware" && \
-		cp build/firmware/jetkvm_app.gz build/firmware/Firmware.json "$(APP)/Contents/Resources/Firmware/"; \
-	fi
+	mkdir -p "$(APP)/Contents/Resources/Firmware"
+	cp build/firmware/Firmware.json build/firmware/*.gz "$(APP)/Contents/Resources/Firmware/"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.jetkvm-mac.engine "$(APP)/Contents/Helpers/jetkvm-engine"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.jetkvm-mac "$(APP)"
 	codesign --verify --strict --deep "$(APP)"

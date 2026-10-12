@@ -21,8 +21,11 @@ final class JetKVMSetupModel: ObservableObject {
     @Published private(set) var tailscale = Row<TailscaleState>()
     /// Whether the device asks for a password.
     @Published private(set) var password = Row<Bool>()
-    /// The firmware build this app ships; nil in a build without it.
-    let bundled: (build: FirmwareBuild, binary: URL)? = JetKVMSetupModel.bundledFirmware()
+    /// The firmware builds this app ships, the recommended JetKVM Desktop
+    /// build first.
+    let builds: [(build: FirmwareBuild, binary: URL)] = JetKVMSetupModel.bundledFirmware()
+
+    var recommended: FirmwareBuild? { builds.first { $0.build.kind == .desktop }?.build }
 
     private weak var controller: DeviceWindowController?
     private var tailscaleWatch: Task<Void, Never>?
@@ -63,7 +66,7 @@ final class JetKVMSetupModel: ObservableObject {
                 installed = JetKVMSSH.sha256(fromSumOutput: try await shell.run("sha256sum /userdata/jetkvm/bin/jetkvm_app"))
             }
             firmware.value = FirmwareState.evaluate(hasEncoderControl: hasEncoderControl, appVersion: version.appVersion,
-                                                    installedSHA256: installed, bundled: bundled?.build)
+                                                    installedSHA256: installed, bundled: builds.map(\.build))
             firmware.error = nil
         } catch {
             firmware.error = Self.describe(error)
@@ -114,11 +117,11 @@ final class JetKVMSetupModel: ObservableObject {
         }
     }
 
-    /// Uploads the bundled build next to the installed one, checks it, and
+    /// Uploads a bundled build next to the installed one, checks it, and
     /// restarts the JetKVM, which moves it into place as it does an update.
     /// The installed build is kept as `jetkvm_app.backup`.
-    func installFirmware() {
-        guard let bundled, !firmware.isWorking else { return }
+    func installFirmware(_ build: FirmwareBuild) {
+        guard let bundled = builds.first(where: { $0.build == build }), !firmware.isWorking else { return }
         Task {
             do {
                 firmware.error = nil
@@ -347,7 +350,7 @@ final class JetKVMSetupModel: ObservableObject {
             row.error.map { "error: \($0)" } ?? row.value.map { "\($0)" } ?? "unknown"
         }
         return ["firmware": text(firmware), "tailscale": text(tailscale), "password": text(password),
-                "bundledFirmware": bundled?.build.name ?? "none"]
+                "bundledFirmware": builds.map(\.build.title)]
     }
 
     // MARK: Helpers
@@ -360,12 +363,14 @@ final class JetKVMSetupModel: ObservableObject {
         var enabled: Bool
     }
 
-    private static func bundledFirmware() -> (build: FirmwareBuild, binary: URL)? {
-        guard let manifest = Bundle.main.url(forResource: "Firmware", withExtension: "json", subdirectory: "Firmware"),
-              let binary = Bundle.main.url(forResource: "jetkvm_app", withExtension: "gz", subdirectory: "Firmware"),
-              let data = try? Data(contentsOf: manifest),
-              let build = try? JSONDecoder().decode(FirmwareBuild.self, from: data) else { return nil }
-        return (build, binary)
+    private static func bundledFirmware() -> [(build: FirmwareBuild, binary: URL)] {
+        guard let folder = Bundle.main.resourceURL?.appendingPathComponent("Firmware", isDirectory: true),
+              let data = try? Data(contentsOf: folder.appendingPathComponent("Firmware.json")),
+              let builds = try? FirmwareBuild.manifest(data) else { return [] }
+        return builds.compactMap { build in
+            let binary = folder.appendingPathComponent(build.fileName)
+            return FileManager.default.fileExists(atPath: binary.path) ? (build, binary) : nil
+        }
     }
 
     static func sha256(of url: URL) throws -> String {

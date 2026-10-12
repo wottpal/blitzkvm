@@ -7,6 +7,7 @@ final class EngineProtocolTests: XCTestCase {
         stream.append(EngineProtocol.key(hid: 4, pressed: true))
         stream.append(EngineProtocol.absolutePointer(x: 16000, y: -1, buttons: 1))
         stream.append(EngineProtocol.wheel(y: -2, x: 1))
+        stream.append(EngineProtocol.relativePointer(dx: -1, dy: 300, buttons: 0))
 
         var parser = FrameParser()
         var frames: [(FrameType?, Data)] = []
@@ -14,12 +15,14 @@ final class EngineProtocolTests: XCTestCase {
         for byte in stream {
             frames += try parser.feed(Data([byte]))
         }
-        XCTAssertEqual(frames.count, 3)
+        XCTAssertEqual(frames.count, 4)
         XCTAssertEqual(frames[0].0, .key)
         XCTAssertEqual([UInt8](frames[0].1), [4, 1])
         XCTAssertEqual(frames[1].0, .absPointer)
         XCTAssertEqual([UInt8](frames[1].1), [0, 0, 0x3e, 0x80, 0xff, 0xff, 0xff, 0xff, 1])
         XCTAssertEqual([UInt8](frames[2].1), [0xfe, 1])
+        XCTAssertEqual(frames[3].0, .relPointer)
+        XCTAssertEqual([UInt8](frames[3].1), [0xff, 0xff, 0x01, 0x2c, 0])
     }
 
     func testRejectsOversizedFrames() {
@@ -458,18 +461,30 @@ final class RemoteDisplayTests: XCTestCase {
 }
 
 final class JetKVMSetupTests: XCTestCase {
-    private let bundled = FirmwareBuild(tag: "release/0.5.9-fork.4", sha256: String(repeating: "ab", count: 32), size: 1)
+    private let desktop = FirmwareBuild(kind: .desktop, tag: "release/0.5.9-fork.4", sha256: String(repeating: "ab", count: 32), size: 1)
+    private let stock = FirmwareBuild(kind: .stock, tag: "release/0.5.9", sha256: String(repeating: "ef", count: 32), size: 1)
 
     func testFirmwareState() {
-        let current = FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9",
-                                             installedSHA256: String(repeating: "AB", count: 32), bundled: bundled)
-        XCTAssertEqual(current, .current)
+        let bundled = [desktop, stock]
+        XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: String(repeating: "AB", count: 32),
+                                              bundled: bundled), .bundled(desktop))
+        XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: false, appVersion: "0.5.9", installedSHA256: String(repeating: "ef", count: 32),
+                                              bundled: bundled), .bundled(stock))
         XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: String(repeating: "cd", count: 32),
-                                              bundled: bundled), .outdated)
+                                              bundled: bundled), .otherDesktop)
         XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: nil, bundled: bundled), .unverified)
-        XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: false, appVersion: "0.5.9", installedSHA256: String(repeating: "cd", count: 32),
-                                              bundled: bundled), .stock("0.5.9"))
-        XCTAssertEqual(bundled.name, "0.5.9-fork.4")
+        XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: false, appVersion: "0.5.10", installedSHA256: String(repeating: "cd", count: 32),
+                                              bundled: bundled), .stock("0.5.10"))
+        XCTAssertEqual(desktop.title, "JetKVM Desktop 0.5.9-fork.4")
+        XCTAssertEqual(stock.title, "JetKVM 0.5.9")
+        XCTAssertEqual(desktop.fileName, "release-0.5.9-fork.4.gz")
+    }
+
+    func testFirmwareManifest() throws {
+        let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../Support/Firmware.json")
+        let builds = try FirmwareBuild.manifest(Data(contentsOf: url))
+        XCTAssertEqual(builds.map(\.kind), [.desktop, .stock], "the recommended build first")
+        XCTAssertTrue(builds.allSatisfy { $0.sha256.count == 64 && $0.size > 0 })
     }
 
     func testTailscaleState() throws {

@@ -44,6 +44,14 @@ public enum EngineProtocol {
         return encode(.absPointer, p)
     }
 
+    /// A relative move (the device's relative mouse).
+    public static func relativePointer(dx: Int16, dy: Int16, buttons: UInt8) -> Data {
+        var p = Data(capacity: 5)
+        p.append(contentsOf: [UInt8(UInt16(bitPattern: dx) >> 8), UInt8(UInt16(bitPattern: dx) & 0xff),
+                              UInt8(UInt16(bitPattern: dy) >> 8), UInt8(UInt16(bitPattern: dy) & 0xff), buttons])
+        return encode(.relPointer, p)
+    }
+
     public static func wheel(y: Int8, x: Int8) -> Data {
         encode(.wheel, Data([UInt8(bitPattern: y), UInt8(bitPattern: x)]))
     }

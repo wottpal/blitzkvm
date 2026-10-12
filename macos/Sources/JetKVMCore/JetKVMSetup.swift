@@ -1,32 +1,56 @@
 import Foundation
 
-/// The JetKVM Desktop firmware build this app ships (`Firmware.json` next to
-/// the gzipped binary in the app's resources).
-public struct FirmwareBuild: Decodable, Equatable {
-    /// The fork's release tag, e.g. "release/0.5.9-fork.4".
+/// A firmware build this app ships (`Firmware.json`, with each build gzipped
+/// next to it in the app's resources).
+public struct FirmwareBuild: Decodable, Equatable, Identifiable {
+    public enum Kind: String, Decodable {
+        /// The JetKVM Desktop firmware (github.com/wottpal/kvm).
+        case desktop
+        /// JetKVM's own release.
+        case stock
+    }
+
+    public var kind: Kind
+    /// The release tag, e.g. "release/0.5.9-fork.4".
     public var tag: String
     public var sha256: String
     public var size: Int
 
-    public init(tag: String, sha256: String, size: Int) {
+    public init(kind: Kind, tag: String, sha256: String, size: Int) {
+        self.kind = kind
         self.tag = tag
         self.sha256 = sha256
         self.size = size
     }
 
+    public var id: String { tag }
+
     /// "0.5.9-fork.4"
-    public var name: String { tag.hasPrefix("release/") ? String(tag.dropFirst(8)) : tag }
+    public var version: String { tag.hasPrefix("release/") ? String(tag.dropFirst(8)) : tag }
+
+    /// "JetKVM Desktop 0.5.9-fork.4", "JetKVM 0.5.9"
+    public var title: String { kind == .desktop ? "JetKVM Desktop \(version)" : "JetKVM \(version)" }
+
+    /// The gzipped binary's file name in the app's resources.
+    public var fileName: String { tag.replacingOccurrences(of: "/", with: "-") + ".gz" }
+
+    /// The builds in a `Firmware.json`.
+    public static func manifest(_ data: Data) throws -> [FirmwareBuild] {
+        struct Manifest: Decodable { var builds: [FirmwareBuild] }
+        return try JSONDecoder().decode(Manifest.self, from: data).builds
+    }
 }
 
 /// Which firmware a JetKVM runs, as far as the app can tell.
 public enum FirmwareState: Equatable {
-    /// The bundled build.
-    case current
-    /// Another build of the JetKVM Desktop firmware.
-    case outdated
+    /// One of the builds this app ships.
+    case bundled(FirmwareBuild)
+    /// A JetKVM Desktop build this app doesn't ship (an older one).
+    case otherDesktop
     /// The JetKVM Desktop firmware; which build takes SSH to tell.
     case unverified
-    /// JetKVM's own firmware, with its version.
+    /// JetKVM's own firmware in a version this app doesn't ship, or one it
+    /// couldn't check without SSH.
     case stock(String)
 
     /// From what the device answers: whether it has the encoder control only
@@ -34,12 +58,12 @@ public enum FirmwareState: Equatable {
     /// SHA-256 of the installed app. Fork builds keep upstream's version, so
     /// only the hash tells builds apart.
     public static func evaluate(hasEncoderControl: Bool, appVersion: String, installedSHA256: String?,
-                                bundled: FirmwareBuild?) -> FirmwareState {
-        if let sha = installedSHA256, let bundled, sha.lowercased() == bundled.sha256.lowercased() {
-            return .current
+                                bundled: [FirmwareBuild]) -> FirmwareState {
+        if let sha = installedSHA256?.lowercased(), let build = bundled.first(where: { $0.sha256.lowercased() == sha }) {
+            return .bundled(build)
         }
         guard hasEncoderControl else { return .stock(appVersion) }
-        return installedSHA256 == nil ? .unverified : .outdated
+        return installedSHA256 == nil ? .unverified : .otherDesktop
     }
 }
 

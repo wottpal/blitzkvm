@@ -1,5 +1,17 @@
 {
-  "tag": "release/0.5.9-fork.4",
-  "sha256": "9052cccccf3dd4355a4292728574f8d2ef21a1e2596d27dbce9923acfdc05d65",
-  "size": 31547016
+  "builds": [
+    {
+      "kind": "desktop",
+      "tag": "release/0.5.9-fork.4",
+      "sha256": "9052cccccf3dd4355a4292728574f8d2ef21a1e2596d27dbce9923acfdc05d65",
+      "size": 31547016
+    },
+    {
+      "kind": "stock",
+      "tag": "release/0.5.9",
+      "sha256": "3b955de548b18b038341d43e8abec380813a81bfc40f082abf12031506aa1f0a",
+      "size": 31407424,
+      "url": "https://github.com/jetkvm/kvm/releases/download/release/0.5.9/jetkvm_app"
+    }
+  ]
 }

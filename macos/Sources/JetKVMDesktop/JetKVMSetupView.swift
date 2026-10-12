@@ -72,27 +72,46 @@ struct JetKVMSetupView: View {
 
     // MARK: Rows
 
+    /// The firmware row: the build that runs, the JetKVM Desktop build as
+    /// the main action, and every build the app ships in its menu, so
+    /// switching between them (or reinstalling one) is one choice away.
     private var firmwareRow: some View {
         let row = model.firmware
-        var content = RowContent(detail: "Checking…")
-        if let bundled = model.bundled?.build {
-            switch row.value {
-            case .current?:
-                content = RowContent(detail: "JetKVM Desktop \(bundled.name)", badge: "Up to Date")
-            case .outdated?:
-                content = RowContent(detail: "An older JetKVM Desktop build. \(bundled.name) is available.",
-                                     action: .init(title: "Update…") { confirming = .firmware(bundled) })
-            case .unverified?:
-                content = RowContent(detail: "JetKVM Desktop firmware. Check whether it's \(bundled.name).",
-                                     action: .init(title: "Check", perform: model.verifyFirmware))
-            case .stock(let version)?:
-                content = RowContent(detail: "JetKVM \(version). JetKVM Desktop \(bundled.name) adds sharper text and full-resolution modes.",
-                                     action: .init(title: "Install…") { confirming = .firmware(bundled) })
-            case nil:
-                break
+        let builds = model.builds.map(\.build)
+        guard let recommended = model.recommended ?? builds.first else {
+            return SetupRow(symbol: "cpu", tint: .indigo, title: "Firmware", row: row,
+                            content: RowContent(detail: "This build of the app doesn't include firmware."), retry: model.refresh)
+        }
+        func install(_ build: FirmwareBuild) -> () -> Void { { confirming = .firmware(build) } }
+        func choices(installed: FirmwareBuild?) -> [RowAction] {
+            builds.map { build in
+                let verb = build == installed ? "Reinstall" : build.kind == .stock ? "Switch to" : "Install"
+                return RowAction(title: "\(verb) \(build.title)…", perform: install(build))
             }
-        } else {
-            content = RowContent(detail: "This build of the app doesn't include firmware.")
+        }
+        let benefit = "\(recommended.title) adds sharper text, near-lossless still screens and larger Match Window sizes."
+        let newer = "\(recommended.title) is newer."
+        var content = RowContent(detail: "Checking…")
+        switch row.value {
+        case .bundled(let build)? where build == recommended:
+            content = RowContent(detail: build.title, badge: "Up to Date", menu: choices(installed: build))
+        case .bundled(let build)? where build.kind == .desktop:
+            content = RowContent(detail: build.title, note: newer,
+                                 action: .init(title: "Update…", perform: install(recommended)), menu: choices(installed: build))
+        case .bundled(let build)?:
+            content = RowContent(detail: "\(build.title), JetKVM's own firmware", note: benefit,
+                                 action: .init(title: "Install…", perform: install(recommended)), menu: choices(installed: build))
+        case .otherDesktop?:
+            content = RowContent(detail: "An older JetKVM Desktop build", note: newer,
+                                 action: .init(title: "Update…", perform: install(recommended)), menu: choices(installed: nil))
+        case .unverified?:
+            content = RowContent(detail: "JetKVM Desktop firmware", note: "Check whether it's \(recommended.version).",
+                                 action: .init(title: "Check", perform: model.verifyFirmware), menu: choices(installed: nil))
+        case .stock(let version)?:
+            content = RowContent(detail: "JetKVM \(version), JetKVM's own firmware", note: benefit,
+                                 action: .init(title: "Install…", perform: install(recommended)), menu: choices(installed: nil))
+        case nil:
+            break
         }
         return SetupRow(symbol: "cpu", tint: .indigo, title: "Firmware", row: row, content: content, retry: model.refresh)
     }
@@ -103,16 +122,18 @@ struct JetKVMSetupView: View {
         var content = RowContent(detail: "Checking…")
         switch row.value {
         case .notInstalled?:
-            content = RowContent(detail: "Reach this JetKVM from anywhere on your tailnet.", action: install)
+            content = RowContent(detail: "Not installed", note: "Reach this JetKVM from anywhere on your tailnet.", action: install)
         case .needsLogin?:
-            content = RowContent(detail: "Installed. Log in to add it to your tailnet.",
+            content = RowContent(detail: "Installed", note: "Log in to add it to your tailnet.",
                                  action: .init(title: "Log In…", perform: model.logIn))
         case .stopped?:
-            content = RowContent(detail: "Installed, but not running.", action: .init(title: "Reinstall…", perform: install.perform))
+            content = RowContent(detail: "Installed, but not running", note: "Reinstalling starts it again.",
+                                 action: .init(title: "Reinstall…", perform: install.perform))
         case .running(let name)?:
-            content = RowContent(detail: name, badge: "Connected",
+            content = RowContent(detail: name,
                                  note: "Turn off key expiry for it in the [admin console](https://login.tailscale.com/admin/machines), "
-                                     + "or it drops off your tailnet when its key expires.")
+                                     + "or it drops off your tailnet when its key expires.",
+                                 badge: "Connected")
         case nil:
             break
         }
@@ -124,9 +145,9 @@ struct JetKVMSetupView: View {
         var content = RowContent(detail: "Checking…")
         switch row.value {
         case true?:
-            content = RowContent(detail: "Asked for on every new connection.", badge: "On")
+            content = RowContent(detail: "Set", note: "Asked for on every new connection.", badge: "On")
         case false?:
-            content = RowContent(detail: "Off. Anyone who can reach the JetKVM can control the computer.",
+            content = RowContent(detail: "Off", note: "Anyone who can reach the JetKVM can control the computer.",
                                  action: .init(title: "Set Password…") { settingPassword = true })
         case nil:
             break
@@ -144,28 +165,35 @@ struct JetKVMSetupView: View {
 
         var title: String {
             switch self {
-            case .firmware(let build): return "Install JetKVM Desktop \(build.name)?"
+            case .firmware(let build): return build.kind == .stock ? "Switch to \(build.title)?" : "Install \(build.title)?"
             case .tailscale: return "Install Tailscale on this JetKVM?"
             }
         }
 
         var message: String {
             switch self {
-            case .firmware:
-                return "The JetKVM restarts, which takes about a minute, and the computer may briefly lose its display. "
-                    + "The current firmware is kept as a backup. JetKVM's automatic updates replace this build with their next release."
+            case .firmware(let build):
+                let restart = "The JetKVM restarts, which takes about a minute, and the computer may briefly lose its display. "
+                    + "The current firmware is kept as a backup."
+                return build.kind == .stock
+                    ? "JetKVM's own firmware, as released. " + restart
+                        + " Sharper text, near-lossless still screens and the largest Match Window sizes need the JetKVM Desktop firmware."
+                    : restart + " JetKVM's automatic updates replace this build with their next release."
             case .tailscale(let passwordOff):
                 let base = "It's downloaded from tailscale.com and installed without restarting the JetKVM. Your browser then opens to log in."
                 return passwordOff ? base + "\n\nSet a password too: everyone on your tailnet will be able to reach the JetKVM." : base
             }
         }
 
-        var action: String { "Install" }
+        var action: String {
+            if case .firmware(let build) = self, build.kind == .stock { return "Switch" }
+            return "Install"
+        }
     }
 
     private func perform(_ confirmation: Confirmation) {
         switch confirmation {
-        case .firmware: model.installFirmware()
+        case .firmware(let build): model.installFirmware(build)
         case .tailscale: model.installTailscale()
         }
     }
@@ -178,14 +206,16 @@ private struct RowAction {
     var perform: () -> Void
 }
 
-/// What a row shows for its state: a line of detail, then either a badge
-/// (done) or the action that moves it forward.
+/// What a row shows for its state: the state, a paragraph on what it means,
+/// then either a badge (done) or the action that moves it forward.
 private struct RowContent {
     var detail: String
+    /// The second paragraph, Markdown (for a link).
+    var note: String?
     var badge: String?
     var action: RowAction?
-    /// A second line, Markdown (for a link).
-    var note: String?
+    /// More actions, in a menu next to the badge or the action.
+    var menu: [RowAction] = []
 }
 
 private struct SetupRow<Value: Equatable>: View {
@@ -216,8 +246,9 @@ private struct SetupRow<Value: Equatable>: View {
                    let markdown = try? AttributedString(markdown: note) {
                     Text(markdown)
                         .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
                 }
             }
             .accessibilityElement(children: .combine)
@@ -234,14 +265,42 @@ private struct SetupRow<Value: Equatable>: View {
                 .controlSize(.small)
                 .accessibilityLabel(row.progress ?? "Checking")
         } else if let action = content.action {
-            Button(action.title, action: action.perform)
+            if content.menu.isEmpty {
+                Button(action.title, action: action.perform)
+            } else {
+                Menu(action.title) {
+                    menuItems
+                } primaryAction: {
+                    action.perform()
+                }
+                .fixedSize()
+            }
         } else if row.error != nil {
             Button("Check Again", action: retry)
         } else if let badge = content.badge {
-            Label(badge, systemImage: "checkmark.circle.fill")
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.green)
-                .labelStyle(.titleAndIcon)
+            HStack(spacing: 8) {
+                Label(badge, systemImage: "checkmark.circle.fill")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.green)
+                    .labelStyle(.titleAndIcon)
+                if !content.menu.isEmpty {
+                    Menu {
+                        menuItems
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .accessibilityLabel("More")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var menuItems: some View {
+        ForEach(content.menu.indices, id: \.self) { index in
+            Button(content.menu[index].title, action: content.menu[index].perform)
         }
     }
 }
