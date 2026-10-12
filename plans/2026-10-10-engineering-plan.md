@@ -1334,6 +1334,34 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
 
 **Trade-off:** 25–30 Hz roughly halves motion smoothness, and the remote pointer is part of the picture. It is offered only when the window cannot be shown 1:1 at 60 Hz, it is said once, and 60 Hz stays one menu choice away.
 
+## 29. A ten-hour session (2026-10-12)
+
+**Ask (PM):** after about ten hours, a live session (2400×1012 at 60 Hz, full screen on the 40" display) felt slow and laggy. Did something build up?
+
+**Nothing built up.** Measured read-only on the running session (app build 218, fork.4):
+- **App memory:** flat over 10 minutes. 547 MB with the window hidden, 964 MB shown (the render targets of a 6016×2538 window). IOSurfaces constant at 40 (119 MB).
+- **GPU:** 29–34 % of the M4 Max while shown, about 0 while hidden. A fresh instance at a quarter of the pixels (1200×506 into 3008×1268, the same 2.51× FSR scale) needs 1.30 ms a frame. At full size that is 5.2 ms, 31 % at 60 fps: the same as the long session.
+- **Code:** no timer, observer, event tap or queue grows, and textures are allocated only on size changes. Video is never paced by RTP timestamps (frames go out when complete), so clock drift cannot add latency.
+- **Engine:** 18–33 MB, 3 % CPU.
+- **Device:** up 10 h, memory flat (app 57 MB, native 30 MB, video CMA 37 MB), CPU 88 % idle. The load average of 9.6 is the media driver's idle kernel threads in D state.
+- **Network:** 0.9 ms RTT, no loss, no input stalls in the session.
+- **The remote Mac's screen was busy:** an agent session with a spinner and an animated web page, so every frame changed.
+
+**Two inefficiencies, fixed:**
+- **Hidden windows caused keyframe storms.**
+  - A window in another Space stops decoding, but the engine kept sending video.
+  - macOS throttles a hidden app's pipe reader (App Nap), so the engine's one-second queue overflowed, and each overflow asked for a keyframe: up to two maximum-quality keyframes a second for 20 s (23:22:32–51), and a few dozen bursts overnight.
+  - The engine now stops sending video while the window is hidden (`setVideoPaused`, re-sent to a restarted engine), and resumes at a keyframe it asks for at once.
+  - Re-showing takes as long as before: 400–419 ms against 417–437 ms in the hide self-test.
+- **A still screen was redrawn 60 times a second.**
+  - The device streams near-empty P-frames from a still screen. Each was upscaled and composited again: 5.2 ms of GPU at 6016×2538, plus a WindowServer composite.
+  - The view now skips a decoded frame identical to the one shown: same size, colorimetry and pixels, compared row by row. The comparison stops at the first difference and takes at most 0.15 ms for 2400×1012.
+  - On an H.265 still clip at 2400×1012, 1 of 753 frames is drawn, and the GPU share falls from 10–13 % to about 0.
+  - With a caret blinking twice a second, 27 of 722 frames are drawn (0.5 % GPU).
+  - The video watchdog counts a skipped frame as shown.
+
+**Menu:** Stream Quality moved from the Device menu to View.
+
 ## Appendix A: Key sources
 
 - `jetkvm/kvm` (`dev` @ `8f6c300`, `release/0.5.9`): https://github.com/jetkvm/kvm. REMB revert: https://github.com/jetkvm/kvm/pull/1693
