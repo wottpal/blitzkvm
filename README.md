@@ -108,7 +108,7 @@ Full screen: the menu bar, and with it the window's title bar and buttons, slide
 
 View › Exact Pixels at Whole-Number Scales switches to nearest-neighbor where the scale is a whole number. View › Scaling Filter swaps the enlargement filter for experiments (Automatic stays the default): FSR 1 with light, strong or no sharpening, Lanczos‑3, Catmull‑Rom, sharp bilinear, bilinear or nearest neighbor. Shrinking stays antialiased with any of them. View › Show Status Bar (⌘/) hides the status line in every window. A window keeps its picture size; in full screen the picture gains the line, and Match Window follows.
 
-When the picture stalls for more than about half a second (connecting, a display resize, a stream that paused, no HDMI signal), a large overlay says why and what happens next, under an icon for the state (it pulses while the wait ends by itself). The last picture stays underneath, dimmed. Keyboard and pointer keep working.
+When the picture stalls for more than about half a second (connecting, a display resize, a stream that paused, no HDMI signal), a large overlay says why and what happens next, under an icon for the state (it pulses while the wait ends by itself). With no HDMI signal it offers Wake Computer, the only part of the overlay that takes a click. The last picture stays underneath, dimmed. Keyboard and pointer keep working.
 
 **Picture pipeline** (`VideoView.swift`):
 - **Chroma:** the JetKVM sends color at half resolution. The app rebuilds it from the full-resolution luma, since within a few pixels desktop content mixes two colors. Colored text measures 51 dB against 28 dB with plain upsampling.

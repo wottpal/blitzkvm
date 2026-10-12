@@ -388,6 +388,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         viewControl.toolTip = "How the remote screen is sized in the window"
         hud.translatesAutoresizingMaskIntoConstraints = false
         stallOverlay.translatesAutoresizingMaskIntoConstraints = false
+        stallOverlay.onAction = { [weak self] action in
+            if action == .wake { self?.wakeComputer() }
+        }
         let container = NSView(frame: window.contentLayoutRect)
         view.translatesAutoresizingMaskIntoConstraints = false
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -1028,8 +1031,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         if let signal = snapshot.VideoSignal, !signal.isEmpty, signal != "ready" {
             return .init(title: "No picture from the computer",
-                         detail: "HDMI: \(signal.replacingOccurrences(of: "_", with: " ")). If it's asleep, Device › Wake Computer wakes it.",
-                         symbol: "display.trianglebadge.exclamationmark", busy: false)
+                         detail: "HDMI: \(signal.replacingOccurrences(of: "_", with: " ")). It may be asleep or switched off.",
+                         symbol: "display.trianglebadge.exclamationmark", busy: false, action: input.viewOnly ? nil : .wake)
         }
         if pictureAt < connectedAt {
             return .init(title: "Starting video…", detail: "Connected to \(name).", symbol: "play.display")
