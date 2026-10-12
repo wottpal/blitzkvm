@@ -423,18 +423,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         device.addItem(.separator())
         device.addItem(item("Invert Scrolling", #selector(toggleInvertScroll)))
-        device.addItem(.separator())
-        let quality = NSMenu(title: "Stream Quality")
-        quality.addItem(item("Automatic (Adapts to the Network)", #selector(toggleAdaptiveQuality)))
-        quality.addItem(.separator())
-        for (title, level) in Self.qualityLevels {
-            let i = item(title, #selector(setQualityLevel(_:)))
-            i.representedObject = level
-            quality.addItem(i)
-        }
-        let qualityItem = NSMenuItem(title: "Stream Quality", action: nil, keyEquivalent: "")
-        qualityItem.submenu = quality
-        device.addItem(qualityItem)
         let deviceItem = NSMenuItem()
         deviceItem.submenu = device
         main.addItem(deviceItem)
@@ -472,6 +460,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         filtersItem.submenu = filters
         view.addItem(filtersItem)
         view.addItem(item("Exact Pixels at Whole-Number Scales", #selector(toggleExactPixels)))
+        view.addItem(.separator())
+        let quality = NSMenu(title: "Stream Quality")
+        quality.addItem(item("Automatic (Adapts to the Network)", #selector(toggleAdaptiveQuality)))
+        quality.addItem(.separator())
+        for (title, level) in Self.qualityLevels {
+            let i = item(title, #selector(setQualityLevel(_:)))
+            i.representedObject = level
+            quality.addItem(i)
+        }
+        let qualityItem = NSMenuItem(title: "Stream Quality", action: nil, keyEquivalent: "")
+        qualityItem.submenu = quality
+        view.addItem(qualityItem)
         view.addItem(.separator())
         view.addItem(item("Show Status Bar", #selector(toggleStatusBar), key: "/"))
         view.addItem(.separator())

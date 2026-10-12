@@ -33,6 +33,7 @@ final class EngineProcess {
     private var readHandles: [FileHandle] = []
     // Main-thread state.
     private var lastConnect: EngineCommand?
+    private var videoPaused = false
     private var stopped = false
     private var restartDelay: TimeInterval = 0.5
     private var nextCommandID: Int64 = 1
@@ -151,6 +152,8 @@ final class EngineProcess {
         stdinHandle = input.fileHandleForWriting
         readHandles = [output.fileHandleForReading, errors.fileHandleForReading]
         writeLock.unlock()
+        // A new helper sends video until told otherwise.
+        if videoPaused { send(command: EngineCommand(cmd: "setVideoPaused", paused: true)) }
     }
 
     private func handleTermination(_ proc: Process) {
@@ -291,6 +294,15 @@ final class EngineProcess {
         lastConnect?.autoQuality = false
         lastConnect?.qualityLevel = name
         send(command: EngineCommand(cmd: "setQualityLevel", qualityLevel: name))
+    }
+
+    /// Stops the helper sending video while none is shown (the window is
+    /// hidden), also for a restarted helper; resumed, video restarts at a
+    /// keyframe.
+    func setVideoPaused(_ paused: Bool) {
+        guard paused != videoPaused else { return }
+        videoPaused = paused
+        send(command: EngineCommand(cmd: "setVideoPaused", paused: paused))
     }
 
     /// Asks the device for a keyframe. Any thread; no reply.

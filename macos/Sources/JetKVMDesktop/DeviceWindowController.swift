@@ -719,7 +719,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// render stalls, which a keyframe does not fix.
     private func watchVideo() {
         let stats = decoder.snapshot()
-        let presented = videoView.presentedFrames
+        // A frame identical to the shown one counts as shown.
+        let presented = videoView.presentedFrames + videoView.unchangedFrames
         defer { (watchedReceived, watchedDecoded, watchedPresented) = (stats.received, stats.decoded, presented) }
         let decoded = stats.decoded
         let arriving = stats.received > watchedReceived
@@ -837,12 +838,15 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         input.setCaptured(false)
     }
 
-    /// Hidden windows (another tab in front, minimized, covered) stay
-    /// connected but stop decoding; shown again, the decoder asks for a
-    /// keyframe to resume at.
+    /// Hidden windows (another tab in front, minimized, covered, another
+    /// Space) stay connected but get no video: the helper stops sending it,
+    /// since a hidden app may be throttled by the system and could not keep
+    /// up. Shown again, video resumes at a keyframe.
     func windowDidChangeOcclusionState(_ notification: Notification) {
         guard let window else { return }
-        decoder.paused = !window.occlusionState.contains(.visible)
+        let hidden = !window.occlusionState.contains(.visible)
+        decoder.paused = hidden
+        engine.setVideoPaused(hidden)
         refreshStatus()
     }
 

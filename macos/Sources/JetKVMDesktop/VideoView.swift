@@ -53,6 +53,8 @@ class VideoView: NSView {
     /// Latest layout in physical pixels, for pointer mapping.
     var layout: VideoLayout { state.withLock { $0.layout } }
     var presentedFrames: Int { state.withLock { $0.presented } }
+    /// Frames identical to the one on screen, which were not drawn again.
+    var unchangedFrames: Int { state.withLock { $0.unchanged } }
 
     private struct State {
         var mode: ScalingMode = .actualSize
@@ -67,6 +69,7 @@ class VideoView: NSView {
         var frameSerial: UInt64 = 0
         var renderPending = false
         var presented = 0
+        var unchanged = 0
         /// The last frame went through the text upscaler.
         var textUpscaling = false
     }
@@ -513,13 +516,51 @@ class VideoView: NSView {
     var frameSerial: UInt64 { state.withLock { $0.frameSerial } }
 
     /// Hands a new decoded frame to the view. Frames that arrive faster than
-    /// they can be drawn replace each other (newest wins).
+    /// they can be drawn replace each other (newest wins). A frame identical
+    /// to the current one is not drawn: a still screen streams 60 frames a
+    /// second, and each would cost a full upscale and a composite (a third
+    /// of an M4 Max GPU in a 6016×2538 window). Called on one thread.
     func display(_ pixelBuffer: CVPixelBuffer) {
+        if let current = state.withLock({ $0.frame }), Self.samePicture(current, pixelBuffer) {
+            state.withLock { $0.unchanged += 1 }
+            return
+        }
         state.withLock {
             $0.frame = pixelBuffer
             $0.frameSerial &+= 1
         }
         redraw()
+    }
+
+    /// Whether two decoded NV12 frames hold the same picture: size,
+    /// colorimetry and every pixel. Comparing stops at the first difference;
+    /// a full comparison of 2400×1012 takes about 0.1 ms.
+    static func samePicture(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> Bool {
+        if a === b { return true }
+        let format = CVPixelBufferGetPixelFormatType(a)
+        guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+              CVPixelBufferGetPixelFormatType(b) == format,
+              CVPixelBufferGetWidth(a) == CVPixelBufferGetWidth(b), CVPixelBufferGetHeight(a) == CVPixelBufferGetHeight(b),
+              CVPixelBufferGetPlaneCount(a) == 2, CVPixelBufferGetPlaneCount(b) == 2 else { return false }
+        for key in [kCVImageBufferYCbCrMatrixKey, kCVImageBufferChromaLocationTopFieldKey] {
+            guard CVBufferCopyAttachment(a, key, nil) as? String == CVBufferCopyAttachment(b, key, nil) as? String else { return false }
+        }
+        guard CVPixelBufferLockBaseAddress(a, .readOnly) == kCVReturnSuccess else { return false }
+        defer { CVPixelBufferUnlockBaseAddress(a, .readOnly) }
+        guard CVPixelBufferLockBaseAddress(b, .readOnly) == kCVReturnSuccess else { return false }
+        defer { CVPixelBufferUnlockBaseAddress(b, .readOnly) }
+        for plane in 0..<2 {
+            guard let pa = CVPixelBufferGetBaseAddressOfPlane(a, plane),
+                  let pb = CVPixelBufferGetBaseAddressOfPlane(b, plane) else { return false }
+            // Luma has one byte a pixel, interleaved chroma two a pair.
+            let rowBytes = CVPixelBufferGetWidthOfPlane(a, plane) * (plane + 1)
+            let strideA = CVPixelBufferGetBytesPerRowOfPlane(a, plane), strideB = CVPixelBufferGetBytesPerRowOfPlane(b, plane)
+            // Row by row: the padding between rows is not part of the picture.
+            for row in 0..<CVPixelBufferGetHeightOfPlane(a, plane) where memcmp(pa + row * strideA, pb + row * strideB, rowBytes) != 0 {
+                return false
+            }
+        }
+        return true
     }
 
     /// Schedules a render of the latest frame (coalesced).

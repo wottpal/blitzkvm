@@ -114,11 +114,14 @@ public struct EngineCommand: Codable, Equatable {
     public var path: String?
     /// The upload command to cancel (cmd "cancelUpload").
     public var target: Int64?
+    /// Stop sending video while the app shows none (cmd "setVideoPaused").
+    public var paused: Bool?
 
     public init(id: Int64? = nil, cmd: String, baseURL: String? = nil, password: String? = nil,
                 deviceID: String? = nil, certSHA256: String? = nil, offerH265: Bool? = nil, autoQuality: Bool? = nil,
                 qualityLevel: String? = nil, method: String? = nil,
-                params: JSONValue? = nil, text: String? = nil, delay: Int? = nil, path: String? = nil, target: Int64? = nil) {
+                params: JSONValue? = nil, text: String? = nil, delay: Int? = nil, path: String? = nil, target: Int64? = nil,
+                paused: Bool? = nil) {
         self.id = id
         self.cmd = cmd
         self.baseURL = baseURL
@@ -134,6 +137,7 @@ public struct EngineCommand: Codable, Equatable {
         self.delay = delay
         self.path = path
         self.target = target
+        self.paused = paused
     }
 }
 

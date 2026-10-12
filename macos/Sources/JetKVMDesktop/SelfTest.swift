@@ -304,6 +304,7 @@ final class SelfTest {
             "status": controller.snapshot.Status,
             "decodedFrames": decoded,
             "presentedFrames": controller.videoView.presentedFrames,
+            "unchangedFrames": controller.videoView.unchangedFrames,
             "decodeErrors": stats.errors,
             "keyframes": stats.keyframes,
             "skippedUnits": stats.skipped,
