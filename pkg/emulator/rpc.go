@@ -116,6 +116,17 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 			{IPAddress: "2001:db8::10", LastUpdated: time.Now().Add(-4 * time.Minute)},
 		}), nil
 	case "getTailscaleStatus":
+		switch srv.cfg.Tailscale {
+		case TailscaleNone:
+			return ok(client.TailscaleStatus{ControlURL: "https://controlplane.tailscale.com"}), nil
+		case TailscaleNeedsLogin:
+			return ok(client.TailscaleStatus{
+				Installed:    true,
+				BackendState: "NeedsLogin",
+				AuthURL:      "https://login.tailscale.com/a/emulator",
+				ControlURL:   "https://controlplane.tailscale.com",
+			}), nil
+		}
 		return ok(client.TailscaleStatus{
 			Installed:    true,
 			Running:      true,

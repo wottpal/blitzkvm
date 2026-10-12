@@ -85,7 +85,7 @@ func TestStatsAfterCloseDoesNotPoll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api, err := c.newAPI()
+	api, err := c.newAPI(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func offerSDP(t *testing.T, cfg Config) string {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	api, err := c.newAPI()
+	api, err := c.newAPI(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -45,6 +45,13 @@ const DefaultDeviceVersion = "0.5.9"
 // (upstream internal/native.DefaultEDID): 1920x1080, "JetKVM v1".
 const DefaultEDID = "00FFFFFFFFFFFF0028B4010001EEFFC0302301038047287856EE91A3544C99260F5054000000D1C081C0318001010101010101010101023A801871382D40582C4500C48E2100001E773300A050D02B2030203500122C2100001A000000FD00174C0F5111000A202020202020000000FC004A65744B564D2076310A20202001D5020322D1431004012309070783010000E200CFE40D100401E305000065030C001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000CF"
 
+// Tailscale states the emulator reports (Config.Tailscale).
+const (
+	TailscaleRunning    = "running"
+	TailscaleNone       = "none"
+	TailscaleNeedsLogin = "needs-login"
+)
+
 type Config struct {
 	ListenAddr string
 	AuthMode   AuthMode
@@ -74,6 +81,9 @@ type Config struct {
 	Faults         FaultConfig
 	// ICELoopbackOnly restricts ICE to 127.0.0.1 (tests).
 	ICELoopbackOnly bool
+	// Tailscale is the state getTailscaleStatus reports: TailscaleRunning
+	// (default), TailscaleNone (not installed) or TailscaleNeedsLogin.
+	Tailscale string
 	// TLS serves https with a self-signed device CA, like the firmware's
 	// self-signed TLS mode.
 	TLS bool

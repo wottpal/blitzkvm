@@ -80,7 +80,8 @@ type Command struct {
 	// setExtension (Text), setSerialSettings (Params:
 	// session.SerialSettings), upload, cancelUpload, setAutoQuality
 	// (AutoQuality), setQualityLevel (QualityLevel), setVideoPaused
-	// (Paused).
+	// (Paused), createPassword (Password: sets the device's first password
+	// and uses it from then on).
 	Cmd      string `json:"cmd"`
 	BaseURL  string `json:"baseURL,omitempty"`
 	Password string `json:"password,omitempty"`

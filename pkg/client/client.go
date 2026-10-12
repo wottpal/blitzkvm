@@ -133,8 +133,12 @@ type StatsSnapshot struct {
 	FramesDropped   uint64
 	KeyframeWaits   uint64
 	RoundTripMs     float64
-	LastError       string
-	TransportDebug  string
+	// Path is the network the selected candidate pair runs over (PathLAN,
+	// PathTailscale, ...); PathRemote is its remote address.
+	Path           string
+	PathRemote     string
+	LastError      string
+	TransportDebug string
 }
 
 type channels struct {
@@ -321,7 +325,7 @@ func (c *Client) peer() *webrtc.PeerConnection {
 // PLI, FIR) and the default interceptors (NACK generator, RTCP reports, TWCC).
 // Offering only what we can decode matters: JetKVM picks H.265 whenever the
 // offer mentions it.
-func (c *Client) newAPI() (*webrtc.API, error) {
+func (c *Client) newAPI(local []net.IP) (*webrtc.API, error) {
 	feedback := []webrtc.RTCPFeedback{
 		{Type: "goog-remb"},
 		{Type: "ccm", Parameter: "fir"},
@@ -365,6 +369,8 @@ func (c *Client) newAPI() (*webrtc.API, error) {
 	se.SetICETimeouts(4*time.Second, 8*time.Second, time.Second)
 	if c.cfg.ICELoopbackOnly {
 		restrictICEToLoopback(&se)
+	} else if len(local) > 0 {
+		pinICE(&se, local)
 	}
 	// SCTP (all data channels: keyboard, pointer, RPC) retransmits a lost
 	// packet after an RTO that doubles on every miss, up to 60 s by default.
@@ -435,7 +441,7 @@ func (c *Client) connect(ctx context.Context) error {
 	c.signalMode.Store(uint32(SignalingModeWebSocket))
 	c.emitLifecycle(LifecycleEvent{Type: "signaling_mode", Signaling: SignalingModeWebSocket})
 
-	api, err := c.newAPI()
+	api, err := c.newAPI(routeLocalIPs(ctx, c.cfg.BaseURL))
 	if err != nil {
 		return err
 	}
@@ -1453,7 +1459,7 @@ func (c *Client) collectStats(now time.Time) {
 	var snap StatsSnapshot
 	// RTT of the pair ICE actually uses; other succeeded pairs (other
 	// interfaces, VPNs) can differ by orders of magnitude.
-	selectedPair := ""
+	selectedPair, localID, remoteID := "", "", ""
 	for _, raw := range report {
 		if t, ok := raw.(webrtc.TransportStats); ok && t.SelectedCandidatePairID != "" {
 			selectedPair = t.SelectedCandidatePairID
@@ -1483,6 +1489,25 @@ func (c *Client) collectStats(now time.Time) {
 			if selected && v.CurrentRoundTripTime > 0 {
 				snap.RoundTripMs = v.CurrentRoundTripTime * 1000
 			}
+			if selected {
+				localID, remoteID = v.LocalCandidateID, v.RemoteCandidateID
+			}
+		}
+	}
+	if localID != "" {
+		var local, remote net.IP
+		for _, raw := range report {
+			if v, ok := raw.(webrtc.ICECandidateStats); ok {
+				switch v.ID {
+				case localID:
+					local = net.ParseIP(v.IP)
+				case remoteID:
+					remote = net.ParseIP(v.IP)
+				}
+			}
+		}
+		if local != nil && remote != nil {
+			snap.Path, snap.PathRemote = pathKind(local, remote), remote.String()
 		}
 	}
 	if snap.RoundTripMs > 0 {

@@ -207,6 +207,14 @@ func (e *Engine) command(cmd engineipc.Command) error {
 			c.SetAutoQuality(cmd.AutoQuality)
 		}
 		e.reply(cmd.ID, nil, "")
+	case "createPassword":
+		go e.withController(cmd, func(c *session.Controller) error {
+			if err := c.CreateLocalPassword(cmd.Password); err != nil {
+				return err
+			}
+			c.SetPassword(cmd.Password)
+			return nil
+		})
 	case "setQualityLevel":
 		go e.withController(cmd, func(c *session.Controller) error {
 			ctx, cancel := context.WithTimeout(e.ctx, defaultRPCWait)

@@ -47,6 +47,26 @@ func TestControllerConnects(t *testing.T) {
 	}
 }
 
+// Without ICELoopbackOnly, ICE follows the route to the device's address
+// (here loopback) and reports the path it took.
+func TestControllerPinsICEToRoute(t *testing.T) {
+	srv, ctx, cancel := startEmulator(t)
+	defer cancel()
+
+	controller := New(Config{BaseURL: srv.BaseURL(), Password: "secret", RPCTimeout: 2 * time.Second})
+	controller.Start(ctx)
+	defer controller.Stop()
+
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	deadline := time.Now().Add(5 * time.Second)
+	for controller.Stats().Path == "" && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if stats := controller.Stats(); stats.Path != client.PathLoopback || stats.PathRemote != "127.0.0.1" {
+		t.Fatalf("path = %q via %q, want loopback via 127.0.0.1", stats.Path, stats.PathRemote)
+	}
+}
+
 func TestControllerReconnectsAfterDisconnect(t *testing.T) {
 	srv, ctx, cancel := startEmulator(t)
 	defer cancel()

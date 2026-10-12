@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -240,6 +241,42 @@ func TestEngineVideoPause(t *testing.T) {
 	if hdr.Flags&engineipc.FlagKeyframe == 0 {
 		t.Fatal("video must resume at a keyframe")
 	}
+}
+
+// createPassword sets a password-less device's first password; the device
+// then asks for it, and the engine reconnects with it.
+func TestEngineCreatePassword(t *testing.T) {
+	srv, err := emulator.NewServer(emulator.Config{ListenAddr: "127.0.0.1:0", AuthMode: emulator.AuthModeNoPassword, ICELoopbackOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = srv.ListenAndServe(ctx) }()
+	for i := 0; i < 200 && srv.BaseURL() == ""; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	h := startEngine(t)
+	h.send(engineipc.Command{ID: 1, Cmd: "connect", BaseURL: srv.BaseURL()})
+	h.waitForSnapshot(10*time.Second, "connected", func(snap map[string]any) bool { return snap["Phase"] == "connected" })
+
+	h.send(engineipc.Command{ID: 2, Cmd: "createPassword", Password: "correct horse"})
+	if res := h.waitDone(5*time.Second, 2); res.Error != "" {
+		t.Fatalf("createPassword: %s", res.Error)
+	}
+	resp, err := http.Get(srv.BaseURL() + "/device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("GET /device after createPassword = %d, want 401", resp.StatusCode)
+	}
+	h.send(engineipc.Command{ID: 3, Cmd: "reconnect"})
+	if res := h.waitDone(10*time.Second, 3); res.Error != "" {
+		t.Fatalf("reconnect with the new password: %s", res.Error)
+	}
+	h.waitForSnapshot(10*time.Second, "reconnected", func(snap map[string]any) bool { return snap["Phase"] == "connected" })
 }
 
 func TestNormalizeBaseURL(t *testing.T) {
