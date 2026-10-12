@@ -301,6 +301,36 @@ func TestEngineChangePassword(t *testing.T) {
 	h.waitConnectedAgain()
 }
 
+// removePassword needs the current password; the device then asks for none,
+// and the engine reconnects without one.
+func TestEngineRemovePassword(t *testing.T) {
+	srv := startEmulator(t)
+	h := startEngine(t)
+	h.connect(srv.BaseURL(), engineipc.Command{})
+
+	h.send(engineipc.Command{ID: 2, Cmd: "removePassword", Password: "wrong one"})
+	if res := h.waitDone(5*time.Second, 2); res.Error == "" {
+		t.Fatal("removePassword with a wrong password succeeded")
+	}
+	h.send(engineipc.Command{ID: 3, Cmd: "removePassword", Password: "pw"})
+	if res := h.waitDone(5*time.Second, 3); res.Error != "" {
+		t.Fatalf("removePassword: %s", res.Error)
+	}
+	resp, err := http.Get(srv.BaseURL() + "/device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /device after removePassword = %d, want 200", resp.StatusCode)
+	}
+	h.send(engineipc.Command{ID: 4, Cmd: "reconnect"})
+	if res := h.waitDone(10*time.Second, 4); res.Error != "" {
+		t.Fatalf("reconnect without a password: %s", res.Error)
+	}
+	h.waitConnectedAgain()
+}
+
 // reboot restarts the device; the session goes through rebooting and comes
 // back by itself.
 func TestEngineReboot(t *testing.T) {
