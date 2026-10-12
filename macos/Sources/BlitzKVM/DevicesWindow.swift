@@ -499,8 +499,8 @@ private struct DeviceScreen: View {
     }
 }
 
-/// JetKVM Setup's progress on the screen: a dot per step and "Setup 2/3"
-/// (firmware, password, Tailscale), or "Set Up" before the first check. A click opens
+/// JetKVM Setup's progress on the screen: a dot per step (firmware,
+/// password, Tailscale) and "Setup", or "Set Up" before the first check. A click opens
 /// the sheet (connecting first).
 private struct SetupBadge: View {
     let summary: SetupSummary?
@@ -511,8 +511,7 @@ private struct SetupBadge: View {
         Button(action: open) {
             HStack(spacing: 5) {
                 ring
-                Text(summary.map { "Setup \($0.done)/\(SetupSummary.steps)" } ?? "Set Up")
-                    .monospacedDigit()
+                Text(summary == nil ? "Set Up" : "Setup")
             }
             .font(.caption.weight(.medium))
             .foregroundStyle(.white.opacity(0.9))
