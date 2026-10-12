@@ -301,6 +301,34 @@ func TestEngineChangePassword(t *testing.T) {
 	h.waitConnectedAgain()
 }
 
+// reboot restarts the device; the session goes through rebooting and comes
+// back by itself.
+func TestEngineReboot(t *testing.T) {
+	srv := startEmulatorWith(t, emulator.Config{RebootDowntime: 500 * time.Millisecond})
+	h := startEngine(t)
+	h.connect(srv.BaseURL(), engineipc.Command{})
+	h.send(engineipc.Command{ID: 2, Cmd: "reboot"})
+	// The reply and the rebooting snapshot come in either order.
+	var done, rebooting bool
+	h.waitFor(10*time.Second, "reboot reply and rebooting snapshot", func(f frame) bool {
+		var res engineipc.CommandResult
+		var evt engineipc.Event
+		var snap map[string]any
+		switch {
+		case f.typ == engineipc.TypeCommandDone && json.Unmarshal(f.payload, &res) == nil && res.ID == 2:
+			if res.Error != "" {
+				t.Fatalf("reboot: %s", res.Error)
+			}
+			done = true
+		case f.typ == engineipc.TypeEvent && json.Unmarshal(f.payload, &evt) == nil && evt.Type == "snapshot" &&
+			json.Unmarshal(evt.Snapshot, &snap) == nil && snap["Phase"] == "rebooting":
+			rebooting = true
+		}
+		return done && rebooting
+	})
+	h.waitConnectedAgain()
+}
+
 // waitConnectedAgain waits until the session answers RPC after a
 // reconnect (its "connected" snapshot may have gone by already).
 func (h *harness) waitConnectedAgain() {

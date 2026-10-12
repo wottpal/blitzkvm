@@ -215,6 +215,8 @@ func (e *Engine) command(cmd engineipc.Command) error {
 			c.SetPassword(cmd.Password)
 			return nil
 		})
+	case "reboot":
+		go e.withController(cmd, func(c *session.Controller) error { return c.Reboot() })
 	case "changePassword":
 		go e.withController(cmd, func(c *session.Controller) error {
 			if err := c.UpdateLocalPassword(cmd.OldPassword, cmd.Password); err != nil {

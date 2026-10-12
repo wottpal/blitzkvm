@@ -81,7 +81,8 @@ type Command struct {
 	// session.SerialSettings), upload, cancelUpload, setAutoQuality
 	// (AutoQuality), setQualityLevel (QualityLevel), setVideoPaused
 	// (Paused), createPassword (Password: sets the device's first password
-	// and uses it from then on), changePassword (OldPassword, Password).
+	// and uses it from then on), changePassword (OldPassword, Password),
+	// reboot (restarts the JetKVM; the session reconnects once it is up).
 	Cmd      string `json:"cmd"`
 	BaseURL  string `json:"baseURL,omitempty"`
 	Password string `json:"password,omitempty"`

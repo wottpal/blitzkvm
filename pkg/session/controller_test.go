@@ -918,9 +918,13 @@ func TestControllerReconnectsAfterReboot(t *testing.T) {
 	if err := controller.Reboot(); err != nil {
 		t.Fatalf("reboot: %v", err)
 	}
-	// Firmware waits 1 s before going down, then is away for the downtime.
+	// Firmware waits 1 s before going down, then is away for the downtime;
+	// a session caught in that second must not count as back.
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Since(start) < 3*time.Second || controller.Snapshot().Phase != PhaseConnected {
+		if time.Since(start) < 1500*time.Millisecond && controller.Snapshot().Phase == PhaseConnected {
+			t.Fatal("connected again before the device went down")
+		}
 		if time.Now().After(deadline) {
 			t.Fatalf("not reconnected after the reboot: %+v", controller.Snapshot().Status)
 		}

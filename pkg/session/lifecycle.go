@@ -28,6 +28,10 @@ const (
 	stableSessionAfter = 30 * time.Second
 	hidReadyTimeout    = 5 * time.Second
 	stopWaitTimeout    = 3 * time.Second
+	// rebootSettle delays the reconnect after willReboot: the device stays
+	// up for about a second before it goes down, and a session caught in
+	// that window would look connected.
+	rebootSettle = 3 * time.Second
 )
 
 func (c *Controller) Start(parent context.Context) {
@@ -128,6 +132,7 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 	}()
 
 	attempt := 0
+	var settle time.Duration // the least the next retry waits
 	retry := func() bool {
 		c.mu.Lock()
 		immediate := c.reconnectNow
@@ -138,7 +143,8 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 		if !reconnect || ctx.Err() != nil {
 			return false
 		}
-		delay := backoff(attempt, base, maxDelay)
+		delay := max(backoff(attempt, base, maxDelay), settle)
+		settle = 0
 		if immediate {
 			delay = 0
 			// The wake token ReconnectNow left must not cut the next
@@ -249,6 +255,7 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 				s.Status = "device rebooting"
 				s.HIDReady = false
 			})
+			settle = rebootSettle
 		default:
 			c.setState(func(s *Snapshot) {
 				s.Phase = PhaseReconnecting
