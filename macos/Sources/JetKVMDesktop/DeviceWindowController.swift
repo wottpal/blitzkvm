@@ -2,6 +2,7 @@ import AppKit
 import CoreVideo
 import JetKVMCore
 import Network
+import SwiftUI
 
 /// One window per device: video, input capture, status line.
 final class DeviceWindowController: NSWindowController, NSWindowDelegate, EngineProcessDelegate {
@@ -55,6 +56,15 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     var onClose: ((DeviceWindowController) -> Void)?
     /// A per-device preference changed (view, mouse, codec…): persist it.
     var onPreferencesChanged: ((DeviceWindowController) -> Void)?
+    /// An address was added (the JetKVM's tailnet name): persist it.
+    var onAddressesChanged: ((DeviceWindowController) -> Void)?
+    /// Opens the setup sheet once the session connects.
+    var showsSetupOnConnect = false
+    private var setupModel: JetKVMSetupModel?
+    private var setupSheet: NSWindow?
+    /// The Tailscale relay the video goes through, when it isn't direct.
+    private var tailscaleRelay: String?
+    private var relayCheckedAt: Date?
     private var unverifiedPassword: String?
     private let codecLock = NSLock()
     private var statusTimer: Timer?
@@ -470,6 +480,41 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         Task { await mediaModel.refresh() }
     }
 
+    /// The JetKVM Setup sheet: firmware, Tailscale and password.
+    func showSetup() {
+        guard let window, setupSheet == nil else { return }
+        let model = setupModel ?? JetKVMSetupModel(controller: self)
+        setupModel = model
+        let view = JetKVMSetupView(model: model, deviceName: device.name, address: address) { [weak self] in
+            guard let self, let sheet = self.setupSheet else { return }
+            self.window?.endSheet(sheet)
+            self.setupSheet = nil
+        }
+        let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
+        setupSheet = sheet
+        window.beginSheet(sheet)
+        model.refresh()
+    }
+
+    /// The setup sheet's model, once it has been shown.
+    var setup: JetKVMSetupModel? { setupModel }
+
+    /// Renders the setup sheet (self-test).
+    func writeSetupSnapshot(to url: URL) -> Bool {
+        // The frame view, so the sheet's background is in the picture too.
+        guard let view = setupSheet?.contentView?.superview ?? setupSheet?.contentView,
+              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        return (try? rep.representation(using: .png, properties: [:])?.write(to: url)) != nil
+    }
+
+    /// Adds an address the JetKVM answers at and persists it.
+    func addAddress(_ address: String) {
+        guard device.addAddress(address) else { return }
+        AppLog.log("\(device.name): added address \(address)")
+        onAddressesChanged?(self)
+    }
+
     func showSerialConsole() {
         if serialWindow == nil {
             serialWindow = SerialConsoleWindowController(log: serialLog, engine: engine, deviceName: device.name)
@@ -499,6 +544,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         input.setCaptured(false)
         statusTimer?.invalidate()
         stallTimer?.invalidate()
+        setupModel?.cancel()
         reprobeTimer?.invalidate()
         pathMonitor?.cancel()
         mediaWindow?.close()
@@ -651,6 +697,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             }
             device.lastConnected = Date()
             onConnected?(self)
+            if showsSetupOnConnect {
+                showsSetupOnConnect = false
+                showSetup()
+            }
         } else if snapshot.Phase != "connected" {
             wasConnected = false
         }
@@ -709,6 +759,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func engine(_ engine: EngineProcess, didUpdateStats stats: [String: Any]) {
         lastStats = stats
+        checkTailscaleRelay()
         watchVideo()
         refreshStatus()
     }
@@ -803,6 +854,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         if let fps = lastStats["FramesPerSecond"] as? Double { parts.append(String(format: "%.0f fps", fps)) }
         if let kbps = lastStats["BitrateKbps"] as? Double { parts.append(String(format: "%.1f Mbit/s", kbps / 1000)) }
         if let rtt = lastStats["RoundTripMs"] as? Double, rtt > 0 { parts.append(String(format: "RTT %.0f ms", rtt)) }
+        if let path = lastStats["Path"] as? String, let name = Self.pathNames[path] {
+            parts.append(path == "tailscale" && tailscaleRelay != nil ? "via Tailscale relay \(tailscaleRelay ?? "")" : "via \(name)")
+        }
         if let lost = lastStats["PacketsLost"] as? Int, lost > 0 { parts.append("lost \(lost)") }
         parts.append(String(format: "decode %.1f ms", decoded.lastDecodeMs))
         if decoded.errors > 0 { parts.append("decode errors \(decoded.errors)") }
@@ -868,6 +922,26 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         matchRemoteToWindow()
     }
 
+    // MARK: Network path
+
+    /// The network the video takes (engine stats "Path").
+    private static let pathNames = ["lan": "LAN", "tailscale": "Tailscale", "vpn": "VPN", "internet": "internet"]
+
+    /// Over Tailscale, whether the video goes direct or through a relay
+    /// (DERP, much slower), from this Mac's Tailscale; every 30 s.
+    private func checkTailscaleRelay() {
+        guard lastStats["Path"] as? String == "tailscale", let remote = lastStats["PathRemote"] as? String else {
+            tailscaleRelay = nil
+            return
+        }
+        if let at = relayCheckedAt, Date().timeIntervalSince(at) < 30 { return }
+        relayCheckedAt = Date()
+        Task { [weak self] in
+            let relay = await Task.detached { TailscaleCLI.relay(to: remote) }.value
+            self?.tailscaleRelay = relay
+        }
+    }
+
     // MARK: Stall overlay
 
     /// Every 0.1 s: what the picture is waiting for, shown over the last
@@ -895,11 +969,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         case "connected":
             break
         case "idle", "connecting":
-            return .init(title: "Connecting to \(name)…", detail: address)
+            return .init(title: "Connecting to \(name)…", detail: address, symbol: "antenna.radiowaves.left.and.right")
         case "reconnecting", "disconnected":
-            return .init(title: "Reconnecting to \(name)…", detail: "The connection dropped. Retrying automatically.")
+            return .init(title: "Reconnecting to \(name)…", detail: "The connection dropped. Retrying automatically.",
+                         symbol: "arrow.triangle.2.circlepath")
         case "rebooting":
-            return .init(title: "\(name) is restarting…", detail: "The picture comes back once it is up again.")
+            return .init(title: "\(name) is restarting…", detail: "The picture comes back once it is up again.", symbol: "restart")
         default:
             return nil // needs the user: the status bar and alerts explain
         }
@@ -910,18 +985,21 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         guard now > lastPicture, now - lastPicture > 250_000_000 else { return nil }
         if let request = resizeRequest, now - request.at < 15_000_000_000 {
             return .init(title: "Resizing the remote display…",
-                         detail: "Switching to \(request.mode). The computer re-detects its display.")
+                         detail: "Switching to \(request.mode). The computer re-detects its display.",
+                         symbol: "arrow.up.left.and.arrow.down.right")
         }
         if let signal = snapshot.VideoSignal, !signal.isEmpty, signal != "ready" {
             return .init(title: "No picture from the computer",
-                         detail: "HDMI: \(signal.replacingOccurrences(of: "_", with: " ")). It may be asleep or switched off.", busy: false)
+                         detail: "HDMI: \(signal.replacingOccurrences(of: "_", with: " ")). It may be asleep or switched off.",
+                         symbol: "display.trianglebadge.exclamationmark", busy: false)
         }
         if pictureAt < connectedAt {
-            return .init(title: "Starting video…", detail: "Connected to \(name).")
+            return .init(title: "Starting video…", detail: "Connected to \(name).", symbol: "play.display")
         }
         let seconds = Int(Double(now - lastPicture) / 1e9)
         return .init(title: "Waiting for video…",
-                     detail: seconds < 2 ? "Connected, but the picture has paused." : "Connected, but no new picture for \(seconds) s.")
+                     detail: seconds < 2 ? "Connected, but the picture has paused." : "Connected, but no new picture for \(seconds) s.",
+                     symbol: "hourglass")
     }
 
     /// In full screen the menu bar (and with it the window's title bar and

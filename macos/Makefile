@@ -3,6 +3,7 @@
 #   make app        build "build/JetKVM Desktop.app" (arm64)
 #   make test       Swift unit tests
 #   make icon       compile the Icon Composer source and standalone fallback
+#   make firmware   bundle the JetKVM Desktop firmware (FORK_BINARY) for setup
 #   make selftest   end-to-end run against the in-repo emulator
 #   make selftest-stalls   the picture survives link stalls and hidden windows
 #   make run DEVICE=jetkvm.local
@@ -32,8 +33,11 @@ endef
 APP := build/JetKVM Desktop.app
 BUILD_NUMBER := $(shell git -C .. rev-list --count HEAD 2>/dev/null || echo 0)
 EMULATOR_ADDR ?= 127.0.0.1:18080
+# The JetKVM Desktop firmware build the setup sheet installs, pinned by
+# Support/Firmware.json: the fork's (github.com/wottpal/kvm) bin/jetkvm_app.
+FORK_BINARY ?= $(abspath ../../kvm/bin/jetkvm_app)
 
-.PHONY: app engine swift icon test selftest selftest-extras selftest-stalls run install notarize clean
+.PHONY: app engine swift icon firmware test selftest selftest-extras selftest-stalls run install notarize clean
 
 engine:
 	cd .. && GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o macos/build/jetkvm-engine ./cmd/jetkvm-engine
@@ -44,7 +48,10 @@ swift:
 icon:
 	sh scripts/make-icon.sh
 
-app: engine swift icon
+firmware:
+	sh scripts/bundle-firmware.sh "$(FORK_BINARY)" Support/Firmware.json build/firmware
+
+app: engine swift icon firmware
 	rm -rf "$(APP)"
 	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Helpers" "$(APP)/Contents/Resources"
 	cp "$$(swift build -c release --arch arm64 --show-bin-path)/JetKVMDesktop" "$(APP)/Contents/MacOS/JetKVMDesktop"
@@ -52,6 +59,10 @@ app: engine swift icon
 	sed "s/@BUILD@/$(BUILD_NUMBER)/" Support/Info.plist.in > "$(APP)/Contents/Info.plist"
 	cp Support/AppIcon.icns "$(APP)/Contents/Resources/AppIcon.icns"
 	cp build/icon/Assets.car "$(APP)/Contents/Resources/Assets.car"
+	if [ -f build/firmware/jetkvm_app.gz ]; then \
+		mkdir -p "$(APP)/Contents/Resources/Firmware" && \
+		cp build/firmware/jetkvm_app.gz build/firmware/Firmware.json "$(APP)/Contents/Resources/Firmware/"; \
+	fi
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.jetkvm-mac.engine "$(APP)/Contents/Helpers/jetkvm-engine"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.jetkvm-mac "$(APP)"
 	codesign --verify --strict --deep "$(APP)"

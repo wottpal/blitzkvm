@@ -456,3 +456,75 @@ final class RemoteDisplayTests: XCTestCase {
         XCTAssertThrowsError(try RemoteDisplay.edid([1, 2, 3], advertising: .init(width: 1504, height: 944)))
     }
 }
+
+final class JetKVMSetupTests: XCTestCase {
+    private let bundled = FirmwareBuild(tag: "release/0.5.9-fork.4", sha256: String(repeating: "ab", count: 32), size: 1)
+
+    func testFirmwareState() {
+        let current = FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9",
+                                             installedSHA256: String(repeating: "AB", count: 32), bundled: bundled)
+        XCTAssertEqual(current, .current)
+        XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: String(repeating: "cd", count: 32),
+                                              bundled: bundled), .outdated)
+        XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: nil, bundled: bundled), .unverified)
+        XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: false, appVersion: "0.5.9", installedSHA256: String(repeating: "cd", count: 32),
+                                              bundled: bundled), .stock("0.5.9"))
+        XCTAssertEqual(bundled.name, "0.5.9-fork.4")
+    }
+
+    func testTailscaleState() throws {
+        func state(_ json: String) throws -> TailscaleState {
+            TailscaleState(try JSONDecoder().decode(TailscaleStatus.self, from: Data(json.utf8)))
+        }
+        XCTAssertEqual(try state(#"{"installed":false,"running":false,"controlURL":"https://controlplane.tailscale.com"}"#), .notInstalled)
+        XCTAssertEqual(try state(#"{"installed":true,"running":false,"backendState":"NeedsLogin","authURL":"https://login.tailscale.com/a/x"}"#),
+                       .needsLogin(URL(string: "https://login.tailscale.com/a/x")))
+        XCTAssertEqual(try state(#"{"installed":true,"running":false,"backendState":"Stopped"}"#), .stopped("Stopped"))
+        XCTAssertEqual(try state(#"{"installed":true,"running":true,"backendState":"Running","self":{"hostName":"mac-mini-jetkvm","dnsName":"mac-mini-jetkvm.example.ts.net.","tailscaleIPs":["100.64.0.10"],"online":true,"os":"linux"}}"#),
+                       .running("mac-mini-jetkvm.example.ts.net"))
+        XCTAssertEqual(try state(#"{"installed":true,"running":true,"self":{"dnsName":"","tailscaleIPs":["100.64.0.10"]}}"#), .running("100.64.0.10"))
+    }
+
+    func testTailscaleHostname() {
+        XCTAssertEqual(TailscaleStatus.hostname(forDevice: "Mac mini"), "mac-mini-jetkvm")
+        XCTAssertEqual(TailscaleStatus.hostname(forDevice: "  Rack KVM #2 "), "rack-kvm-2")
+        XCTAssertEqual(TailscaleStatus.hostname(forDevice: "Büro-PC"), "buro-pc-jetkvm")
+        XCTAssertEqual(TailscaleStatus.hostname(forDevice: "!!"), "jetkvm")
+    }
+
+    func testTailscaleRelease() throws {
+        let json = #"{"Tarballs":{"386":"tailscale_1.104.1_386.tgz","arm":"tailscale_1.104.1_arm.tgz"},"TarballsVersion":"1.104.1","Version":"1.104.1"}"#
+        let release = try JSONDecoder().decode(TailscaleRelease.self, from: Data(json.utf8))
+        XCTAssertEqual(release.version, "1.104.1")
+        XCTAssertEqual(release.url.absoluteString, "https://pkgs.tailscale.com/stable/tailscale_1.104.1_arm.tgz")
+        XCTAssertEqual(release.checksumURL.absoluteString, "https://pkgs.tailscale.com/stable/tailscale_1.104.1_arm.tgz.sha256")
+        XCTAssertThrowsError(try JSONDecoder().decode(TailscaleRelease.self, from: Data(#"{"Tarballs":{},"TarballsVersion":"1"}"#.utf8)))
+    }
+
+    func testSSHHelpers() {
+        XCTAssertEqual(JetKVMSSH.host(of: "https://kvm.example:8443"), "kvm.example")
+        XCTAssertEqual(JetKVMSSH.host(of: "192.168.1.40"), "192.168.1.40")
+        XCTAssertEqual(JetKVMSSH.host(of: "mac-mini-jetkvm.example.ts.net"), "mac-mini-jetkvm.example.ts.net")
+        let hash = String(repeating: "Ab", count: 32)
+        XCTAssertEqual(JetKVMSSH.sha256(fromSumOutput: "\(hash)  /userdata/jetkvm/jetkvm_app.update.part\n"), hash.lowercased())
+        XCTAssertNil(JetKVMSSH.sha256(fromSumOutput: "sha256sum: can't open 'x': No such file or directory"))
+        let args = JetKVMSSH.arguments(host: "10.0.0.2", hostKeyAlias: "0123456789abcdef", privateKey: "/k", knownHosts: "/kh", command: "true")
+        XCTAssertEqual(args.suffix(2), ["root@10.0.0.2", "true"])
+        XCTAssertTrue(args.contains("HostKeyAlias=0123456789abcdef"))
+        XCTAssertTrue(args.contains("BatchMode=yes"))
+    }
+
+    func testTailscaleRelay() {
+        let json = #"{"Peer":{"k1":{"TailscaleIPs":["100.70.1.2","fd7a:115c:a1e0::2"],"CurAddr":"","Relay":"fra"},"k2":{"TailscaleIPs":["100.70.1.3"],"CurAddr":"192.168.1.9:41641","Relay":"fra"}}}"#
+        XCTAssertEqual(TailscaleCLIStatus.relay(statusJSON: Data(json.utf8), to: "100.70.1.2"), "fra")
+        XCTAssertNil(TailscaleCLIStatus.relay(statusJSON: Data(json.utf8), to: "100.70.1.3"), "direct")
+        XCTAssertNil(TailscaleCLIStatus.relay(statusJSON: Data(json.utf8), to: "100.70.1.4"), "no such peer")
+    }
+
+    func testAddAddress() {
+        var device = Device(name: "Mac mini", addresses: ["192.168.1.40"])
+        XCTAssertTrue(device.addAddress("mac-mini-jetkvm.example.ts.net"))
+        XCTAssertFalse(device.addAddress("MAC-MINI-JETKVM.example.ts.net"))
+        XCTAssertEqual(device.addresses, ["192.168.1.40", "mac-mini-jetkvm.example.ts.net"])
+    }
+}

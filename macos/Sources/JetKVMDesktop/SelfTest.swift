@@ -31,6 +31,12 @@ final class SelfTest {
     /// Also exercises virtual media, the serial console and address probing
     /// through the app's models and windows.
     var exerciseExtras = false
+    /// `--setup`: the JetKVM Setup action to run (see Options.setup).
+    var setupAction: String?
+    var setupSnapshotPath: String?
+    private var setupReport: [String: Any]?
+    private var setupOK = false
+    private var finished = false
     private var extras: [String: Any] = [:]
     private var extrasOK = false
     private let lock = NSLock()
@@ -112,6 +118,9 @@ final class SelfTest {
         }
         if exerciseExtras {
             Task { @MainActor [weak self] in await self?.runExtras() }
+        }
+        if setupAction != nil {
+            Task { @MainActor [weak self] in await self?.runSetup() }
         }
         visibilityTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in self?.sampleVisibility() }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in self?.finish() }
@@ -284,7 +293,75 @@ final class SelfTest {
         return sorted[min(sorted.count - 1, Int(Double(sorted.count - 1) * p))]
     }
 
+    /// Waits for the setup sheet (it opens on connect), lets it check, runs
+    /// the action, lets it check again and finishes the run.
+    @MainActor private func runSetup() async {
+        func until(_ seconds: Double, _ done: () -> Bool) async -> Bool {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !done() {
+                if Date() > deadline { return false }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            return true
+        }
+        guard let action = setupAction,
+              await until(30, { controller?.setup?.isSettled == true }), let model = controller?.setup else {
+            setupReport = ["error": "the setup sheet didn't settle"]
+            return finish()
+        }
+        AppLog.log("selftest: setup before \(model.report)")
+        var ok = true
+        switch action {
+        case "check":
+            break
+        case "install-tailscale":
+            model.installTailscale()
+            try? await Task.sleep(for: .milliseconds(300))
+            ok = await until(600) {
+                switch model.tailscale.value {
+                case .needsLogin?, .running?: return !model.tailscale.isWorking
+                default: return model.tailscale.error != nil && !model.tailscale.isWorking
+                }
+            } && model.tailscale.error == nil
+        case "login":
+            model.logIn()
+            try? await Task.sleep(for: .milliseconds(300))
+            ok = await until(60) {
+                switch model.tailscale.value {
+                case .needsLogin(_?)?, .running?: return !model.tailscale.isWorking
+                default: return model.tailscale.error != nil && !model.tailscale.isWorking
+                }
+            } && model.tailscale.error == nil
+        case "install-firmware":
+            model.installFirmware()
+            try? await Task.sleep(for: .seconds(1))
+            ok = await until(600) { !model.firmware.isWorking } && model.firmware.error == nil
+        case let a where a.hasPrefix("password="):
+            model.createPassword(String(a.dropFirst("password=".count)))
+            try? await Task.sleep(for: .milliseconds(300))
+            ok = await until(30) { !model.password.isWorking } && model.password.value == true
+        default:
+            ok = false
+        }
+        model.refresh()
+        try? await Task.sleep(for: .seconds(1))
+        _ = await until(60) { model.isSettled }
+        // The run also proves video (after a firmware install: again).
+        _ = await until(30) { [weak self] in
+            guard let self else { return true }
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            return self.decodedFrames > 0
+        }
+        setupReport = model.report
+        setupOK = ok && model.isSettled
+        AppLog.log("selftest: setup after \(model.report)")
+        finish()
+    }
+
     private func finish() {
+        guard !finished else { return }
+        finished = true
         guard let controller else { _exit(3) }
         lock.lock()
         let decoded = decodedFrames
@@ -318,6 +395,7 @@ final class SelfTest {
         report["freezes"] = ["count": freezes.count, "longestMs": freezes.max() ?? 0, "totalMs": freezes.reduce(0, +)]
         report["scalingFilter"] = controller.videoView.scalingFilter.rawValue
         if let fps = controller.snapshot.VideoFPS { report["remoteRefresh"] = fps }
+        if let signal = controller.snapshot.VideoSignal { report["videoSignal"] = signal }
         report["hiddenMs"] = hiddenMs.rounded()
         if hideAfter != nil { report["resumedAfterShowMs"] = resumed ?? -1 }
         report["stallOverlay"] = overlayEvents.map { ["at": ($0.0 * 10).rounded() / 10, "title": $0.1 ?? "hidden"] as [String: Any] }
@@ -338,6 +416,13 @@ final class SelfTest {
         if let snapshotPath {
             report["snapshotWritten"] = controller.videoView.writeSnapshot(to: URL(fileURLWithPath: snapshotPath))
         }
+        if setupAction != nil {
+            report["setup"] = setupReport ?? ["error": "not finished"]
+            report["setupOK"] = setupOK
+        }
+        if let setupSnapshotPath {
+            report["setupSnapshotWritten"] = controller.writeSetupSnapshot(to: URL(fileURLWithPath: setupSnapshotPath))
+        }
         if let stats = controller.lastStats["stats"] as? [String: Any] ?? Optional(controller.lastStats), !stats.isEmpty {
             report["engineStats"] = stats
         }
@@ -347,6 +432,7 @@ final class SelfTest {
         var ok = decoded > 0 && controller.videoView.presentedFrames > 0
         if crashEngineAfter != nil { ok = ok && afterCrash > 0 && !restarts.isEmpty }
         if exerciseExtras { ok = ok && extrasOK }
+        if setupAction != nil { ok = ok && setupOK }
         if let maxFreezeMs {
             // Hidden time says nothing about freezes; too much makes the run
             // inconclusive (the intended --hide-after pause aside).

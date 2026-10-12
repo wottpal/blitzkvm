@@ -40,6 +40,11 @@ struct Options {
     var scalingFilter: ScalingFilter?
     var scaling: ScalingMode?
     var profile: ModifierProfile?
+    /// Self-test: open JetKVM Setup and run `check`, `install-tailscale`,
+    /// `login` (Tailscale), `install-firmware` or `password=<new password>`.
+    var setup: String?
+    /// Self-test: render the setup sheet to this PNG at the end.
+    var setupSnapshot: String?
 
     static func parse(_ args: [String]) -> Options {
         var o = Options()
@@ -77,6 +82,8 @@ struct Options {
             case "--scaling-filter": o.scalingFilter = next().flatMap(ScalingFilter.init(rawValue:))
             case "--full-screen": o.fullScreen = true
             case "--profile": o.profile = next().flatMap(ModifierProfile.init(rawValue:))
+            case "--setup": o.setup = next()
+            case "--setup-snapshot": o.setupSnapshot = next()
             case "--window-size":
                 let parts = (next() ?? "").split(separator: "x").compactMap { Double($0) }
                 if parts.count == 2 { o.windowSize = (parts[0], parts[1]) }
@@ -94,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var devicesModel: DevicesModel = {
         let model = DevicesModel(store: store)
         model.onConnect = { [weak self] device in self?.connect(device) }
+        model.onSetUp = { [weak self] device in self?.setUp(device) }
         model.onSaved = { [weak self] device in
             self?.windows.first { $0.device.id == device.id }?.libraryEdited(device)
         }
@@ -102,9 +110,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var devicesWindow: DevicesWindowController?
     /// Open device windows (including minimized ones). Removed only when a
     /// window closes, which also stops its engine.
-    private var windows: [DeviceWindowController] = []
+    private var windows: [DeviceWindowController] = [] {
+        didSet { devicesModel.openDeviceIDs = Set(windows.map(\.device.id)) }
+    }
     /// Devices whose address probe is still running (double-click guard).
-    private var connecting = Set<String>()
+    private var connecting = Set<String>() {
+        didSet { devicesModel.probingDeviceIDs = connecting }
+    }
+    /// Devices whose setup sheet opens once they connect.
+    private var pendingSetup = Set<String>()
     /// Devices typed ad hoc (--device) that are saved on first connect.
     private var adHocDeviceIDs = Set<String>()
     private var selfTest: SelfTest?
@@ -156,6 +170,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         devicesModel.reload()
         devicesWindow?.showWindow(nil)
         devicesWindow?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Connects (unless a window is open) and shows the setup sheet.
+    private func setUp(_ device: Device) {
+        if let existing = windows.first(where: { $0.device.id == device.id }) {
+            existing.window?.makeKeyAndOrderFront(nil)
+            existing.showSetup()
+            return
+        }
+        pendingSetup.insert(device.id)
+        connect(device)
     }
 
     /// `--device address`: use the saved device with that address, or a new
@@ -237,6 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.input.viewOnly = options.viewOnly
         controller.scalingFilterOverride = options.scalingFilter
         controller.reprobeAddresses = reprobe
+        controller.showsSetupOnConnect = pendingSetup.remove(device.id) != nil || options.setup != nil
         if !isSelfTest {
             controller.onConnected = { [weak self] c in self?.recordConnection(c.device) }
             controller.onCertificateChange = { [weak self] c in self?.recordCertificate(c.device) }
@@ -253,6 +279,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.onClose = { [weak self] c in self?.windows.removeAll { $0 === c } }
         if !isSelfTest {
             controller.onPreferencesChanged = { [weak self] c in self?.recordPreferences(c.device) }
+            controller.onAddressesChanged = { [weak self] c in self?.recordAddresses(c.device) }
         }
         let tabHost = (windows.first { $0.window?.isKeyWindow == true } ?? windows.last)?.window
         windows.append(controller)
@@ -264,6 +291,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selfTest?.qualityChanges = options.qualityChanges
             selfTest?.toggleStatusBarAfter = options.toggleStatusBarAfter
             selfTest?.exerciseExtras = options.exerciseExtras
+            selfTest?.setupAction = options.setup
+            selfTest?.setupSnapshotPath = options.setupSnapshot
         }
         if let (w, h) = options.windowSize {
             controller.setContentSizeKeepingIt(NSSize(width: w, height: h))
@@ -315,6 +344,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         saved.invertScroll = device.invertScroll
         saved.autoQuality = device.autoQuality
         saved.qualityLevel = device.qualityLevel
+        store.upsert(saved)
+        try? store.save()
+        devicesModel.reload()
+    }
+
+    /// Persists addresses the window added (the JetKVM's tailnet name).
+    private func recordAddresses(_ device: Device) {
+        guard var saved = store.device(id: device.id) else { return }
+        for address in device.addresses { _ = saved.addAddress(address) }
         store.upsert(saved)
         try? store.save()
         devicesModel.reload()
@@ -382,6 +420,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(item("Devices…", #selector(showDevices), key: "n"))
         device.addItem(item("Reconnect", #selector(reconnect), key: "r"))
         device.addItem(item("Open Device Web Settings…", #selector(openWebUI)))
+        device.addItem(item("Set Up JetKVM…", #selector(showSetup)))
         device.addItem(.separator())
         device.addItem(item("Paste Clipboard as Keystrokes", #selector(pasteClipboard), key: "v", mods: [.command, .option]))
         device.addItem(item("Cancel Paste", #selector(cancelPaste)))
@@ -569,6 +608,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let c = current, let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
         c.paste(text)
     }
+    @objc private func showSetup() { current?.showSetup() }
+
     @objc private func openWebUI() {
         guard let c = current else { return }
         let base = c.address.contains("://") ? c.address : "http://" + c.address
@@ -633,6 +674,8 @@ extension AppDelegate: NSMenuItemValidation {
         switch menuItem.action {
         case #selector(setScaling(_:)):
             menuItem.state = c?.device.scaling.rawValue == menuItem.representedObject as? String ? .on : .off
+            return c != nil
+        case #selector(showSetup):
             return c != nil
         case #selector(toggleExactPixels):
             menuItem.state = c?.device.exactPixels == true ? .on : .off

@@ -2,19 +2,23 @@ import AppKit
 
 /// Covers the video while the picture is stalled (connecting, the remote
 /// display re-detecting a new size, a stream waiting to resume): the last
-/// frame stays visible, dimmed, under a large spinner and a line of text.
+/// frame stays visible, dimmed, under an icon for the state and a line of
+/// text.
 /// Never takes clicks, so input keeps reaching the remote.
 final class StallOverlay: NSView {
     struct Content: Equatable {
         var title: String
         var detail: String?
-        /// A spinner: the app is waiting for something that ends by itself.
+        /// SF Symbol for the state.
+        var symbol: String
+        /// The symbol pulses: the app is waiting for something that ends by
+        /// itself.
         var busy = true
     }
 
     private(set) var content: Content?
     private let panel = NSVisualEffectView()
-    private let spinner = NSProgressIndicator()
+    private let icon = NSImageView()
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
 
@@ -32,9 +36,8 @@ final class StallOverlay: NSView {
         panel.wantsLayer = true
         panel.layer?.cornerRadius = 18
         panel.layer?.masksToBounds = true
-        spinner.style = .spinning
-        spinner.controlSize = .large
-        spinner.isDisplayedWhenStopped = false
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 34, weight: .regular)
+            .applying(NSImage.SymbolConfiguration(hierarchicalColor: .labelColor))
         title.font = .systemFont(ofSize: 17, weight: .semibold)
         title.textColor = .labelColor
         detail.font = .systemFont(ofSize: 13)
@@ -43,11 +46,11 @@ final class StallOverlay: NSView {
             label.alignment = .center
             label.lineBreakMode = .byTruncatingTail
         }
-        let stack = NSStackView(views: [spinner, title, detail])
+        let stack = NSStackView(views: [icon, title, detail])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 10
-        stack.setCustomSpacing(16, after: spinner)
+        stack.setCustomSpacing(14, after: icon)
         stack.translatesAutoresizingMaskIntoConstraints = false
         panel.translatesAutoresizingMaskIntoConstraints = false
         panel.addSubview(stack)
@@ -71,21 +74,26 @@ final class StallOverlay: NSView {
     /// Shows `content` (fading in), or hides the overlay for nil.
     func show(_ content: Content?) {
         guard content != self.content else { return }
-        let wasShown = self.content != nil
+        let shown = self.content
         self.content = content
         guard let content else {
             NSAnimationContext.runAnimationGroup({ $0.duration = 0.2; animator().alphaValue = 0 }) { [weak self] in
                 guard let self, self.content == nil else { return }
                 self.isHidden = true
-                self.spinner.stopAnimation(nil)
+                self.icon.removeAllSymbolEffects()
             }
             return
         }
         title.stringValue = content.title
         detail.stringValue = content.detail ?? ""
         detail.isHidden = content.detail?.isEmpty ?? true
-        if content.busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
-        if !wasShown {
+        // Only on a new state: the detail of one changes every second.
+        if content.symbol != shown?.symbol || content.busy != shown?.busy {
+            icon.removeAllSymbolEffects()
+            icon.image = NSImage(systemSymbolName: content.symbol, accessibilityDescription: nil)
+            if content.busy { icon.addSymbolEffect(.pulse, options: .repeating) }
+        }
+        if shown == nil {
             isHidden = false
             NSAnimationContext.runAnimationGroup { $0.duration = 0.2; animator().alphaValue = 1 }
         }
