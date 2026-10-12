@@ -35,6 +35,10 @@ final class LatencyProbe {
     /// measured, then the measured one S seconds later (S near 0.55 lands it
     /// on the still refresh the first change triggers).
     private let pairGap = Double(ProcessInfo.processInfo.environment["BLITZKVM_PROBE_PAIR_GAP"] ?? "")
+    /// BLITZKVM_PROBE_KEYFRAME_LEAD=S: asks for a keyframe S seconds before
+    /// each key, so the key's frame follows a large one (the cost of a big
+    /// frame in flight, e.g. a still refresh).
+    private let keyframeLead = Double(ProcessInfo.processInfo.environment["BLITZKVM_PROBE_KEYFRAME_LEAD"] ?? "")
     private var aborted: String?
     private let lock = NSLock()
     private var bright: Bool?
@@ -110,6 +114,22 @@ final class LatencyProbe {
         target ^= 1
         sentAt = CACurrentMediaTime()
         lock.unlock()
+        if let keyframeLead, !pointerMode {
+            lock.lock()
+            sentAt = nil
+            lock.unlock()
+            controller.engine.requestKeyframe()
+            DispatchQueue.main.asyncAfter(deadline: .now() + keyframeLead) { [weak self] in
+                guard let self else { return }
+                self.lock.lock()
+                self.sentAt = CACurrentMediaTime()
+                self.lock.unlock()
+                controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
+                controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: false))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + keyframeLead + 1.4) { [weak self] in self?.next() }
+            return
+        }
         if let pairGap, !pointerMode {
             // Unmeasured first key; the measured one follows after the gap.
             lock.lock()
