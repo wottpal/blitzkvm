@@ -139,6 +139,79 @@ public struct VideoLayout: Equatable {
     public func contains(px: Double, py: Double) -> Bool {
         px >= x && px < x + width && py >= y && py < y + height
     }
+
+    /// The whole drawable pixels the video covers, clipped to a drawable of
+    /// the given size (layout edges are whole pixels).
+    public func visibleRect(drawableWidth: Double, drawableHeight: Double) -> PixelRect {
+        PixelRect(x0: Int(max(x, 0)), y0: Int(max(y, 0)),
+                  x1: Int(min(x + width, drawableWidth)), y1: Int(min(y + height, drawableHeight))).intersection(
+            PixelRect(width: Int(drawableWidth), height: Int(drawableHeight)))
+    }
+
+    /// The destination pixels a filter draws from video pixels `rect` of a
+    /// `videoWidth`×`videoHeight` video, when each output pixel's taps reach
+    /// up to `reach` video pixels from its center.
+    public func destinationRect(of rect: PixelRect, videoWidth: Int, videoHeight: Int, reach: Double) -> PixelRect {
+        guard !rect.isEmpty, videoWidth > 0, videoHeight > 0 else { return .empty }
+        let sx = width / Double(videoWidth), sy = height / Double(videoHeight)
+        return PixelRect(x0: Int((x + (Double(rect.x0) - reach) * sx).rounded(.down)),
+                         y0: Int((y + (Double(rect.y0) - reach) * sy).rounded(.down)),
+                         x1: Int((x + (Double(rect.x1) + reach) * sx).rounded(.up)),
+                         y1: Int((y + (Double(rect.y1) + reach) * sy).rounded(.up)))
+    }
+}
+
+/// Whole pixels [x0, x1) × [y0, y1), origin top-left.
+public struct PixelRect: Equatable {
+    public var x0: Int
+    public var y0: Int
+    public var x1: Int
+    public var y1: Int
+
+    public init(x0: Int, y0: Int, x1: Int, y1: Int) {
+        self.x0 = x0
+        self.y0 = y0
+        self.x1 = x1
+        self.y1 = y1
+    }
+
+    /// [0, width) × [0, height).
+    public init(width: Int, height: Int) {
+        self.init(x0: 0, y0: 0, x1: width, y1: height)
+    }
+
+    public static let empty = PixelRect(x0: 0, y0: 0, x1: 0, y1: 0)
+
+    public var isEmpty: Bool { x1 <= x0 || y1 <= y0 }
+    public var width: Int { isEmpty ? 0 : x1 - x0 }
+    public var height: Int { isEmpty ? 0 : y1 - y0 }
+
+    /// The smallest rectangle holding both.
+    public func union(_ other: PixelRect) -> PixelRect {
+        if isEmpty { return other }
+        if other.isEmpty { return self }
+        return PixelRect(x0: min(x0, other.x0), y0: min(y0, other.y0), x1: max(x1, other.x1), y1: max(y1, other.y1))
+    }
+
+    public func intersection(_ other: PixelRect) -> PixelRect {
+        let r = PixelRect(x0: max(x0, other.x0), y0: max(y0, other.y0), x1: min(x1, other.x1), y1: min(y1, other.y1))
+        return r.isEmpty ? .empty : r
+    }
+
+    /// Grown by `margin` on every side (empty stays empty).
+    public func outset(by margin: Int) -> PixelRect {
+        isEmpty ? self : PixelRect(x0: x0 - margin, y0: y0 - margin, x1: x1 + margin, y1: y1 + margin)
+    }
+
+    public func offsetBy(dx: Int, dy: Int) -> PixelRect {
+        isEmpty ? self : PixelRect(x0: x0 + dx, y0: y0 + dy, x1: x1 + dx, y1: y1 + dy)
+    }
+
+    /// The cells of a grid of `size`×`size` pixels that the rectangle
+    /// touches (rounded outward), e.g. 4:2:0 chroma sites for size 2.
+    public func cells(of size: Int) -> PixelRect {
+        isEmpty ? self : PixelRect(x0: x0 / size, y0: y0 / size, x1: (x1 + size - 1) / size, y1: (y1 + size - 1) / size)
+    }
 }
 
 /// Converts precise trackpad scrolling into wheel ticks without losing

@@ -142,6 +142,27 @@ final class GeometryTests: XCTestCase {
         XCTAssertEqual(right.absolutePosition(px: 2000, py: 0)?.0, 32767)
         let middle = VideoLayout.compute(videoWidth: 1920, videoHeight: 1080, drawableWidth: 2000, drawableHeight: 2160, mode: .actualSize, pointScale: 2, pan: (0.5, 0.5))
         XCTAssertEqual(middle.absolutePosition(px: 1000, py: 1080)?.0, 16384)
+        XCTAssertEqual(middle.visibleRect(drawableWidth: 2000, drawableHeight: 2160), PixelRect(width: 2000, height: 2160))
+    }
+
+    func testChangedPixelsMapToTheDestinationTheyReach() {
+        // 2400×1012 full screen on a 5K2K display: 2.507×, letterboxed.
+        let layout = VideoLayout.compute(videoWidth: 2400, videoHeight: 1012, drawableWidth: 6016, drawableHeight: 2538, mode: .fit)
+        XCTAssertEqual(layout.visibleRect(drawableWidth: 6016, drawableHeight: 2538), PixelRect(x0: 0, y0: 0, x1: 6016, y1: 2537))
+        let caret = PixelRect(x0: 1000, y0: 500, x1: 1002, y1: 520)
+        let reached = layout.destinationRect(of: caret, videoWidth: 2400, videoHeight: 1012, reach: 3)
+        XCTAssertEqual(reached, PixelRect(x0: 2499, y0: 1245, x1: 2520, y1: 1312))
+        XCTAssertEqual(layout.destinationRect(of: .empty, videoWidth: 2400, videoHeight: 1012, reach: 3), .empty)
+    }
+
+    func testPixelRects() {
+        let a = PixelRect(x0: 2, y0: 3, x1: 7, y1: 4)
+        XCTAssertEqual(a.union(.empty), a)
+        XCTAssertEqual(a.union(PixelRect(x0: 0, y0: 5, x1: 1, y1: 9)), PixelRect(x0: 0, y0: 3, x1: 7, y1: 9))
+        XCTAssertEqual(a.intersection(PixelRect(x0: 7, y0: 0, x1: 9, y1: 9)), .empty)
+        XCTAssertEqual(a.outset(by: 2).intersection(PixelRect(width: 8, height: 8)), PixelRect(x0: 0, y0: 1, x1: 8, y1: 6))
+        XCTAssertEqual(a.cells(of: 2), PixelRect(x0: 1, y0: 1, x1: 4, y1: 2))
+        XCTAssertEqual(PixelRect.empty.outset(by: 3), .empty)
     }
 
     func testPreferredContentSizeUsesPointsAndFitsTheScreen() {
