@@ -508,12 +508,15 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         model.refresh()
     }
 
-    /// Wakes the computer: a one-pixel pointer nudge there and back wakes a
-    /// sleeping display, and JetKVM's wake-only USB signal a suspended
-    /// computer (from firmware 0.5.9 on, ordinary input no longer does).
+    /// Wakes the computer: a one-pixel pointer nudge there and back and a
+    /// Shift tap (types nothing; some displays wake on a key but not on the
+    /// pointer) wake a sleeping display, and JetKVM's wake-only USB signal a
+    /// suspended computer (from firmware 0.5.9 on, ordinary input no longer does).
     func wakeComputer() {
         engine.write(EngineProtocol.relativePointer(dx: 1, dy: 0, buttons: 0))
         engine.write(EngineProtocol.relativePointer(dx: -1, dy: 0, buttons: 0))
+        engine.write(EngineProtocol.key(hid: 0xE1, pressed: true))
+        engine.write(EngineProtocol.key(hid: 0xE1, pressed: false))
         Task {
             do {
                 try await engine.call("wakeHost")
