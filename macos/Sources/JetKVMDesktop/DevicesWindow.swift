@@ -499,7 +499,7 @@ private struct DeviceScreen: View {
 }
 
 /// JetKVM Setup's progress on the screen: a dot per step and "Setup 2/3"
-/// (firmware, Tailscale, password), or "Set Up" before the first check. A click opens
+/// (firmware, password, Tailscale), or "Set Up" before the first check. A click opens
 /// the sheet (connecting first).
 private struct SetupBadge: View {
     let summary: SetupSummary?
@@ -542,11 +542,11 @@ private struct SetupBadge: View {
     }
 
     private var help: String {
-        guard let summary else { return "Check the firmware, Tailscale and password" }
+        guard let summary else { return "Check the firmware, password and Tailscale" }
         func state(_ value: Bool?, _ yes: String, _ no: String) -> String { value.map { $0 ? yes : no } ?? "not checked" }
         return ["Firmware: " + state(summary.firmwareUpToDate, "up to date", "not JetKVM Desktop's latest"),
-                "Tailscale: " + state(summary.tailscaleConnected, "connected", "not set up"),
-                "Password: " + state(summary.passwordSet, "set", "off")].joined(separator: "\n")
+                "Password: " + state(summary.passwordSet, "set", "off"),
+                "Tailscale: " + state(summary.tailscaleConnected, "connected", "not set up")].joined(separator: "\n")
     }
 }
 

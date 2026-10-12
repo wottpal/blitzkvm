@@ -1,7 +1,7 @@
 import JetKVMCore
 import SwiftUI
 
-/// Set Up JetKVM: the JetKVM Desktop firmware, Tailscale and a password,
+/// Set Up JetKVM: the JetKVM Desktop firmware, a password and Tailscale,
 /// each with its state and the one action that moves it forward.
 struct JetKVMSetupView: View {
     @ObservedObject var model: JetKVMSetupModel
@@ -17,8 +17,8 @@ struct JetKVMSetupView: View {
             Form {
                 Section {
                     firmwareRow
-                    tailscaleRow
                     passwordRow
+                    tailscaleRow
                 } footer: {
                     Text("Installs turn on SSH (Developer Mode) with a key kept on this Mac.")
                         .font(.callout)
