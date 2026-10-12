@@ -368,12 +368,12 @@ final class RemoteDisplayTests: XCTestCase {
         XCTAssertEqual(RemoteDisplay.size(fitting: 500, 300), S(width: 656, height: 400))
         // Wider than the minimum height allows: narrows until it streams
         // (this once looped forever).
-        XCTAssertEqual(RemoteDisplay.size(fitting: 3000, 300), S(width: 2496, height: 400))
+        XCTAssertEqual(RemoteDisplay.size(fitting: 3000, 300), S(width: 3008, height: 400))
         // A 40" 21:9 display in full screen (3008×1269 points), with and
         // without the status bar.
         XCTAssertEqual(RemoteDisplay.size(fitting: 3008, 1247), S(width: 2448, height: 1012))
         XCTAssertEqual(RemoteDisplay.size(fitting: 3008, 1269), S(width: 2432, height: 1024))
-        XCTAssertEqual(RemoteDisplay.size(fitting: 2560, 1600), S(width: 1920, height: 1200))
+        XCTAssertEqual(RemoteDisplay.size(fitting: 2560, 1600), S(width: 1984, height: 1240))
         for (w, h) in [(5000.0, 2000.0), (2400, 1300), (1700, 1700), (4000, 900), (2300, 1000)] {
             let size = RemoteDisplay.size(fitting: w, h)
             XCTAssertLessThanOrEqual(RemoteDisplay.timing(for: size).pixelClockKHz, RemoteDisplay.maxPixelClockKHz, "\(size)")
@@ -386,15 +386,18 @@ final class RemoteDisplayTests: XCTestCase {
         typealias S = RemoteDisplay.Size
         typealias M = RemoteDisplay.Mode
         let large = 8 << 20
-        // Fits at 60 Hz: stays at 60 Hz.
-        XCTAssertEqual(RemoteDisplay.mode(fitting: 1504, 944, captureMaxBytes: large), M(S(width: 1504, height: 944)))
-        // The 40" full screen: 1:1 at 25 Hz with the fork's capture buffers,
-        // the largest stock buffers allow at 30 Hz otherwise.
-        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1268, captureMaxBytes: large), M(S(width: 3008, height: 1268), refresh: 25))
-        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1247), M(S(width: 2736, height: 1132), refresh: 30))
+        // The same size at the highest rate that carries it (120 Hz would
+        // exceed the encoder).
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 1504, 944, captureMaxBytes: large), M(S(width: 1504, height: 944), refresh: 90))
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 1280, 720, captureMaxBytes: large), M(S(width: 1280, height: 720), refresh: 120))
+        // The 40" full screen: 1:1 at 40 Hz with the fork's capture buffers,
+        // the largest stock buffers allow otherwise.
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1268, captureMaxBytes: large), M(S(width: 3008, height: 1268), refresh: 40))
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1247), M(S(width: 2736, height: 1132), refresh: 40))
         // A fixed rate: the largest size of the shape at that rate.
         XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1247, refresh: 60, captureMaxBytes: large), M(S(width: 2448, height: 1012)))
-        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1247, refresh: 50, captureMaxBytes: large), M(S(width: 2496, height: 1032), refresh: 50))
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1247, refresh: 50, captureMaxBytes: large), M(S(width: 2704, height: 1120), refresh: 50))
+        XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1269, refresh: 120, captureMaxBytes: large), M(S(width: 1664, height: 700), refresh: 120))
         XCTAssertEqual(RemoteDisplay.mode(fitting: 3008, 1247, refresh: 30, captureMaxBytes: large), M(S(width: 2832, height: 1172), refresh: 30))
         for (w, h) in [(6016.0, 2538.0), (3000, 300), (2400, 1350), (900, 3000)] {
             for refresh in RemoteDisplay.refreshRates {

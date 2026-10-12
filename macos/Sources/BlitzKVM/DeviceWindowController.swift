@@ -355,7 +355,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             self.displayHold.withLock { $0 = (CGSize(width: mode.size.width, height: mode.size.height), now + 8_000_000_000) }
             if mode.refresh < 60 && self.device.matchWindowRefresh == nil && !self.slowLinkHintShown {
                 self.slowLinkHintShown = true
-                self.hud.show("Full resolution: \(mode.size) at \(mode.refresh) Hz  ·  View › Match Window Refresh offers 60 Hz", for: 5)
+                self.hud.show("Full resolution: \(mode.size) at \(mode.refresh) Hz  ·  View › Match Window Refresh trades size for up to 120 Hz", for: 5)
             }
         }
         follower.onError = { [weak self] in self?.refreshStatus(extra: $0) }

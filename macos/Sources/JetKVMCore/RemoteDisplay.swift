@@ -7,19 +7,21 @@ import Foundation
 /// Limits measured on a JetKVM (TC358749 HDMI bridge, RV1106) with a Mac host
 /// (plan section 22):
 /// - Two links (plan section 28). Above 33 Hz the bridge sends over CSI at
-///   186.25 Mpx/s: up to 2496 wide and 1200 high within its 165 MHz pixel
-///   clock (2432×1004 for a 21:9 window at 60 Hz). At 33 Hz or less its driver
-///   slows the link to 109.7 Mpx/s, and a pixel clock just under that streams
-///   any width up to 3840: 3008×1268 at 25 Hz, limited by the device's
-///   capture buffers (`captureMaxBytes`) and its encoder (~160 Mpx/s).
+///   186.25 Mpx/s within its 165 MHz pixel clock: 2432×1004 for a 21:9
+///   window at 60 Hz, 3008×1268 at 40 Hz, 1664×700 at 120 Hz (the bridge
+///   locks up to 120 Hz). At 33 Hz or less its driver slows the link to
+///   109.7 Mpx/s, and a pixel clock just under that streams any width up to
+///   3840. Both are limited by the device's capture buffers
+///   (`captureMaxBytes`) and its encoder (~160 Mpx/s).
 /// - Width a multiple of 16: the device's encoder reads lines at a stride
 ///   rounded up to 16 pixels, so other widths come out sheared. Height a
 ///   multiple of 4. An odd height hung the device until it was power-cycled.
 /// - The pixel clock stays near 1080p60's. The bridge starts sending each line
-///   over CSI once its FIFO holds 300 pixels. A slow HDMI input lets the
-///   output overtake it, and the picture breaks into stripes. Reduced
-///   blanking at ~100 MHz does exactly that. Lines are padded with blanking
-///   instead.
+///   over CSI once its FIFO holds 300 entries of 2 pixels. A slow HDMI input
+///   lets the output overtake it by the line's end (drift: width ×
+///   (1 − clock / 186.25 MHz)), and past ~600 pixels the picture breaks into
+///   stripes (measured clean up to 651, broken at 755). Lines are padded with
+///   blanking to keep the clock up.
 /// - Lines are at most 3.75 widths and 4000 pixels long; longer lines reach
 ///   the bridge but never stream. Small modes are padded vertically instead.
 public enum RemoteDisplay {
@@ -36,10 +38,12 @@ public enum RemoteDisplay {
     }
 
     public static let minimum = Size(width: 640, height: 400)
-    /// Bounds on each side on the fast link (above 33 Hz); the pixel clock
-    /// limits the area within them. 2496 keeps a line's FIFO drift under the
-    /// 291 pixels measured clean (2560×960 at 60 Hz).
-    public static let maximum = Size(width: 2496, height: 1200)
+    /// Bounds on each side on the fast link (above 33 Hz), as verified
+    /// (3008×1268 at 40 Hz); the pixel clock limits the area within them.
+    public static let maximum = Size(width: 3008, height: 1280)
+    /// A fast-link line may end at most this many pixels behind the CSI
+    /// output (see the type comment): 100 below the largest measured clean.
+    static let maxFIFODrift = 550.0
     /// Bounds on the slow link: lines of at most 4000 pixels stream.
     public static let slowLinkMaximum = Size(width: 3840, height: 2160)
     public static let maxPixelClockKHz = 165_000
@@ -47,8 +51,10 @@ public enum RemoteDisplay {
     static let maxEncodePixelsPerSecond = 160e6
     /// Capture buffers of stock firmware and fork releases before D10.
     public static let defaultCaptureMaxBytes = 1920 * 1080 * 3
-    /// Refresh rates offered, fast link then slow link.
-    public static let refreshRates = [60, 50, 40, 30, 25, 24]
+    /// Refresh rates offered, fast link then slow link. Above 60 Hz the
+    /// picture is smaller, and capture and encoding take less time: key press
+    /// to screen 47 ms at 1280×720, 120 Hz, against 76 ms at 2400×1012, 60 Hz.
+    public static let refreshRates = [120, 90, 75, 60, 50, 40, 30, 25, 24]
 
     /// A display mode: size and refresh rate.
     public struct Mode: Equatable, CustomStringConvertible {
@@ -100,8 +106,9 @@ public enum RemoteDisplay {
             return size.width <= slowLinkMaximum.width && size.height <= slowLinkMaximum.height
                 && t.pixelClockKHz <= Int(slowLinkPixelClockMHz * 1000)
         }
-        return size.width <= maximum.width && size.height <= maximum.height
-            && fastLinkTiming(for: size, refresh: refresh).pixelClockKHz <= maxPixelClockKHz
+        let t = fastLinkTiming(for: size, refresh: refresh)
+        return size.width <= maximum.width && size.height <= maximum.height && t.pixelClockKHz <= maxPixelClockKHz
+            && Double(size.width) * (1 - Double(t.pixelClockKHz) / 1000 / fastCSIMegapixels) <= maxFIFODrift
     }
     public static let widthStep = 16
     public static let heightStep = 4
@@ -276,7 +283,7 @@ public enum RemoteDisplay {
     static func widenRangeLimits(_ d: inout [UInt8], for t: Timing, refresh: Int = 60) {
         let hKHz = t.pixelClockKHz / t.hTotal
         d[5] = min(d[5], UInt8(min(50, refresh - 1)))
-        d[6] = max(d[6], 61)
+        d[6] = max(d[6], UInt8(min(255, max(61, refresh + 1))))
         d[7] = min(d[7], UInt8(max(1, hKHz - 1)))
         d[8] = max(d[8], UInt8(min(255, hKHz + 2)))
         d[9] = max(d[9], UInt8((t.pixelClockKHz + 9999) / 10000 + 1))
