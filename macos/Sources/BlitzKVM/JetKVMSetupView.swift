@@ -92,7 +92,7 @@ struct JetKVMSetupView: View {
             builds.map { build in
                 let verb = build == installed ? "Reinstall" : build.kind == .stock ? "Switch to" : "Install"
                 return RowAction(title: "\(verb) \(build.title)…", perform: install(build))
-            }
+            } + [RowAction(title: "Restart JetKVM…") { confirming = .restart }]
         }
         let benefit = "Upgrade for sharper text and larger modes."
         let newer = "\(recommended.title) is newer."
@@ -165,6 +165,7 @@ struct JetKVMSetupView: View {
     private enum Confirmation: Identifiable {
         case firmware(FirmwareBuild)
         case tailscale(passwordOff: Bool)
+        case restart
 
         var id: String { title }
 
@@ -172,6 +173,7 @@ struct JetKVMSetupView: View {
             switch self {
             case .firmware(let build): return build.kind == .stock ? "Switch to \(build.title)?" : "Install \(build.title)?"
             case .tailscale: return "Install Tailscale on this JetKVM?"
+            case .restart: return "Restart the JetKVM?"
             }
         }
 
@@ -184,6 +186,8 @@ struct JetKVMSetupView: View {
                     ? "JetKVM's own firmware, as released. " + restart
                         + " Sharper text, near-lossless still screens and the largest Match Window sizes need the BlitzKVM firmware."
                     : restart + " JetKVM's automatic updates replace this build with their next release."
+            case .restart:
+                return "It takes about a minute and reconnects by itself. The computer keeps running, but may briefly lose its display."
             case .tailscale(let passwordOff):
                 let base = "It's downloaded from tailscale.com and installed without restarting the JetKVM. Your browser then opens to log in."
                 return passwordOff ? base + "\n\nSet a password too: everyone on your tailnet will be able to reach the JetKVM." : base
@@ -191,8 +195,11 @@ struct JetKVMSetupView: View {
         }
 
         var action: String {
-            if case .firmware(let build) = self, build.kind == .stock { return "Switch" }
-            return "Install"
+            switch self {
+            case .firmware(let build) where build.kind == .stock: return "Switch"
+            case .restart: return "Restart"
+            default: return "Install"
+            }
         }
     }
 
@@ -200,6 +207,7 @@ struct JetKVMSetupView: View {
         switch confirmation {
         case .firmware(let build): model.installFirmware(build)
         case .tailscale: model.installTailscale()
+        case .restart: model.restartJetKVM()
         }
     }
 }

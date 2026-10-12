@@ -77,6 +77,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private var stallSince: UInt64?
     private var connectedAt: UInt64 = 0
     private var resizeRequest: (at: UInt64, mode: RemoteDisplay.Mode)?
+    /// When the app asked the JetKVM to restart (uptime ns); the overlay says
+    /// so until the session is back.
+    private var restartedAt: UInt64?
     /// The device's capture buffer size (getVideoEncoderParams), which bounds
     /// Match Window's modes; stock firmware's until the device says more.
     private var captureMaxBytes = RemoteDisplay.defaultCaptureMaxBytes
@@ -534,6 +537,39 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         onSetupChecked?(self, summary)
     }
 
+    /// Asks, then restarts the JetKVM (not the computer).
+    func confirmRestart() {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Restart the JetKVM?"
+        alert.informativeText = "The JetKVM for \(device.name) restarts, which takes about a minute, and the window reconnects by itself. "
+            + "The computer keeps running, but may briefly lose its display."
+        alert.addButton(withTitle: "Restart")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            Task {
+                do {
+                    try await self.restartJetKVM()
+                } catch {
+                    self.hud.show("The JetKVM didn't restart: \((error as? EngineError)?.message ?? error.localizedDescription)", for: 4)
+                }
+            }
+        }
+    }
+
+    /// Restarts the JetKVM; the overlay says so until the session is back
+    /// (it reconnects by itself).
+    func restartJetKVM() async throws {
+        restartedAt = DispatchTime.now().uptimeNanoseconds
+        do {
+            try await engine.run(EngineCommand(cmd: "reboot"))
+        } catch {
+            restartedAt = nil
+            throw error
+        }
+    }
+
     /// The password the session uses (typed, or from the keychain).
     var knownPassword: String? { password ?? credentialProvider?(device) }
 
@@ -720,6 +756,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     }
 
     func engine(_ engine: EngineProcess, didUpdate snapshot: SessionSnapshot) {
+        if snapshot.Phase != self.snapshot.Phase {
+            AppLog.log("\(device.name): \(snapshot.Phase) (\(snapshot.Status))")
+        }
         self.snapshot = snapshot
         if snapshot.Phase == "auth_failed" && !snapshot.Status.contains("locked") {
             // Wrong, empty or changed password: always ask (the engine has
@@ -729,6 +768,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         if snapshot.Phase == "connected" && !wasConnected {
             wasConnected = true
+            restartedAt = nil // back after a restart
             connectedAt = DispatchTime.now().uptimeNanoseconds
             matchRemoteToWindow()
             learnCaptureLimit()
@@ -1019,6 +1059,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private func stallReason(now: UInt64) -> StallOverlay.Content? {
         guard !isShutDown, window?.occlusionState.contains(.visible) == true else { return nil }
         let name = device.name
+        // After a restart the app asked for, until the session is back (or 3
+        // minutes): it retries and fails while the JetKVM boots.
+        let restarting = restartedAt.map { now - $0 < 180_000_000_000 } ?? false
+        if snapshot.Phase == "rebooting" || (restarting && snapshot.Phase != "connected") {
+            return .init(title: "The JetKVM is restarting…", detail: "\(name) comes back once it is up again.", symbol: "restart")
+        }
         switch snapshot.Phase {
         case "connected":
             break
@@ -1027,8 +1073,6 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         case "reconnecting", "disconnected":
             return .init(title: "Reconnecting to \(name)…", detail: "The connection dropped. Retrying automatically.",
                          symbol: "arrow.triangle.2.circlepath")
-        case "rebooting":
-            return .init(title: "\(name) is restarting…", detail: "The picture comes back once it is up again.", symbol: "restart")
         case "other_session":
             // The app steps back instead of taking the device back at once.
             return .init(title: "\(name) is in use elsewhere", detail: "The JetKVM web page or another app connected to it.",

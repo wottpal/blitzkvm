@@ -342,6 +342,10 @@ final class SelfTest {
                 default: return model.tailscale.error != nil && !model.tailscale.isWorking
                 }
             } && model.tailscale.error == nil
+        case "restart":
+            model.restartJetKVM()
+            try? await Task.sleep(for: .milliseconds(300))
+            ok = await until(300) { !model.firmware.isWorking } && model.firmware.error == nil
         case "login":
             model.logIn()
             try? await Task.sleep(for: .milliseconds(300))

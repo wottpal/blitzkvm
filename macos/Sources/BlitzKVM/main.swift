@@ -41,7 +41,7 @@ struct Options {
     var scaling: ScalingMode?
     var profile: ModifierProfile?
     /// Self-test: open JetKVM Setup and run `check`, `install-tailscale`,
-    /// `login` (Tailscale), `install-firmware` or `password=<new password>`.
+    /// `login` (Tailscale), `restart`, `install-firmware` or `password=<new password>`.
     var setup: String?
     /// Self-test: render the setup sheet to this PNG at the end.
     var setupSnapshot: String?
@@ -448,6 +448,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(item("Enable System Shortcut Capture…", #selector(requestAccessibility)))
         device.addItem(.separator())
         device.addItem(item("Wake Computer", #selector(wakeComputer)))
+        device.addItem(item("Restart JetKVM…", #selector(restartJetKVM)))
         let power = NSMenu(title: "Power")
         for (title, action) in [("ATX: Press Power Button", "power-short"), ("ATX: Hold Power Button (Force Off)", "power-long"), ("ATX: Press Reset", "reset")] {
             let i = item(title, #selector(atxAction(_:)))
@@ -655,6 +656,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func wakeComputer() { current?.wakeComputer() }
 
+    @objc private func restartJetKVM() { current?.confirmRestart() }
+
     @objc private func atxAction(_ sender: NSMenuItem) {
         guard let c = current, let action = sender.representedObject as? String, confirm(sender.title, on: c) else { return }
         c.sendRPC("setATXPowerAction", params: .object(["action": .string(action)]))
@@ -705,6 +708,8 @@ extension AppDelegate: NSMenuItemValidation {
             return c != nil
         case #selector(showSetup):
             return c != nil
+        case #selector(restartJetKVM):
+            return c?.snapshot.Phase == "connected"
         case #selector(wakeComputer):
             return c?.snapshot.Phase == "connected" && c?.input.viewOnly == false
         case #selector(toggleExactPixels):

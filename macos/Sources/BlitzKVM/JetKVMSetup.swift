@@ -169,6 +169,24 @@ final class JetKVMSetupModel: ObservableObject {
         }
     }
 
+    /// Restarts the JetKVM and waits until the session is back.
+    func restartJetKVM() {
+        guard let controller, !firmware.isWorking else { return }
+        Task {
+            do {
+                firmware.error = nil
+                firmware.progress = "Restarting the JetKVM…"
+                try await controller.restartJetKVM()
+                try await waitForRestart()
+                firmware.progress = nil
+                refresh()
+            } catch {
+                firmware.progress = nil
+                firmware.error = Self.describe(error)
+            }
+        }
+    }
+
     /// The session drops when the JetKVM goes down and comes back once it is
     /// up again (the window reconnects by itself).
     private func waitForRestart() async throws {
