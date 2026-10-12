@@ -276,7 +276,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.recordConnection(c.device)
             }
             controller.onPasswordAccepted = { c, password in
-                Keychain.setPassword(password, account: c.device.credentialAccount)
+                if let password {
+                    Keychain.setPassword(password, account: c.device.credentialAccount)
+                } else {
+                    Keychain.deletePassword(account: c.device.credentialAccount)
+                }
             }
             controller.credentialProvider = { Keychain.password(account: $0.credentialAccount) }
         }

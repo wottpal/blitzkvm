@@ -49,8 +49,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// The pinned certificate authority was learned or cleared.
     var onCertificateChange: ((DeviceWindowController) -> Void)?
     /// Called with a password the user typed, once it has been accepted by
-    /// the device (to store it in the Keychain).
-    var onPasswordAccepted: ((DeviceWindowController, String) -> Void)?
+    /// the device, or nil once the device has none (for the Keychain).
+    var onPasswordAccepted: ((DeviceWindowController, String?) -> Void)?
     /// Supplies the current stored password on reconnect.
     var credentialProvider: ((Device) -> String?)?
     /// Called when the window closes for good.
@@ -575,6 +575,13 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     /// The password the session uses (typed, or from the keychain).
     var knownPassword: String? { password ?? credentialProvider?(device) }
+
+    /// The device's password was set, changed or turned off (nil) from
+    /// JetKVM Setup: the session and the Keychain follow.
+    func passwordChanged(to newPassword: String?) {
+        password = newPassword
+        onPasswordAccepted?(self, newPassword)
+    }
 
     /// The setup sheet's model, once it has been shown.
     var setup: JetKVMSetupModel? { setupModel }

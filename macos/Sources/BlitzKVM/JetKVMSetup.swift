@@ -343,7 +343,7 @@ final class JetKVMSetupModel: ObservableObject {
                 password.error = nil
                 password.progress = "Setting the password…"
                 try await controller.engine.run(EngineCommand(cmd: "createPassword", password: newPassword))
-                controller.onPasswordAccepted?(controller, newPassword)
+                controller.passwordChanged(to: newPassword)
                 password.progress = nil
                 password.value = true
                 record()
@@ -366,8 +366,28 @@ final class JetKVMSetupModel: ObservableObject {
                 password.error = nil
                 password.progress = "Changing the password…"
                 try await controller.engine.run(EngineCommand(cmd: "changePassword", password: newPassword, oldPassword: current))
-                controller.onPasswordAccepted?(controller, newPassword)
+                controller.passwordChanged(to: newPassword)
                 password.progress = nil
+            } catch {
+                password.progress = nil
+                password.error = Self.describe(error)
+            }
+        }
+    }
+
+    /// Turns the JetKVM's password off (the device wants the current one)
+    /// and removes it from the Keychain.
+    func removePassword(current: String) {
+        guard let controller, !password.isWorking else { return }
+        Task {
+            do {
+                password.error = nil
+                password.progress = "Turning off the password…"
+                try await controller.engine.run(EngineCommand(cmd: "removePassword", password: current))
+                controller.passwordChanged(to: nil)
+                password.progress = nil
+                password.value = false
+                record()
             } catch {
                 password.progress = nil
                 password.error = Self.describe(error)

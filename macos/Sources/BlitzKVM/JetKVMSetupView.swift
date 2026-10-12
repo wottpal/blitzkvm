@@ -48,10 +48,11 @@ struct JetKVMSetupView: View {
         }
         .sheet(item: $passwordSheet) { mode in
             PasswordSheet(mode: mode) { current, new in
-                if let current {
-                    model.changePassword(current: current, to: new)
-                } else {
-                    model.createPassword(new)
+                switch (current, new) {
+                case let (current?, new?): model.changePassword(current: current, to: new)
+                case let (nil, new?): model.createPassword(new)
+                case let (current?, nil): model.removePassword(current: current)
+                case (nil, nil): break
                 }
             }
         }
@@ -150,7 +151,8 @@ struct JetKVMSetupView: View {
         switch row.value {
         case true?:
             content = RowContent(detail: "Set", note: "Asked for on every new connection.", badge: "On",
-                                 menu: [RowAction(title: "Change Password…") { passwordSheet = .change(current: model.knownPassword) }])
+                                 menu: [RowAction(title: "Change Password…") { passwordSheet = .change(current: model.knownPassword) },
+                                        RowAction(title: "Turn Off Password…") { passwordSheet = .turnOff(current: model.knownPassword) }])
         case false?:
             content = RowContent(detail: "Off", note: "Anyone who can reach it has full control.",
                                  action: .init(title: "Set Password…") { passwordSheet = .set })
@@ -293,21 +295,30 @@ private struct SetupRow<Value: Equatable>: View {
 
 // MARK: - Password
 
-/// Sets the JetKVM's first password, or changes it (8 to 72 characters,
-/// the firmware's limits). Changing asks for the current password only when
-/// the keychain doesn't have it.
+/// Sets the JetKVM's first password, changes it (8 to 72 characters, the
+/// firmware's limits) or turns it off. Changing and turning off ask for the
+/// current password only when the keychain doesn't have it.
 private struct PasswordSheet: View {
     enum Mode: Identifiable {
         case set
         /// The current password, when known.
         case change(current: String?)
+        /// The current password, when known.
+        case turnOff(current: String?)
 
-        var id: String { if case .set = self { return "set" } else { return "change" } }
+        var id: String {
+            switch self {
+            case .set: return "set"
+            case .change: return "change"
+            case .turnOff: return "turnOff"
+            }
+        }
     }
 
     let mode: Mode
-    /// The current password (changing) and the new one.
-    let done: (_ current: String?, _ new: String) -> Void
+    /// The current password (changing, turning off) and the new one (nil:
+    /// turning off).
+    let done: (_ current: String?, _ new: String?) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var current = ""
     @State private var password = ""
@@ -315,11 +326,35 @@ private struct PasswordSheet: View {
 
     private var changing: Bool { if case .change = mode { return true } else { return false } }
 
-    /// Changing without the current password in the keychain.
-    private var asksCurrent: Bool { if case .change(nil) = mode { return true } else { return false } }
+    private var turningOff: Bool { if case .turnOff = mode { return true } else { return false } }
+
+    /// Changing or turning off without the current password in the keychain.
+    private var asksCurrent: Bool {
+        switch mode {
+        case .change(nil), .turnOff(nil): return true
+        default: return false
+        }
+    }
+
+    private var title: String {
+        switch mode {
+        case .set: return "Set a Password"
+        case .change: return "Change the Password"
+        case .turnOff: return "Turn Off the Password"
+        }
+    }
+
+    private var action: String {
+        switch mode {
+        case .set: return "Set Password"
+        case .change: return "Change Password"
+        case .turnOff: return "Turn Off"
+        }
+    }
 
     private var problem: String? {
         if asksCurrent && current.isEmpty { return " " }
+        if turningOff { return nil }
         if password.count < 8 { return "At least 8 characters." }
         if password.count > 72 { return "At most 72 characters." }
         if confirmation != password { return confirmation.isEmpty ? " " : "The passwords don't match." }
@@ -328,23 +363,29 @@ private struct PasswordSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(changing ? "Change the Password" : "Set a Password")
+            Text(title)
                 .font(.title3.weight(.semibold))
                 .padding([.horizontal, .top], 20)
-            Text("Asked for on every connection, kept in your keychain.")
+            Text(turningOff ? "Anyone who can reach the JetKVM gets full control." : "Asked for on every connection, kept in your keychain.")
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .padding(.horizontal, 20)
                 .padding(.top, 4)
-            Form {
-                if asksCurrent {
-                    SecureField("Current", text: $current)
+            if turningOff && !asksCurrent {
+                Spacer().frame(height: 20)
+            } else {
+                Form {
+                    if asksCurrent {
+                        SecureField("Current", text: $current)
+                    }
+                    if !turningOff {
+                        SecureField(changing ? "New" : "Password", text: $password)
+                        SecureField("Confirm", text: $confirmation)
+                    }
                 }
-                SecureField(changing ? "New" : "Password", text: $password)
-                SecureField("Confirm", text: $confirmation)
+                .formStyle(.grouped)
+                .scrollDisabled(true)
             }
-            .formStyle(.grouped)
-            .scrollDisabled(true)
             HStack {
                 Text(password.isEmpty ? " " : problem ?? " ")
                     .font(.callout)
@@ -352,11 +393,11 @@ private struct PasswordSheet: View {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(changing ? "Change Password" : "Set Password") {
-                    if case .change(let known) = mode {
-                        done(known ?? current, password)
-                    } else {
-                        done(nil, password)
+                Button(action) {
+                    switch mode {
+                    case .set: done(nil, password)
+                    case .change(let known): done(known ?? current, password)
+                    case .turnOff(let known): done(known ?? current, nil)
                     }
                     dismiss()
                 }
