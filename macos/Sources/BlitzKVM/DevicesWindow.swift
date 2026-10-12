@@ -76,6 +76,7 @@ struct DevicesView: View {
             }
         }
         .frame(minWidth: 460, minHeight: 340)
+        .navigationTitle("Devices")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button(action: add) { Label("Add Device", systemImage: "plus") }
@@ -774,21 +775,41 @@ private extension Locale {
     static let englishInUserRegion = Locale(languageCode: .english, languageRegion: Locale.current.region)
 }
 
+/// The Devices window's content: the welcome screen while permissions are
+/// missing (first launch, BlitzKVM › Permissions…, Local Network turned off),
+/// the devices otherwise.
+struct DevicesRootView: View {
+    @ObservedObject var model: DevicesModel
+    @ObservedObject var permissions: PermissionsModel
+
+    var body: some View {
+        Group {
+            if permissions.showsOnboarding {
+                OnboardingView(permissions: permissions)
+                    .transition(.opacity)
+            } else {
+                DevicesView(model: model)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.smooth(duration: 0.3), value: permissions.showsOnboarding)
+    }
+}
+
 final class DevicesWindowController: NSWindowController {
     let model: DevicesModel
 
-    init(model: DevicesModel) {
+    init(model: DevicesModel, permissions: PermissionsModel) {
         self.model = model
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 480),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
-        let host = NSHostingView(rootView: DevicesView(model: model))
+        let host = NSHostingView(rootView: DevicesRootView(model: model, permissions: permissions))
         // The view's toolbar (Liquid Glass on macOS 26) shares its state; the
         // user sizes the window, the content only sets its minimum.
-        host.sceneBridgingOptions = [.toolbars]
+        host.sceneBridgingOptions = [.toolbars, .title]
         host.sizingOptions = [.minSize]
         window.contentView = host
-        window.title = "Devices"
         window.titlebarSeparatorStyle = .none
         window.toolbarStyle = .unified
         window.setFrameAutosaveName("DevicesWindow")

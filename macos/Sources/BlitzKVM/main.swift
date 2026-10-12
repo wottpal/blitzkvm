@@ -111,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return model
     }()
     private var devicesWindow: DevicesWindowController?
+    private lazy var permissions = MainActor.assumeIsolated { PermissionsModel() }
     /// Open device windows (including minimized ones). Removed only when a
     /// window closes, which also stops its engine.
     private var windows: [DeviceWindowController] = [] {
@@ -167,7 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func showDevices() {
         if devicesWindow == nil {
-            devicesWindow = DevicesWindowController(model: devicesModel)
+            devicesWindow = DevicesWindowController(model: devicesModel, permissions: permissions)
             devicesWindow?.window?.center()
         }
         devicesModel.reload()
@@ -410,6 +411,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let appMenu = NSMenu()
+        appMenu.addItem(item("Permissions…", #selector(showPermissions)))
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide BlitzKVM", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit BlitzKVM", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -626,6 +629,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         c.paste(text)
     }
     @objc private func showSetup() { current?.showSetup() }
+
+    /// The welcome screen, to check or grant the app's permissions.
+    @objc private func showPermissions() {
+        MainActor.assumeIsolated { permissions.showOnboarding() }
+        showDevices()
+    }
 
     @objc private func openWebUI() {
         guard let c = current else { return }

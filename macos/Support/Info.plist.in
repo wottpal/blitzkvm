@@ -37,6 +37,12 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>BlitzKVM connects to your JetKVM devices on the local network.</string>
+	<!-- The welcome screen checks Local Network access by advertising and
+	     finding this service (Permissions.swift). -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_blitzkvm._tcp</string>
+	</array>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 </dict>

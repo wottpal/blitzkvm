@@ -225,36 +225,11 @@ private struct SetupRow<Value: Equatable>: View {
     let retry: () -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 28, height: 28)
-                .background(tint.gradient, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.body.weight(.medium))
-                Text(row.progress ?? row.error ?? content.detail)
-                    .font(.callout)
-                    .foregroundStyle(row.error != nil && row.progress == nil ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-                    .textSelection(.enabled)
-                    .lineLimit(row.error != nil && row.progress == nil ? nil : 1)
-                    .fixedSize(horizontal: false, vertical: true)
-                if row.progress == nil, row.error == nil, let note = content.note,
-                   let markdown = try? AttributedString(markdown: note) {
-                    Text(markdown)
-                        .font(.callout)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .padding(.top, 4)
-                }
-            }
-            .accessibilityElement(children: .combine)
-            Spacer(minLength: 12)
+        let showsError = row.error != nil && row.progress == nil
+        StatusRow(symbol: symbol, tint: tint, title: title, state: row.progress ?? row.error ?? content.detail,
+                  isError: showsError, note: row.progress == nil && row.error == nil ? content.note : nil) {
             trailing
         }
-        .padding(.vertical, 4)
         .animation(.snappy(duration: 0.2), value: row)
     }
 
@@ -278,10 +253,7 @@ private struct SetupRow<Value: Equatable>: View {
             Button("Check Again", action: retry)
         } else if let badge = content.badge {
             HStack(spacing: 8) {
-                Label(badge, systemImage: "checkmark.circle.fill")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.green)
-                    .labelStyle(.titleAndIcon)
+                DoneBadge(title: badge)
                 if !content.menu.isEmpty {
                     Menu {
                         menuItems

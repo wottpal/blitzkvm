@@ -133,7 +133,7 @@ The app hands each frame to the window server as soon as the GPU is done instead
 
 Colors: the JetKVM's HDMI bridge outputs BT.601 YCbCr while firmware 0.5.9 tags HD streams BT.709, so the app always decodes BT.601 (`VideoView.colorParams`; `BLITZKVM_COLOR_MATRIX=709` restores the declared matrix).
 
-Permissions: grant Accessibility to capture system shortcuts. macOS also asks for Local Network access on first use. If the first address probe gets no answer (device asleep, VPN still coming up, permission prompt pending), the window opens anyway and keeps connecting.
+Permissions: on first launch the Devices window opens on a welcome screen that asks for both, each with its state and one button: **Local Network** (required: JetKVMs answer on the local network) and **Accessibility** (recommended: ⌘Tab, ⌘Space and other system shortcuts reach the remote computer). Continue needs Local Network; Skip leaves both for later. BlitzKVM › Permissions… opens it again, and it comes back by itself when Local Network access is turned off. macOS has no API for the Local Network state (Apple TN3179), so the app advertises a Bonjour service (`_blitzkvm._tcp`, listed in `NSBonjourServices`) for a moment and browses for it: found means allowed, PolicyDenied means not. The first check shows the system prompt, so it runs only once you click Allow, and afterwards at launch. If the first address probe gets no answer (device asleep, VPN still coming up), the window opens anyway and keeps connecting.
 
 Command-line options (also used by the self-tests):
 

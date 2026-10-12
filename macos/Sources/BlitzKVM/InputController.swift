@@ -41,9 +41,9 @@ final class InputController {
             releaseAll()
             removeEventTap()
         } else {
-            if !Self.accessibilityTrusted(prompt: false) && !UserDefaults.standard.bool(forKey: Self.askedKey) {
+            if !Self.accessibilityTrusted(prompt: false) && !UserDefaults.standard.bool(forKey: Self.askedForAccessibilityKey) {
                 // Ask once; afterwards the hint and the Device menu say how.
-                UserDefaults.standard.set(true, forKey: Self.askedKey)
+                UserDefaults.standard.set(true, forKey: Self.askedForAccessibilityKey)
                 _ = Self.accessibilityTrusted(prompt: true)
             }
             ensureEventTap()
@@ -57,7 +57,8 @@ final class InputController {
 
     var eventTapActive: Bool { eventTap != nil && CGEvent.tapIsEnabled(tap: eventTap!) }
 
-    private static let askedKey = "askedForAccessibility"
+    /// The system prompt for Accessibility was shown once (it shows only once).
+    static let askedForAccessibilityKey = "askedForAccessibility"
 
     static func accessibilityTrusted(prompt: Bool) -> Bool {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
