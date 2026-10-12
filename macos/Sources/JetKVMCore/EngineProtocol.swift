@@ -104,6 +104,8 @@ public struct EngineCommand: Codable, Equatable {
     public var cmd: String
     public var baseURL: String?
     public var password: String?
+    /// The current password (cmd "changePassword").
+    public var oldPassword: String?
     /// The engine verifies this ID before any input: before login when the
     /// device answers GET /device without one, else over RPC after login.
     public var deviceID: String?
@@ -129,8 +131,9 @@ public struct EngineCommand: Codable, Equatable {
                 deviceID: String? = nil, certSHA256: String? = nil, offerH265: Bool? = nil, autoQuality: Bool? = nil,
                 qualityLevel: String? = nil, method: String? = nil,
                 params: JSONValue? = nil, text: String? = nil, delay: Int? = nil, path: String? = nil, target: Int64? = nil,
-                paused: Bool? = nil) {
+                paused: Bool? = nil, oldPassword: String? = nil) {
         self.id = id
+        self.oldPassword = oldPassword
         self.cmd = cmd
         self.baseURL = baseURL
         self.password = password

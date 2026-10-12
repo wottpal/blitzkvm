@@ -270,27 +270,41 @@ final class JetKVMSetupModel: ObservableObject {
         }
     }
 
-    /// Asks Tailscale on the JetKVM to join a tailnet; it then waits for
-    /// someone to log in at the URL it reports.
+    /// Asks Tailscale on the JetKVM to join a tailnet under `hostname`; it
+    /// then waits for someone to log in at the URL it reports. A login still
+    /// waiting is replaced (one waiting `tailscale up` at a time), and the
+    /// re-authentication gives the new name a login page of its own.
     private func startLogin(_ shell: JetKVMShell, hostname: String) async throws {
-        _ = try await shell.run("(trap '' HUP; tailscale up --hostname=\(hostname) > /tmp/tailscale-up.log 2>&1 &)")
+        _ = try await shell.run("killall tailscale 2> /dev/null; "
+            + "(trap '' HUP; tailscale up --hostname=\(hostname) --force-reauth > /tmp/tailscale-up.log 2>&1 &)")
     }
 
-    /// Opens the Tailscale login page; without one (e.g. after a restart),
-    /// asks the JetKVM for a new one first.
+    /// The name Tailscale on the JetKVM logs in under.
+    private func loginHostname(_ shell: JetKVMShell) async throws -> String? {
+        struct Prefs: Decodable { var Hostname: String? }
+        return try? JSONDecoder().decode(Prefs.self, from: Data(try await shell.run("tailscale debug prefs").utf8)).Hostname
+    }
+
+    /// Opens the Tailscale login page for the device's current name: the
+    /// waiting one when it has that name, else a new one (after a rename, or
+    /// a restart that dropped the page).
     func logIn() {
         guard let controller, !tailscale.isWorking else { return }
-        if case .needsLogin(let url?)? = tailscale.value {
-            NSWorkspace.shared.open(url)
-            openedLogin = url
-            return watchTailscale()
-        }
         let hostname = TailscaleStatus.hostname(forDevice: controller.device.name)
+        var waiting: URL?
+        if case .needsLogin(let url?)? = tailscale.value { waiting = url }
         Task {
             do {
                 tailscale.error = nil
                 tailscale.progress = "Starting the login…"
-                try await startLogin(try await ensureShell(), hostname: hostname)
+                let shell = try await ensureShell()
+                if let waiting, try await loginHostname(shell) == hostname {
+                    NSWorkspace.shared.open(waiting)
+                    openedLogin = waiting
+                } else {
+                    try await startLogin(shell, hostname: hostname)
+                    openedLogin = waiting // the old page: wait for the new one
+                }
                 tailscale.progress = nil
                 watchTailscale()
             } catch {
@@ -315,6 +329,27 @@ final class JetKVMSetupModel: ObservableObject {
                 password.progress = nil
                 password.value = true
                 record()
+            } catch {
+                password.progress = nil
+                password.error = Self.describe(error)
+            }
+        }
+    }
+
+    /// The password the session uses (typed, or from the keychain).
+    var knownPassword: String? { controller?.knownPassword }
+
+    /// Changes the JetKVM's password (the device wants the current one) and
+    /// keeps the new one in the Keychain.
+    func changePassword(current: String, to newPassword: String) {
+        guard let controller, !password.isWorking else { return }
+        Task {
+            do {
+                password.error = nil
+                password.progress = "Changing the password…"
+                try await controller.engine.run(EngineCommand(cmd: "changePassword", password: newPassword, oldPassword: current))
+                controller.onPasswordAccepted?(controller, newPassword)
+                password.progress = nil
             } catch {
                 password.progress = nil
                 password.error = Self.describe(error)

@@ -350,6 +350,14 @@ final class SelfTest {
             model.installFirmware(build)
             try? await Task.sleep(for: .seconds(1))
             ok = await until(600) { !model.firmware.isWorking } && model.firmware.error == nil
+        case let a where a.hasPrefix("change-password="):
+            guard let current = model.knownPassword else {
+                ok = false
+                break
+            }
+            model.changePassword(current: current, to: String(a.dropFirst("change-password=".count)))
+            try? await Task.sleep(for: .milliseconds(300))
+            ok = await until(30) { !model.password.isWorking } && model.password.error == nil
         case let a where a.hasPrefix("password="):
             model.createPassword(String(a.dropFirst("password=".count)))
             try? await Task.sleep(for: .milliseconds(300))

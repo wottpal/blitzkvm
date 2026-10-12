@@ -527,6 +527,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         onSetupChecked?(self, summary)
     }
 
+    /// The password the session uses (typed, or from the keychain).
+    var knownPassword: String? { password ?? credentialProvider?(device) }
+
     /// The setup sheet's model, once it has been shown.
     var setup: JetKVMSetupModel? { setupModel }
 

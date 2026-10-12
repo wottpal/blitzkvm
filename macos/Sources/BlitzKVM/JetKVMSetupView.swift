@@ -9,7 +9,7 @@ struct JetKVMSetupView: View {
     let address: String
     let done: () -> Void
     @State private var confirming: Confirmation?
-    @State private var settingPassword = false
+    @State private var passwordSheet: PasswordSheet.Mode?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -46,8 +46,14 @@ struct JetKVMSetupView: View {
         } message: { confirmation in
             Text(confirmation.message)
         }
-        .sheet(isPresented: $settingPassword) {
-            PasswordSheet { model.createPassword($0) }
+        .sheet(item: $passwordSheet) { mode in
+            PasswordSheet(mode: mode) { current, new in
+                if let current {
+                    model.changePassword(current: current, to: new)
+                } else {
+                    model.createPassword(new)
+                }
+            }
         }
     }
 
@@ -143,10 +149,11 @@ struct JetKVMSetupView: View {
         var content = RowContent(detail: "Checking…")
         switch row.value {
         case true?:
-            content = RowContent(detail: "Set", note: "Asked for on every new connection.", badge: "On")
+            content = RowContent(detail: "Set", note: "Asked for on every new connection.", badge: "On",
+                                 menu: [RowAction(title: "Change Password…") { passwordSheet = .change(current: model.knownPassword) }])
         case false?:
             content = RowContent(detail: "Off", note: "Anyone who can reach it has full control.",
-                                 action: .init(title: "Set Password…") { settingPassword = true })
+                                 action: .init(title: "Set Password…") { passwordSheet = .set })
         case nil:
             break
         }
@@ -278,15 +285,33 @@ private struct SetupRow<Value: Equatable>: View {
 
 // MARK: - Password
 
-/// Sets the JetKVM's first password (8 to 72 characters, the firmware's
-/// limits).
+/// Sets the JetKVM's first password, or changes it (8 to 72 characters,
+/// the firmware's limits). Changing asks for the current password only when
+/// the keychain doesn't have it.
 private struct PasswordSheet: View {
-    let set: (String) -> Void
+    enum Mode: Identifiable {
+        case set
+        /// The current password, when known.
+        case change(current: String?)
+
+        var id: String { if case .set = self { return "set" } else { return "change" } }
+    }
+
+    let mode: Mode
+    /// The current password (changing) and the new one.
+    let done: (_ current: String?, _ new: String) -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var current = ""
     @State private var password = ""
     @State private var confirmation = ""
 
+    private var changing: Bool { if case .change = mode { return true } else { return false } }
+
+    /// Changing without the current password in the keychain.
+    private var asksCurrent: Bool { if case .change(nil) = mode { return true } else { return false } }
+
     private var problem: String? {
+        if asksCurrent && current.isEmpty { return " " }
         if password.count < 8 { return "At least 8 characters." }
         if password.count > 72 { return "At most 72 characters." }
         if confirmation != password { return confirmation.isEmpty ? " " : "The passwords don't match." }
@@ -295,7 +320,7 @@ private struct PasswordSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Set a Password")
+            Text(changing ? "Change the Password" : "Set a Password")
                 .font(.title3.weight(.semibold))
                 .padding([.horizontal, .top], 20)
             Text("Asked for on every connection, kept in your keychain.")
@@ -304,7 +329,10 @@ private struct PasswordSheet: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 4)
             Form {
-                SecureField("Password", text: $password)
+                if asksCurrent {
+                    SecureField("Current", text: $current)
+                }
+                SecureField(changing ? "New" : "Password", text: $password)
                 SecureField("Confirm", text: $confirmation)
             }
             .formStyle(.grouped)
@@ -316,8 +344,12 @@ private struct PasswordSheet: View {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button("Set Password") {
-                    set(password)
+                Button(changing ? "Change Password" : "Set Password") {
+                    if case .change(let known) = mode {
+                        done(known ?? current, password)
+                    } else {
+                        done(nil, password)
+                    }
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
