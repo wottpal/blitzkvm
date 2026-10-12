@@ -58,6 +58,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     var onPreferencesChanged: ((DeviceWindowController) -> Void)?
     /// An address was added (the JetKVM's tailnet name): persist it.
     var onAddressesChanged: ((DeviceWindowController) -> Void)?
+    /// JetKVM Setup checked the device: persist the summary.
+    var onSetupChecked: ((DeviceWindowController, SetupSummary) -> Void)?
     /// Opens the setup sheet once the session connects.
     var showsSetupOnConnect = false
     private var setupModel: JetKVMSetupModel?
@@ -512,6 +514,19 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
     }
 
+    /// Checks JetKVM Setup's three states without showing the sheet.
+    private func checkSetup() {
+        guard snapshot.Phase == "connected", setupSheet == nil else { return }
+        let model = setupModel ?? JetKVMSetupModel(controller: self)
+        setupModel = model
+        model.refresh()
+    }
+
+    func recordSetup(_ summary: SetupSummary) {
+        device.setup = summary.merged(over: device.setup)
+        onSetupChecked?(self, summary)
+    }
+
     /// The setup sheet's model, once it has been shown.
     var setup: JetKVMSetupModel? { setupModel }
 
@@ -716,6 +731,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             if showsSetupOnConnect {
                 showsSetupOnConnect = false
                 showSetup()
+            } else {
+                // Keeps the Devices window's setup status current; after the
+                // picture has started.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.checkSetup() }
             }
         } else if snapshot.Phase != "connected" {
             wasConnected = false

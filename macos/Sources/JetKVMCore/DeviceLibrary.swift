@@ -30,6 +30,8 @@ public struct Device: Codable, Equatable, Identifiable {
     public var qualityLevel: String?
     public var invertScroll: Bool
     public var lastConnected: Date?
+    /// The last JetKVM Setup check, shown in the Devices window.
+    public var setup: SetupSummary?
 
     public init(id: String = UUID().uuidString, name: String, addresses: [String], deviceID: String? = nil,
                 modifierProfile: ModifierProfile = .mac, scaling: ScalingMode = .actualSize,

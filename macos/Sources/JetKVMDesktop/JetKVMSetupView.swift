@@ -20,12 +20,11 @@ struct JetKVMSetupView: View {
                     tailscaleRow
                     passwordRow
                 } footer: {
-                    Text("Installing turns on the JetKVM's Developer Mode (SSH) with a key that stays on this Mac.")
+                    Text("Installs turn on SSH (Developer Mode) with a key kept on this Mac.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.leading)
+                        .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .formStyle(.grouped)
@@ -89,7 +88,7 @@ struct JetKVMSetupView: View {
                 return RowAction(title: "\(verb) \(build.title)…", perform: install(build))
             }
         }
-        let benefit = "\(recommended.title) adds sharper text, near-lossless still screens and larger Match Window sizes."
+        let benefit = "Upgrade for sharper text and larger modes."
         let newer = "\(recommended.title) is newer."
         var content = RowContent(detail: "Checking…")
         switch row.value {
@@ -122,7 +121,7 @@ struct JetKVMSetupView: View {
         var content = RowContent(detail: "Checking…")
         switch row.value {
         case .notInstalled?:
-            content = RowContent(detail: "Not installed", note: "Reach this JetKVM from anywhere on your tailnet.", action: install)
+            content = RowContent(detail: "Not installed", note: "Reach it from anywhere on your tailnet.", action: install)
         case .needsLogin?:
             content = RowContent(detail: "Installed", note: "Log in to add it to your tailnet.",
                                  action: .init(title: "Log In…", perform: model.logIn))
@@ -131,8 +130,7 @@ struct JetKVMSetupView: View {
                                  action: .init(title: "Reinstall…", perform: install.perform))
         case .running(let name)?:
             content = RowContent(detail: name,
-                                 note: "Turn off key expiry for it in the [admin console](https://login.tailscale.com/admin/machines), "
-                                     + "or it drops off your tailnet when its key expires.",
+                                 note: "Turn off its key expiry in the [admin console](https://login.tailscale.com/admin/machines).",
                                  badge: "Connected")
         case nil:
             break
@@ -147,7 +145,7 @@ struct JetKVMSetupView: View {
         case true?:
             content = RowContent(detail: "Set", note: "Asked for on every new connection.", badge: "On")
         case false?:
-            content = RowContent(detail: "Off", note: "Anyone who can reach the JetKVM can control the computer.",
+            content = RowContent(detail: "Off", note: "Anyone who can reach it has full control.",
                                  action: .init(title: "Set Password…") { settingPassword = true })
         case nil:
             break
@@ -241,13 +239,14 @@ private struct SetupRow<Value: Equatable>: View {
                     .font(.callout)
                     .foregroundStyle(row.error != nil && row.progress == nil ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                     .textSelection(.enabled)
+                    .lineLimit(row.error != nil && row.progress == nil ? nil : 1)
                     .fixedSize(horizontal: false, vertical: true)
                 if row.progress == nil, row.error == nil, let note = content.note,
                    let markdown = try? AttributedString(markdown: note) {
                     Text(markdown)
                         .font(.callout)
                         .foregroundStyle(.tertiary)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(1)
                         .padding(.top, 4)
                 }
             }
@@ -327,9 +326,9 @@ private struct PasswordSheet: View {
             Text("Set a Password")
                 .font(.title3.weight(.semibold))
                 .padding([.horizontal, .top], 20)
-            Text("The JetKVM asks for it on every new connection. It's saved in your keychain.")
+            Text("Asked for on every connection, kept in your keychain.")
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(1)
                 .padding(.horizontal, 20)
                 .padding(.top, 4)
             Form {

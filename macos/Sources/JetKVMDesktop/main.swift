@@ -283,6 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !isSelfTest {
             controller.onPreferencesChanged = { [weak self] c in self?.recordPreferences(c.device) }
             controller.onAddressesChanged = { [weak self] c in self?.recordAddresses(c.device) }
+            controller.onSetupChecked = { [weak self] c, summary in self?.recordSetup(summary, for: c.device) }
         }
         let tabHost = (windows.first { $0.window?.isKeyWindow == true } ?? windows.last)?.window
         windows.append(controller)
@@ -357,6 +358,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func recordAddresses(_ device: Device) {
         guard var saved = store.device(id: device.id) else { return }
         for address in device.addresses { _ = saved.addAddress(address) }
+        store.upsert(saved)
+        try? store.save()
+        devicesModel.reload()
+    }
+
+    /// Persists what JetKVM Setup found, for the Devices window.
+    private func recordSetup(_ summary: SetupSummary, for device: Device) {
+        guard var saved = store.device(id: device.id) else { return }
+        let merged = summary.merged(over: saved.setup)
+        guard merged != saved.setup else { return }
+        saved.setup = merged
         store.upsert(saved)
         try? store.save()
         devicesModel.reload()

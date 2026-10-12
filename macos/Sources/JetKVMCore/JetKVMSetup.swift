@@ -236,6 +236,36 @@ public enum JetKVMSSH {
     }
 }
 
+/// How far JetKVM Setup is, as of its last check: kept with the device, so
+/// the Devices window shows it without connecting. nil: not checked.
+public struct SetupSummary: Codable, Equatable {
+    /// The JetKVM Desktop build this app ships runs.
+    public var firmwareUpToDate: Bool?
+    /// The JetKVM is on a tailnet.
+    public var tailscaleConnected: Bool?
+    /// The JetKVM asks for a password.
+    public var passwordSet: Bool?
+
+    public init(firmwareUpToDate: Bool? = nil, tailscaleConnected: Bool? = nil, passwordSet: Bool? = nil) {
+        self.firmwareUpToDate = firmwareUpToDate
+        self.tailscaleConnected = tailscaleConnected
+        self.passwordSet = passwordSet
+    }
+
+    public static let steps = 3
+
+    public var done: Int { [firmwareUpToDate, tailscaleConnected, passwordSet].filter { $0 == true }.count }
+
+    public var isComplete: Bool { done == Self.steps }
+
+    /// This check, keeping what an earlier one knew where this one couldn't tell.
+    public func merged(over earlier: SetupSummary?) -> SetupSummary {
+        SetupSummary(firmwareUpToDate: firmwareUpToDate ?? earlier?.firmwareUpToDate,
+                     tailscaleConnected: tailscaleConnected ?? earlier?.tailscaleConnected,
+                     passwordSet: passwordSet ?? earlier?.passwordSet)
+    }
+}
+
 public extension Device {
     /// Appends an address the device answers at (e.g. its tailnet name);
     /// false when it is listed already.

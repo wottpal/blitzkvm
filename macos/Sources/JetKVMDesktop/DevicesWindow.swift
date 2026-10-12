@@ -306,6 +306,8 @@ private struct DeviceGallery: View {
         return DeviceTile(device: device, status: status, screenWidth: screenWidth,
                           isSelected: selection == device.id, isFocused: isFocused) {
             connect(device)
+        } setUp: {
+            setUp(device)
         }
         .onTapGesture { connect(device) }
         .contextMenu {
@@ -356,6 +358,7 @@ private struct DeviceTile: View {
     let isSelected: Bool
     let isFocused: Bool
     let connect: () -> Void
+    let setUp: () -> Void
     @State private var isHovered = false
     @Environment(\.controlActiveState) private var activeState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -366,6 +369,10 @@ private struct DeviceTile: View {
         let radius = (screenWidth * 0.06).rounded()
         VStack(spacing: 12) {
             DeviceScreen(status: status, width: screenWidth, radius: radius)
+                .overlay(alignment: .topTrailing) {
+                    SetupBadge(summary: device.setup, open: setUp)
+                        .padding((screenWidth * 0.045).rounded())
+                }
                 .overlay(alignment: .bottom) {
                     if (isHovered || isSelected) && status != .connecting {
                         Button(status.connectTitle, action: connect)
@@ -488,6 +495,58 @@ private struct DeviceScreen: View {
 
     private var cursor: some View {
         Image(systemName: "cursorarrow").font(.system(size: width * 0.17))
+    }
+}
+
+/// JetKVM Setup's progress on the screen: a dot per step and "Setup 2/3"
+/// (firmware, Tailscale, password), or "Set Up" before the first check. A click opens
+/// the sheet (connecting first).
+private struct SetupBadge: View {
+    let summary: SetupSummary?
+    let open: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 5) {
+                ring
+                Text(summary.map { "Setup \($0.done)/\(SetupSummary.steps)" } ?? "Set Up")
+                    .monospacedDigit()
+            }
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.white.opacity(0.9))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.white.opacity(isHovered ? 0.18 : 0.1), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .linkPointer()
+        .animation(.snappy(duration: 0.15), value: isHovered)
+        .help(help)
+        .accessibilityLabel(summary.map { "Setup, \($0.done) of \(SetupSummary.steps) done" } ?? "Set up")
+    }
+
+    /// One dot per step: filled when done, all green once complete.
+    private var ring: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<SetupSummary.steps, id: \.self) { step in
+                let done = step < (summary?.done ?? 0)
+                Circle()
+                    .fill(done ? (summary?.isComplete == true ? Color.green : .white) : .white.opacity(0.25))
+                    .frame(width: 5, height: 5)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var help: String {
+        guard let summary else { return "Check the firmware, Tailscale and password" }
+        func state(_ value: Bool?, _ yes: String, _ no: String) -> String { value.map { $0 ? yes : no } ?? "not checked" }
+        return ["Firmware: " + state(summary.firmwareUpToDate, "up to date", "not JetKVM Desktop's latest"),
+                "Tailscale: " + state(summary.tailscaleConnected, "connected", "not set up"),
+                "Password: " + state(summary.passwordSet, "set", "off")].joined(separator: "\n")
     }
 }
 

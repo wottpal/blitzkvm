@@ -536,6 +536,17 @@ final class JetKVMSetupTests: XCTestCase {
         XCTAssertNil(TailscaleCLIStatus.relay(statusJSON: Data(json.utf8), to: "100.70.1.4"), "no such peer")
     }
 
+    func testSetupSummary() throws {
+        let earlier = SetupSummary(firmwareUpToDate: true, tailscaleConnected: false, passwordSet: false)
+        let now = SetupSummary(firmwareUpToDate: nil, tailscaleConnected: true, passwordSet: false).merged(over: earlier)
+        XCTAssertEqual(now, SetupSummary(firmwareUpToDate: true, tailscaleConnected: true, passwordSet: false))
+        XCTAssertEqual(now.done, 2)
+        XCTAssertFalse(now.isComplete)
+        // A library written before the summary existed still loads.
+        let old = #"[{"id":"x","name":"Mac mini","addresses":["192.168.1.40"],"modifierProfile":"mac","invertScroll":false}]"#
+        XCTAssertNil(try JSONDecoder().decode([Device].self, from: Data(old.utf8)).first?.setup)
+    }
+
     func testAddAddress() {
         var device = Device(name: "Mac mini", addresses: ["192.168.1.40"])
         XCTAssertTrue(device.addAddress("mac-mini-jetkvm.example.ts.net"))

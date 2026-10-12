@@ -52,7 +52,27 @@ final class JetKVMSetupModel: ObservableObject {
             if !password.isWorking { await checkPassword() }
             let ssh = await canSSH
             if !firmware.isWorking { await checkFirmware(ssh: ssh) }
+            record()
         }
+    }
+
+    /// The states as a summary for the device library (unknowns left out).
+    var summary: SetupSummary {
+        var firmwareUpToDate: Bool?
+        switch firmware.value {
+        case .bundled(let build)?: firmwareUpToDate = build == recommended
+        case .otherDesktop?, .stock?: firmwareUpToDate = false
+        case .unverified?, nil: firmwareUpToDate = nil
+        }
+        var tailscaleConnected: Bool?
+        if let state = tailscale.value {
+            if case .running = state { tailscaleConnected = true } else { tailscaleConnected = false }
+        }
+        return SetupSummary(firmwareUpToDate: firmwareUpToDate, tailscaleConnected: tailscaleConnected, passwordSet: password.value)
+    }
+
+    private func record() {
+        controller?.recordSetup(summary)
     }
 
     private func checkFirmware(ssh: Bool) async {
@@ -81,6 +101,7 @@ final class JetKVMSetupModel: ObservableObject {
             tailscale.error = nil
             if case .running(let name) = state {
                 controller?.addAddress(name)
+                record()
             }
         } catch {
             tailscale.error = Self.describe(error)
@@ -293,6 +314,7 @@ final class JetKVMSetupModel: ObservableObject {
                 controller.onPasswordAccepted?(controller, newPassword)
                 password.progress = nil
                 password.value = true
+                record()
             } catch {
                 password.progress = nil
                 password.error = Self.describe(error)
