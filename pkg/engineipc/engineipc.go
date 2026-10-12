@@ -79,7 +79,8 @@ type Command struct {
 	// cancelPaste, releaseAll, ping, requestKeyframe, serialSend,
 	// setExtension (Text), setSerialSettings (Params:
 	// session.SerialSettings), upload, cancelUpload, setAutoQuality
-	// (AutoQuality), setQualityLevel (QualityLevel).
+	// (AutoQuality), setQualityLevel (QualityLevel), setVideoPaused
+	// (Paused).
 	Cmd      string `json:"cmd"`
 	BaseURL  string `json:"baseURL,omitempty"`
 	Password string `json:"password,omitempty"`
@@ -100,6 +101,8 @@ type Command struct {
 	Path string `json:"path,omitempty"`
 	// Target is the ID of the upload command to cancel (cancelUpload).
 	Target int64 `json:"target,omitempty"`
+	// Paused stops sending video while the app shows none (setVideoPaused).
+	Paused bool `json:"paused,omitempty"`
 }
 
 // Event is a JSON message from the engine. Type "snapshot" carries the

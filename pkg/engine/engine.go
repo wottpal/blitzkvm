@@ -50,6 +50,11 @@ type Engine struct {
 	video        chan []byte
 	needKeyframe atomic.Bool
 	droppedUnits atomic.Uint64
+	// videoPaused: the app shows no video (its window is hidden), so units
+	// are dropped here, without asking for keyframes. A hidden app may be
+	// throttled by the system; forwarding would fill the queue and turn
+	// every overflow into a keyframe request.
+	videoPaused atomic.Bool
 	// waitSince is when the current keyframe wait began (zero for the one
 	// at session start, which is expected and not logged).
 	waitMu    sync.Mutex
@@ -194,6 +199,9 @@ func (e *Engine) command(cmd engineipc.Command) error {
 			return nil
 		}
 		go e.withController(cmd, func(c *session.Controller) error { return c.SetSerialSettings(settings) })
+	case "setVideoPaused":
+		e.setVideoPaused(cmd.Paused)
+		e.reply(cmd.ID, nil, "")
 	case "setAutoQuality":
 		if c := e.controller(); c != nil {
 			c.SetAutoQuality(cmd.AutoQuality)
@@ -338,8 +346,23 @@ func (e *Engine) stopSession() {
 	}
 }
 
+// setVideoPaused stops or resumes sending video. Video resumes at a
+// keyframe, asked for at once.
+func (e *Engine) setVideoPaused(paused bool) {
+	if !paused && e.videoPaused.Load() {
+		e.needKeyframe.Store(true)
+		e.videoPaused.Store(false)
+		e.requestKeyframe()
+		return
+	}
+	e.videoPaused.Store(paused)
+}
+
 // onAccessUnit runs on the RTP goroutine: it must not block.
 func (e *Engine) onAccessUnit(au video.AccessUnit) {
+	if e.videoPaused.Load() {
+		return
+	}
 	if e.needKeyframe.Load() {
 		if !au.Keyframe {
 			e.droppedUnits.Add(1)

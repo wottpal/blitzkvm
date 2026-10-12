@@ -196,6 +196,52 @@ func TestEngineEndToEnd(t *testing.T) {
 	})
 }
 
+// A paused engine (the app's window is hidden) sends no video and asks for
+// no keyframes; resumed, it sends video again from a keyframe.
+func TestEngineVideoPause(t *testing.T) {
+	srv := startEmulator(t)
+	h := startEngine(t)
+	h.send(engineipc.Command{ID: 1, Cmd: "connect", BaseURL: strings.TrimPrefix(srv.BaseURL(), "http://"), Password: "pw"})
+	select {
+	case <-h.firstUnit:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no access unit received")
+	}
+	done := func(id int64) func(frame) bool {
+		return func(f frame) bool {
+			var res engineipc.CommandResult
+			return f.typ == engineipc.TypeCommandDone && json.Unmarshal(f.payload, &res) == nil && res.ID == id && res.Error == ""
+		}
+	}
+	h.send(engineipc.Command{ID: 2, Cmd: "setVideoPaused", Paused: true})
+	h.waitFor(5*time.Second, "pause ack", done(2))
+	time.Sleep(100 * time.Millisecond) // units already queued
+	for len(h.frames) > 0 {
+		<-h.frames
+	}
+	deadline := time.After(600 * time.Millisecond)
+	for paused := true; paused; {
+		select {
+		case f := <-h.frames:
+			if f.typ == engineipc.TypeAccessUnit {
+				t.Fatal("video sent while paused")
+			}
+		case <-deadline:
+			paused = false
+		}
+	}
+
+	h.send(engineipc.Command{ID: 3, Cmd: "setVideoPaused"})
+	au := h.waitFor(5*time.Second, "video after resuming", func(f frame) bool { return f.typ == engineipc.TypeAccessUnit })
+	hdr, _, err := engineipc.ParseAccessUnit(au.payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hdr.Flags&engineipc.FlagKeyframe == 0 {
+		t.Fatal("video must resume at a keyframe")
+	}
+}
+
 func TestNormalizeBaseURL(t *testing.T) {
 	for in, want := range map[string]string{
 		"jetkvm.local":              "http://jetkvm.local",
