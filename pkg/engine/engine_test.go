@@ -276,7 +276,48 @@ func TestEngineCreatePassword(t *testing.T) {
 	if res := h.waitDone(10*time.Second, 3); res.Error != "" {
 		t.Fatalf("reconnect with the new password: %s", res.Error)
 	}
-	h.waitForSnapshot(10*time.Second, "reconnected", func(snap map[string]any) bool { return snap["Phase"] == "connected" })
+	h.waitConnectedAgain()
+}
+
+// changePassword needs the current password; the engine then reconnects
+// with the new one.
+func TestEngineChangePassword(t *testing.T) {
+	srv := startEmulator(t)
+	h := startEngine(t)
+	h.connect(srv.BaseURL(), engineipc.Command{})
+
+	h.send(engineipc.Command{ID: 2, Cmd: "changePassword", OldPassword: "wrong one", Password: "correct horse"})
+	if res := h.waitDone(5*time.Second, 2); res.Error == "" {
+		t.Fatal("changePassword with a wrong current password succeeded")
+	}
+	h.send(engineipc.Command{ID: 3, Cmd: "changePassword", OldPassword: "pw", Password: "correct horse"})
+	if res := h.waitDone(5*time.Second, 3); res.Error != "" {
+		t.Fatalf("changePassword: %s", res.Error)
+	}
+	h.send(engineipc.Command{ID: 4, Cmd: "reconnect"})
+	if res := h.waitDone(10*time.Second, 4); res.Error != "" {
+		t.Fatalf("reconnect with the new password: %s", res.Error)
+	}
+	h.waitConnectedAgain()
+}
+
+// waitConnectedAgain waits until the session answers RPC after a
+// reconnect (its "connected" snapshot may have gone by already).
+func (h *harness) waitConnectedAgain() {
+	h.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for id := int64(100); time.Now().Before(deadline); id++ {
+		h.send(engineipc.Command{ID: id, Cmd: "rpc", Method: "getLocalVersion"})
+		var rpc engineipc.RPCResult
+		h.waitFor(5*time.Second, "rpc result", func(f frame) bool {
+			return f.typ == engineipc.TypeRPCResult && json.Unmarshal(f.payload, &rpc) == nil && rpc.ID == id
+		})
+		if rpc.Error == "" {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	h.t.Fatal("the session didn't answer after reconnecting")
 }
 
 func TestNormalizeBaseURL(t *testing.T) {

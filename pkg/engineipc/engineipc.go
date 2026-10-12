@@ -81,11 +81,13 @@ type Command struct {
 	// session.SerialSettings), upload, cancelUpload, setAutoQuality
 	// (AutoQuality), setQualityLevel (QualityLevel), setVideoPaused
 	// (Paused), createPassword (Password: sets the device's first password
-	// and uses it from then on).
+	// and uses it from then on), changePassword (OldPassword, Password).
 	Cmd      string `json:"cmd"`
 	BaseURL  string `json:"baseURL,omitempty"`
 	Password string `json:"password,omitempty"`
-	DeviceID string `json:"deviceID,omitempty"`
+	// OldPassword is the current password (changePassword).
+	OldPassword string `json:"oldPassword,omitempty"`
+	DeviceID    string `json:"deviceID,omitempty"`
 	// CertSHA256 pins an https device's certificate authority (connect).
 	CertSHA256 string `json:"certSHA256,omitempty"`
 	OfferH265  bool   `json:"offerH265,omitempty"`
