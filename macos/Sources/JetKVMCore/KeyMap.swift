@@ -122,3 +122,34 @@ public enum ModifierProfile: String, CaseIterable {
         }
     }
 }
+
+/// A quick double press of ⌘ alone (⌘ ⌘): hands the keyboard to the remote
+/// without a click. Any other key or modifier in between cancels it, so
+/// shortcuts (⌘C, ⌘Tab) never count.
+public struct DoubleCommandPress {
+    /// The longest gap between the two presses.
+    public var interval: TimeInterval = 0.4
+    private var firstPress: TimeInterval?
+
+    public init() {}
+
+    /// A modifier change; true when it completes the double press.
+    public mutating func flagsChanged(commandDown: Bool, othersDown: Bool, at time: TimeInterval) -> Bool {
+        guard !othersDown else {
+            firstPress = nil
+            return false
+        }
+        guard commandDown else { return false } // a release: keep waiting
+        if let first = firstPress, time - first <= interval {
+            firstPress = nil
+            return true
+        }
+        firstPress = time
+        return false
+    }
+
+    /// Any other key cancels it.
+    public mutating func keyPressed() {
+        firstPress = nil
+    }
+}

@@ -19,8 +19,14 @@ final class StallOverlay: NSView {
 
     enum Action: Equatable {
         case wake
+        case reconnect
 
-        var title: String { "Wake Computer" }
+        var title: String {
+            switch self {
+            case .wake: return "Wake Computer"
+            case .reconnect: return "Reconnect"
+            }
+        }
     }
 
     private(set) var content: Content?

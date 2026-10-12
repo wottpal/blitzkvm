@@ -28,6 +28,8 @@ final class SelfTest {
     private var overlayEvents: [(Double, String?)] = []
     private var resumedAfterShowMs: Double?
     private var inputInjected = false
+    /// ⌘ pressed twice captured the keyboard (with --inject-input).
+    private var doubleCommandCaptured = false
     /// Also exercises virtual media, the serial console and address probing
     /// through the app's models and windows.
     var exerciseExtras = false
@@ -65,7 +67,7 @@ final class SelfTest {
         self.seconds = seconds
         self.crashEngineAfter = crashEngineAfter
         self.snapshotPath = snapshotPath
-        controller.capturesOnFocus = false // only inject() sends input
+        controller.capturesOnRequest = false // only inject() sends input
         // Hidden windows stop decoding: stay above other apps' windows.
         controller.window?.level = .floating
         controller.onFrameDecoded = { [weak self] buffer, header in self?.frameDecoded(buffer, header) }
@@ -153,12 +155,21 @@ final class SelfTest {
     private func inject() {
         guard let controller, let window = controller.window else { return }
         let view = controller.videoView!
-        controller.input.setCaptured(true)
         func key(_ type: NSEvent.EventType, code: UInt16, chars: String, flags: NSEvent.ModifierFlags = []) -> NSEvent? {
             NSEvent.keyEvent(with: type, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
                              windowNumber: window.windowNumber, context: nil, characters: chars, charactersIgnoringModifiers: chars,
                              isARepeat: false, keyCode: code)
         }
+        // ⌘ pressed twice captures the keyboard (focus alone doesn't).
+        let wasCaptured = controller.input.captured
+        controller.capturesOnRequest = true
+        let commandDown = NSEvent.ModifierFlags(rawValue: NSEvent.ModifierFlags.command.rawValue | 0x8)
+        for flags in [commandDown, [], commandDown, []] {
+            if let e = key(.flagsChanged, code: 0x37, chars: "", flags: flags) { view.flagsChanged(with: e) }
+        }
+        doubleCommandCaptured = !wasCaptured && controller.input.captured
+        controller.capturesOnRequest = false
+        controller.input.setCaptured(true)
         let shiftDown = NSEvent.ModifierFlags(rawValue: NSEvent.ModifierFlags.shift.rawValue | 0x2)
         if let e = key(.keyDown, code: 0x00, chars: "a") { view.keyDown(with: e) }
         if let e = key(.keyUp, code: 0x00, chars: "a") { view.keyUp(with: e) }
@@ -430,7 +441,10 @@ final class SelfTest {
             report["latencySamples"] = latencies.count
         }
         if crashEngineAfter != nil { report["framesAfterEngineCrash"] = afterCrash }
-        if injectInput { report["inputInjected"] = inputInjected }
+        if injectInput {
+            report["inputInjected"] = inputInjected
+            report["doubleCommandCaptured"] = doubleCommandCaptured
+        }
         if exerciseExtras {
             report["extras"] = extras
             report["extrasOK"] = extrasOK
@@ -454,6 +468,7 @@ final class SelfTest {
         var ok = decoded > 0 && controller.videoView.presentedFrames > 0
         if crashEngineAfter != nil { ok = ok && afterCrash > 0 && !restarts.isEmpty }
         if exerciseExtras { ok = ok && extrasOK }
+        if injectInput { ok = ok && doubleCommandCaptured }
         if setupAction != nil { ok = ok && setupOK }
         if let maxFreezeMs {
             // Hidden time says nothing about freezes; too much makes the run

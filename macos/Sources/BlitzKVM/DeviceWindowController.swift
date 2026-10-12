@@ -19,6 +19,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private var statusBarHeightConstraint: NSLayoutConstraint!
     private let viewControl = NSPopUpButton(frame: .zero, pullsDown: false)
     private var keyboardHintShown = false
+    private var captureHintShown = false
     private(set) var snapshot = SessionSnapshot(Phase: "idle", Status: "starting")
     private(set) var lastStats: [String: Any] = [:]
     // Video watchdog (main thread): received, decoded and presented counts
@@ -389,7 +390,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         hud.translatesAutoresizingMaskIntoConstraints = false
         stallOverlay.translatesAutoresizingMaskIntoConstraints = false
         stallOverlay.onAction = { [weak self] action in
-            if action == .wake { self?.wakeComputer() }
+            switch action {
+            case .wake: self?.wakeComputer()
+            case .reconnect: self?.reconnect()
+            }
         }
         let container = NSView(frame: window.contentLayoutRect)
         view.translatesAutoresizingMaskIntoConstraints = false
@@ -910,7 +914,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             parts.append("input \(captured) (⌃⌘ releases)")
             if input.secureInputActive { parts.append("⚠︎ Secure Input is on: system shortcuts stay local") }
         } else {
-            parts.append("input released (click the screen to capture)")
+            parts.append("input released (click or press ⌘ twice to capture)")
         }
         if let extra { parts.append(extra) }
         statusLabel.stringValue = parts.joined(separator: "  ·  ")
@@ -918,13 +922,22 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     // MARK: NSWindowDelegate
 
-    /// Focus (and a click) captures keyboard and pointer. Self-tests turn
-    /// this off: the operator's own input must never reach the remote.
-    var capturesOnFocus = true
+    /// A click on the remote screen or ⌘ pressed twice captures the
+    /// keyboard; focus alone doesn't, so ⌘Tab passes through. Self-tests
+    /// turn this off: the operator's own input must never reach the remote.
+    var capturesOnRequest = true
 
     func windowDidBecomeKey(_ notification: Notification) {
         window?.makeFirstResponder(videoView)
-        if capturesOnFocus { input.setCaptured(true) }
+        if !input.captured && !captureHintShown && capturesOnRequest && !input.viewOnly {
+            captureHintShown = true
+            showCaptureHint()
+        }
+    }
+
+    /// How to hand the keyboard to the remote.
+    func showCaptureHint() {
+        hud.show("Click the screen or press ⌘ twice to control \(device.name)", for: 2.5)
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -1016,8 +1029,15 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
                          symbol: "arrow.triangle.2.circlepath")
         case "rebooting":
             return .init(title: "\(name) is restarting…", detail: "The picture comes back once it is up again.", symbol: "restart")
+        case "other_session":
+            // The app steps back instead of taking the device back at once.
+            return .init(title: "\(name) is in use elsewhere", detail: "The JetKVM web page or another app connected to it.",
+                         symbol: "person.2.fill", busy: false, action: .reconnect)
+        case "auth_failed" where snapshot.Status.contains("locked"):
+            return .init(title: "Too many wrong passwords", detail: snapshot.Status.prefix(1).uppercased() + snapshot.Status.dropFirst(),
+                         symbol: "lock.fill", busy: false)
         default:
-            return nil // needs the user: the status bar and alerts explain
+            return nil // a password prompt or an alert explains
         }
         // Connected: frames keep coming even from a still screen, so a gap
         // in what reaches the view is a stall.
@@ -1034,13 +1054,18 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
                          detail: "HDMI: \(signal.replacingOccurrences(of: "_", with: " ")). It may be asleep or switched off.",
                          symbol: "display.trianglebadge.exclamationmark", busy: false, action: input.viewOnly ? nil : .wake)
         }
-        if pictureAt < connectedAt {
-            return .init(title: "Starting video…", detail: "Connected to \(name).", symbol: "play.display")
-        }
+        // A sleeping display can keep the HDMI signal up and send no
+        // picture: after a few seconds, offer to wake it.
         let seconds = Int(Double(now - lastPicture) / 1e9)
+        let wake: StallOverlay.Action? = seconds >= 5 && !input.viewOnly ? .wake : nil
+        if pictureAt < connectedAt {
+            return .init(title: "Starting video…",
+                         detail: wake == nil ? "Connected to \(name)." : "Connected, but no picture yet. The computer may be asleep.",
+                         symbol: "play.display", action: wake)
+        }
         return .init(title: "Waiting for video…",
                      detail: seconds < 2 ? "Connected, but the picture has paused." : "Connected, but no new picture for \(seconds) s.",
-                     symbol: "hourglass")
+                     symbol: "hourglass", action: wake)
     }
 
     /// In full screen the menu bar (and with it the window's title bar and
@@ -1119,7 +1144,7 @@ final class CaptureVideoView: VideoView {
 
     override func mouseDown(with event: NSEvent) {
         guard let controller else { return }
-        if !controller.input.captured && controller.capturesOnFocus {
+        if !controller.input.captured && controller.capturesOnRequest {
             controller.input.setCaptured(true)
         }
         routeMouse(event)
@@ -1137,7 +1162,15 @@ final class CaptureVideoView: VideoView {
     override func scrollWheel(with event: NSEvent) { controller?.input.scroll(event) }
 
     override func keyDown(with event: NSEvent) {
-        if controller?.input.handle(event) != true { super.keyDown(with: event) }
+        guard let controller else { return super.keyDown(with: event) }
+        if controller.input.handle(event) { return }
+        // Typing without capture: say how, instead of a beep.
+        _ = controller.input.captureGesture(event)
+        if controller.capturesOnRequest && !controller.input.viewOnly {
+            controller.showCaptureHint()
+        } else {
+            super.keyDown(with: event)
+        }
     }
 
     override func keyUp(with event: NSEvent) {
@@ -1145,7 +1178,10 @@ final class CaptureVideoView: VideoView {
     }
 
     override func flagsChanged(with event: NSEvent) {
-        if controller?.input.handle(event) != true { super.flagsChanged(with: event) }
+        guard let controller else { return super.flagsChanged(with: event) }
+        if controller.input.handle(event) { return }
+        if controller.capturesOnRequest && controller.input.captureGesture(event) { return }
+        super.flagsChanged(with: event)
     }
 
     /// ⌘-shortcuts reach this before the menu bar: while captured they go to

@@ -554,3 +554,24 @@ final class JetKVMSetupTests: XCTestCase {
         XCTAssertEqual(device.addresses, ["192.168.1.40", "mac-mini-jetkvm.example.ts.net"])
     }
 }
+
+final class DoubleCommandPressTests: XCTestCase {
+    func testDoublePress() {
+        var press = DoubleCommandPress()
+        XCTAssertFalse(press.flagsChanged(commandDown: true, othersDown: false, at: 0))
+        XCTAssertFalse(press.flagsChanged(commandDown: false, othersDown: false, at: 0.08))
+        XCTAssertTrue(press.flagsChanged(commandDown: true, othersDown: false, at: 0.25))
+        // A third press starts over.
+        XCTAssertFalse(press.flagsChanged(commandDown: true, othersDown: false, at: 0.3))
+    }
+
+    func testTooSlowOrInterrupted() {
+        var press = DoubleCommandPress()
+        _ = press.flagsChanged(commandDown: true, othersDown: false, at: 0)
+        XCTAssertFalse(press.flagsChanged(commandDown: true, othersDown: false, at: 0.6), "too slow")
+        press.keyPressed() // ⌘Tab
+        XCTAssertFalse(press.flagsChanged(commandDown: true, othersDown: false, at: 0.7))
+        XCTAssertFalse(press.flagsChanged(commandDown: true, othersDown: true, at: 0.8), "⌘⇧ is a shortcut")
+        XCTAssertFalse(press.flagsChanged(commandDown: true, othersDown: false, at: 0.9))
+    }
+}

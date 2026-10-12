@@ -4,7 +4,9 @@ import JetKVMCore
 
 /// Translates local keyboard, mouse and scroll input into engine frames.
 ///
-/// Keyboard capture (on while the device window is key, toggled with ⌃⌘):
+/// Keyboard capture (a click on the remote screen or ⌘ pressed twice turns it
+/// on, ⌃⌘ or leaving the window turns it off; focus alone never captures, so
+/// ⌘Tab passes through):
 /// every key, including ⌘-shortcuts that would otherwise hit this app's menus,
 /// goes to the remote. With Accessibility permission an event tap also takes
 /// system shortcuts (⌘Tab, ⌘Space, Mission Control) and other apps' global
@@ -27,6 +29,7 @@ final class InputController {
     private var tapSource: CFRunLoopSource?
     private let isISO: Bool
     private var chordArmed = false
+    private var doubleCommand = DoubleCommandPress()
 
     init() {
         isISO = KBGetLayoutType(Int16(LMGetKbdType())) == kKeyboardISO
@@ -134,6 +137,23 @@ final class InputController {
             return Unmanaged.passUnretained(event)
         }
         return nil // swallowed: the Mac never sees captured keys
+    }
+
+    /// While not captured: ⌘ pressed twice quickly (nothing else between)
+    /// captures. True when it did.
+    func captureGesture(_ event: NSEvent) -> Bool {
+        guard !captured else { return false }
+        if event.type != .flagsChanged {
+            doubleCommand.keyPressed()
+            return false
+        }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let commandKey = event.keyCode == UInt16(kVK_Command) || event.keyCode == UInt16(kVK_RightCommand)
+        let others = flags.subtracting([.command, .capsLock, .numericPad, .function])
+        guard doubleCommand.flagsChanged(commandDown: commandKey && flags.contains(.command), othersDown: !others.isEmpty,
+                                         at: event.timestamp) else { return false }
+        setCaptured(true)
+        return captured
     }
 
     // MARK: Keyboard (NSEvent path, used when no event tap is active)
