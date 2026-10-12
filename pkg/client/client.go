@@ -170,6 +170,8 @@ type Client struct {
 
 	hidReady     chan struct{}
 	hidReadyOnce sync.Once
+	// hidWheel: the firmware takes wheel reports over HID-RPC.
+	hidWheel     atomic.Bool
 	rpcReady     chan struct{}
 	rpcReadyOnce sync.Once
 	// identityVerified is set once ExpectedDeviceID has been confirmed.
@@ -1078,10 +1080,13 @@ func (c *Client) ReleasePointerButtons() error {
 	return errors.Join(errs...)
 }
 
-// SendWheel sends a wheel report. JetKVM has no HID-RPC wheel path, so this is
-// a JSON-RPC call; it is fire-and-forget to keep scrolling responsive, and
-// reports are sent in order from the caller's goroutine.
+// SendWheel sends a wheel report: over HID-RPC where the firmware takes it
+// (in order with pointer reports, no JSON on the device's single core),
+// otherwise as a fire-and-forget JSON-RPC call.
 func (c *Client) SendWheel(wheelY, wheelX int8) error {
+	if c.hidWheel.Load() {
+		return c.sendHID(c.ch.Load().hid, hidrpc.Wheel{Y: wheelY, X: wheelX})
+	}
 	rpc := c.ch.Load().rpc
 	if rpc == nil {
 		return fmt.Errorf("rpc data channel not ready")
@@ -1272,6 +1277,7 @@ func (c *Client) openDataChannels(pc *webrtc.PeerConnection) error {
 					c.pointerMu.Unlock()
 					close(c.hidReady)
 					c.emitLifecycle(LifecycleEvent{Type: "hid_ready"})
+					go c.probeFirmwareFeatures()
 				})
 			}
 		case hidrpc.KeyboardMacroState:
@@ -1596,4 +1602,20 @@ func (c *Client) writeSignal(msg any) error {
 	}
 	_ = c.signalConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	return c.signalConn.WriteJSON(msg)
+}
+
+// probeFirmwareFeatures asks which protocol additions the firmware has (the
+// fork's getFirmwareFeatures; stock firmware has no such method).
+func (c *Client) probeFirmwareFeatures() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var features []string
+	if err := c.Call(ctx, "getFirmwareFeatures", nil, &features); err != nil {
+		return
+	}
+	for _, f := range features {
+		if f == "hidrpcWheel" {
+			c.hidWheel.Store(true)
+		}
+	}
 }

@@ -12,7 +12,7 @@ func TestRoundTrip(t *testing.T) {
 		KeyboardReport{Modifier: 2, Keys: []byte{4, 5}},
 		Pointer{X: 100, Y: 200, Buttons: 1},
 		Mouse{DX: -2, DY: 4, Buttons: 1},
-		Wheel{Delta: -1},
+		Wheel{Y: -1, X: 1},
 		KeyboardLEDState{Mask: 3},
 		KeysDownState{Modifier: 2, Keys: []byte{4, 0, 0}},
 		KeypressKeepAlive{},

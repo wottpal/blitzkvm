@@ -95,13 +95,16 @@ func (m Mouse) MarshalBinary() ([]byte, error) {
 	return []byte{TypeMouseReport, byte(m.DX), byte(m.DY), m.Buttons}, nil
 }
 
+// Wheel is a wheel step, vertical then horizontal. Only the fork firmware
+// handles it (getFirmwareFeatures lists "hidrpcWheel"); stock firmware takes
+// wheel steps over JSON-RPC.
 type Wheel struct {
-	Delta int8
+	Y, X int8
 }
 
 func (m Wheel) Type() byte { return TypeWheelReport }
 func (m Wheel) MarshalBinary() ([]byte, error) {
-	return []byte{TypeWheelReport, byte(m.Delta)}, nil
+	return []byte{TypeWheelReport, byte(m.Y), byte(m.X)}, nil
 }
 
 type KeyboardMacroStep struct {
@@ -250,10 +253,10 @@ func Decode(data []byte) (Message, error) {
 		}
 		return CancelKeyboardMacro{}, nil
 	case TypeWheelReport:
-		if len(data) != 2 {
+		if len(data) != 3 {
 			return nil, fmt.Errorf("wheel length %d", len(data))
 		}
-		return Wheel{Delta: int8(data[1])}, nil
+		return Wheel{Y: int8(data[1]), X: int8(data[2])}, nil
 	case TypeKeyboardLEDState:
 		if len(data) != 2 {
 			return nil, fmt.Errorf("keyboard LED length %d", len(data))
