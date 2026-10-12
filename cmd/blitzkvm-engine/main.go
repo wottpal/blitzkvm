@@ -1,4 +1,4 @@
-// Command jetkvm-engine is the helper process of the native macOS app: one
+// Command blitzkvm-engine is the helper process of the native macOS app: one
 // instance per device session, speaking pkg/engineipc on stdin/stdout. Logs
 // and crash output go to stderr, which the app writes to its log file.
 package main
@@ -11,8 +11,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/engine"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
+	"github.com/wottpal/blitzkvm/pkg/engine"
+	"github.com/wottpal/blitzkvm/pkg/logging"
 )
 
 func main() {
@@ -30,7 +30,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := engine.Run(ctx, os.Stdin, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "jetkvm-engine:", err)
+		fmt.Fprintln(os.Stderr, "blitzkvm-engine:", err)
 		os.Exit(1)
 	}
 }

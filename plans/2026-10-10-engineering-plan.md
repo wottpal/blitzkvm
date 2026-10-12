@@ -1,10 +1,10 @@
-# jetkvm-desktop: Engineering Plan (v2, revised after independent review)
+# BlitzKVM: Engineering Plan (v2, revised after independent review)
 
 | | |
 |---|---|
 | Date | 2026-10-10 (v1), revised 2026-10-10 (v2) |
 | Status | Approved direction. Implemented on branch `native-foundation`: Phases 0, 1a, 1b and 2 done, Phase 3 MVP done except settings UI (see §19). |
-| Repo | `wottpal/jetkvm-desktop` (private fork), base commit `289df51`, identical to `lkarlslund/jetkvm-desktop` `main` |
+| Repo | `wottpal/blitzkvm` (private fork), base commit `289df51`, identical to the origin repository's `main` (README) |
 | Target firmware | JetKVM app 0.5.9 / system 0.2.8 (live device `.107`). Upstream `jetkvm/kvm`: `dev` @ `8f6c300` (2026-10-05), `release/0.5.9` @ `36c008f`. **Note:** upstream develops on `dev`; `main` is frozen at 0.4.8. |
 | Method | v1: five parallel deep-dives (video pipeline, UI architecture, protocol and session, build/CI/dependencies, product landscape), then a re-check of key claims against code. v2: independent adversarial review with three parallel reviewers plus a PM interview, then each review finding re-checked against the code before being accepted (§16). |
 
@@ -36,7 +36,7 @@
 1. **Phase 0, housekeeping.** Fork CI, dependency refresh to zero known vulnerabilities, file logging and crash output.
 2. **Phase 1a, emulator parity.** Make the in-repo emulator behave like firmware 0.5.9, so every engine fix can be tested without risking the live device.
 3. **Phase 1b, engine.** Restructure the session lifecycle so one goroutine owns all connection state, then fix the bugs in §3.1/§3.2/§4.1.
-4. **Phase 2, native spike.** Swift/AppKit app (`xyz.scio.jetkvm-mac`, arm64), with the Go engine as a **helper process, one per device**. VideoToolbox decode (H.264 + H.265), Metal presentation, NSEvent input, an event-tap proof, helper crash recovery. This is de-risking, not a bake-off.
+4. **Phase 2, native spike.** Swift/AppKit app (`xyz.scio.blitzkvm`, arm64), with the Go engine as a **helper process, one per device**. VideoToolbox decode (H.264 + H.265), Metal presentation, NSEvent input, an event-tap proof, helper crash recovery. This is de-risking, not a bake-off.
 5. **Phase 3, native MVP.** The app that can replace Jump.
 6. **Phase 4, full settings parity and extras.** Full parity is about **4–6 months from start**.
 
@@ -97,7 +97,7 @@
 
 **Layers**
 ```
-cmd/jetkvm-desktop ── pkg/app (Ebiten Game: Update/Draw/Layout, 130-field App, 187 methods)
+cmd/blitzkvm-legacy ── pkg/app (Ebiten Game: Update/Draw/Layout, 130-field App, 187 methods)
                         │  polls ctrl.Snapshot() ~7×/frame, LatestFrameInfo() per frame
                      pkg/session.Controller (phase machine, reconnect, ~60 get/set wrappers, own copies of types)
                         │
@@ -303,17 +303,17 @@ Its UI layer is also the least healthy code. The Go engine, by contrast, is smal
 
 ### 5.2 Overview
 ```
-┌─────────────── JetKVM.app (Swift, AppKit + SwiftUI), bundle xyz.scio.jetkvm-mac, arm64 ───────────────┐
+┌─────────────── JetKVM.app (Swift, AppKit + SwiftUI), bundle xyz.scio.blitzkvm, arm64 ───────────────┐
 │ DeviceLibrary (saved devices, Keychain)       one NSWindow per device (native tabbing)                 │
 │ VideoView: VTDecompressionSession (H.264/H.265) → CVPixelBuffer → Metal (CVMetalTextureCache,          │
 │            YCbCr→RGB from buffer colour attachments, fit/1:1/integer, present on arrival)              │
 │            keeps last CVPixelBuffer → OCR (Vision), screenshots                                        │
 │ InputCapture: NSEvent (timestamped), CGEventTap while focused (+escape chord, Secure Input detection)  │
-│ EngineProcess: spawn/monitor/restart Contents/Helpers/jetkvm-engine, framed messages over stdio pipes  │
+│ EngineProcess: spawn/monitor/restart Contents/Helpers/blitzkvm-engine, framed messages over stdio pipes  │
 └───────────────▲──────────────────────────────── stdin/stdout, length-prefixed ─────────────────────────┘
                 │ out: video access units (Annex-B, codec, ts) │ events/snapshots (JSON) │ rpc results
                 │ in : key/pointer/wheel/paste commands │ rpc calls (method + params JSON) │ connect/close
-┌───────────────┴──────────── jetkvm-engine (Go, one process per device) ───────────────────────────────┐
+┌───────────────┴──────────── blitzkvm-engine (Go, one process per device) ───────────────────────────────┐
 │ session.Controller: one goroutine owns lifecycle (connect deadline, jittered backoff, close off-lock)  │
 │ client: signaling (WS), pion PC with explicit MediaEngine (H.264 [+H.265 when the shell can decode]),  │
 │         NACK interceptors, data channels (rpc, hidrpc reliable/unreliable), per-channel close          │
@@ -368,7 +368,7 @@ Runs in parallel with Phases 0/1. It gates Phase 2's pass criteria, not Phase 1.
 |---|---|
 | H1/H2 | Upstream workflows disabled; `upstream` fetch-only. **Done.** |
 | H3 | Fork CI `fork-check.yml`: `workflow_dispatch` + PR only (no push trigger; macOS minutes bill 10× on private repos). One `macos-15` job: vet, generate drift, `go test -race -p 1`, timing-sensitive tests without `-race`, vendored OpenH264 tests, govulncheck, Swift tests. *(Implemented without staticcheck, which cannot read go1.27 export data yet; actionlint is run locally.)* |
-| H5 | File logging (`~/Library/Logs/jetkvm-desktop/` when not on a TTY) + `debug.SetCrashOutput` |
+| H5 | File logging (`~/Library/Logs/BlitzKVM/` when not on a TTY) + `debug.SetCrashOutput` |
 | E17 | Dependency refresh to govulncheck = 0 (§8); enumer 1.7.2 + regenerate |
 
 ### Phase 1a: Emulator parity (1–2 weeks)
@@ -433,9 +433,9 @@ The Ebiten app keeps compiling as a manual test client; no polish.
 ### Phase 2: Native spike (1–2 weeks; de-risking)
 
 **Scope**
-- SwiftPM-based macOS app (`macos/`), bundled into a `.app` by script, arm64 only, bundle `xyz.scio.jetkvm-mac`.
+- SwiftPM-based macOS app (`macos/`), bundled into a `.app` by script, arm64 only, bundle `xyz.scio.blitzkvm`.
 - Developer ID signing once team details exist; ad-hoc signing for local builds until then.
-- `cmd/jetkvm-engine` helper over stdio.
+- `cmd/blitzkvm-engine` helper over stdio.
 - VTDecompressionSession (H.264 + H.265) → Metal (`CAMetalLayer`, `CVMetalTextureCache`, runtime-compiled shader, colour matrix from buffer attachments, present on arrival).
 - NSEvent keyboard/mouse/scroll.
 - CGEventTap proof (⌘Tab/⌘Space to the remote, escape chord, Secure Input detection).
@@ -686,9 +686,9 @@ The independent review (`plans/2026-10-10-engineering-plan-review.md`, merged in
 
 | Date | Decision |
 |---|---|
-| 2026-10-10 | Private fork `wottpal/jetkvm-desktop`; `upstream` fetch-only; upstream workflows disabled |
+| 2026-10-10 | Private fork `wottpal/blitzkvm`; `upstream` fetch-only; upstream workflows disabled |
 | 2026-10-10 | Goal: fully replace Jump Desktop for the PM plus a few people; no deadline; macOS client only |
-| 2026-10-10 | Bundle ID `xyz.scio.jetkvm-mac`; paid Apple Developer account; Developer ID signing |
+| 2026-10-10 | Bundle ID `xyz.scio.blitzkvm`; paid Apple Developer account; Developer ID signing |
 | 2026-10-10 | No JetKVM Cloud; self-hosted VPN only; Tailscale is the reference |
 | 2026-10-10 | Retire the Ebiten app once native ships; no interim polish |
 | 2026-10-10 | System shortcuts go to the remote while focused, with an escape chord |
@@ -709,13 +709,14 @@ The independent review (`plans/2026-10-10-engineering-plan-review.md`, merged in
 | 2026-10-10 | Notarize through the Xcode account (`xcodebuild` export with upload), not an app-specific password |
 | 2026-10-10 | HTTPS: pin the device CA the chain is signed up to, on first use; publicly trusted devices pin to public trust |
 | 2026-10-10 | Serial console is line-based (Return sends the line + device terminator), not a full terminal emulator |
+| 2026-10-12 | The app is **BlitzKVM**: bundle ID `xyz.scio.blitzkvm`, Go module and repository `github.com/wottpal/blitzkvm`, helper `blitzkvm-engine`, legacy client `blitzkvm-legacy`, app-side environment variables `BLITZKVM_*`. The device, its firmware and its protocol keep the JetKVM name. Settings, the device library, the Keychain service and the Accessibility and Local Network grants start fresh under the new bundle ID |
 
 ## 18. PM to-dos
 
 1. Connect `.107`'s HDMI to this Mac (Phase R). The Jump Desktop display may change.
 2. Install Tailscale manually on one JetKVM.
 3. Optional: buy JetRemote for the benchmark.
-4. Provide Developer ID team details for `xyz.scio.jetkvm-mac`.
+4. Provide Developer ID team details for `xyz.scio.blitzkvm`.
 
 ## 19. Implementation status (2026-10-10)
 
@@ -828,7 +829,7 @@ The PM's first real use found that the picture looked blurry and pixelated, the 
 
 ### Method
 - **Ground truth:** a known 1920×1080 test image (`tools/quality-bench/make_pattern.swift`) shown full screen at 1:1 in Chrome on the Mac mini's JetKVM display.
-- **Scoring:** frames recorded through `jetkvm-engine` are decoded and compared with the image.
+- **Scoring:** frames recorded through `blitzkvm-engine` are decoded and compared with the image.
   - Luma PSNR/SSIM is measured against the image's ideal luma, which isolates encoder loss from 4:2:0 chroma.
   - Text regions are scored separately.
   - Scrolling is scored per frame after finding its offset.
@@ -840,7 +841,7 @@ The PM's first real use found that the picture looked blurry and pixelated, the 
 | # | Finding | Evidence | Fix |
 |---|---|---|---|
 | Q1 | **Encoder QP floor and texture AQ blur text at any bitrate.** 0.5.9 never sets Rockchip RC parameters. The frame QP floor is about 26–28, and AQ adds up to +8 on textured blocks, so text sits at QP 32–36. | Macroblock QP dump; quality factor 1 → 4 changes neither keyframe size (~47 KB) nor QP | Firmware patch: QP floor tunable live (ladder 10–26), AQ off |
-| Q2 | **Wrong color matrix.** The TC358749 bridge outputs BT.601 limited-range YCbCr (the tc358743 driver hard-codes it), but the firmware tags HD streams BT.709. | Color patches fit BT.601 within 0.5 code values and BT.709 within 8 | The app decodes BT.601 always (`JETKVM_COLOR_MATRIX=709` overrides). Firmware VUI fix is still open. |
+| Q2 | **Wrong color matrix.** The TC358749 bridge outputs BT.601 limited-range YCbCr (the tc358743 driver hard-codes it), but the firmware tags HD streams BT.709. | Color patches fit BT.601 within 0.5 code values and BT.709 within 8 | The app decodes BT.601 always (`BLITZKVM_COLOR_MATRIX=709` overrides). Firmware VUI fix is still open. |
 | Q3 | **The app rendered at half size with bilinear filtering.** One remote pixel went to one physical pixel, and enlarging used plain bilinear. | App window captures | "Actual Size" = one remote pixel per point (window auto-sizes; pans when smaller). FSR 1 EASU+RCAS for enlarging, nearest optional, widened Catmull-Rom for shrinking. Correct chroma siting, sRGB-tagged layer, rendering on its own queue. |
 | Q4 | **The absolute mouse is invisible on an extended display.** macOS maps the absolute HID pointer onto its main display. The Mac mini's main display was the Dell U4021QW; the JetKVM was extended. | Absolute moves left the captured screen unchanged; relative moves showed the cursor | JetKVM made the Mac mini's main display (PM approved). One pointer mode only, by PM decision after trying two relative variants: the remote pointer goes exactly where the local one hovers (absolute HID), and the local pointer is hidden over the picture. |
 | Q5 | **Keyframes twice a second, and requests ignored.** GOP = fps/2 resends a ~47–90 KB keyframe every 0.5 s. PLI/FIR are ignored, and in this rockit build `RequestIDR(instant)` returns NOT_SUPPORT. | Stream capture; device log | Patch: 4 s GOP, plus a keyframe on session connect, PLI/FIR and a `requestKeyframe` RPC. The path is verified by watching for the IDR; this device uses non-instant `RequestIDR`. |
@@ -1091,7 +1092,7 @@ The reference is the test pattern drawn natively at 2× (`make_pattern.swift OUT
 | # | Finding | Consequence |
 |---|---|---|
 | L1 | With `displaySyncEnabled = true`, each present waits for our own vsync, and the second drawable stays held for a refresh, so `nextDrawable` blocks ~16 ms | Display sync off: decode → screen 52 → 18 ms (window), 48 → 7 ms (full screen) |
-| L2 | Without display sync, presents still land on vblank: present minus GPU-done jumps by whole refreshes (p90 +16/+33 ms) and never lands mid-scan; the window server keeps the newest frame | No tearing; it is the default now (`JETKVM_DISPLAY_SYNC=1` for A/B) |
+| L2 | Without display sync, presents still land on vblank: present minus GPU-done jumps by whole refreshes (p90 +16/+33 ms) and never lands mid-scan; the window server keeps the newest frame | No tearing; it is the default now (`BLITZKVM_DISPLAY_SYNC=1` for A/B) |
 | L3 | `render()` took the frame before the blocking `nextDrawable()` | Drawable first, then the frame |
 | L4 | The text upscaler re-ran on the whole picture on any change: 8.5 ms of GPU per changed frame (GPU clocks stay low at this load), FSR 4.2 ms | Per-tile change flags (16×16, plus one tile of border): bit-exact against a full run (GPU test), 4.6 ms for the probe's large change, little for typing |
 | L5 | A third drawable only queues: decode → screen 78 ms | Keep 2 |
@@ -1123,7 +1124,7 @@ Quality and frame rate are unchanged (same encoder settings; the upscaler's outp
 
 **Cause:** every data channel (HID, RPC, serial) shares one SCTP association. pion retransmits a lost packet after an RTO of at least 1 s that doubles on every miss, up to 60 s, and after a timeout the congestion window drops to one packet. So all data channels wait for the backed-off timer. RTP video is separate and recovers at once (NACK, PLI).
 
-**Reproduction:** `JETKVM_DEBUG_BLACKHOLE=20:3` drops all of the session's traffic for 3 s every 20 s; the harness sends a cheap RPC every 100 ms on the same association.
+**Reproduction:** `BLITZKVM_DEBUG_BLACKHOLE=20:3` drops all of the session's traffic for 3 s every 20 s; the harness sends a cheap RPC every 100 ms on the same association.
 
 | | Data channels back after the video |
 |---|---|
@@ -1188,7 +1189,7 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
 **Correction to §25:** the input-stall log raised false alarms.
 - It flagged any data that stayed unacknowledged across two one-second samples. pion delays SACKs by up to 200 ms, so continuous pointer input almost always has some.
 - On the emulator over loopback, 20 s of continuous pointer input logged a 9 s "stall".
-- Now a stall needs data waiting and no byte acknowledged for over a second. On the same run it logs nothing, and it still catches every 2 s blackhole outage (`JETKVM_DEBUG_BLACKHOLE=6:2`).
+- Now a stall needs data waiting and no byte acknowledged for over a second. On the same run it logs nothing, and it still catches every 2 s blackhole outage (`BLITZKVM_DEBUG_BLACKHOLE=6:2`).
 - Most `input data channels stalled` lines in the PM's log (2–6 s, 3–60 bytes, clustered while the pointer moved) were this artifact.
 
 **Open:** what caused the bursts on the PM's wired LAN is not proven. The likely candidates are scheduling hiccups on either end, for example a screen recorder running on the Mac, or the device's single core. The new logs name the cause of every wait.
@@ -1396,7 +1397,7 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
 - **Emulator:** `--tailscale running|none|needs-login`.
 
 **JetKVM Setup (the configurator).** Device › Set Up JetKVM…, or Set Up JetKVM… on a device in the gallery, which connects first. One sheet with three rows: state, then one action.
-- **Firmware:** stock (no `getVideoEncoderParams`), the JetKVM Desktop firmware with its build unverified, the bundled build, or an older one. The installed binary's SHA-256 over SSH tells builds apart, because fork builds keep upstream's `VERSION`.
+- **Firmware:** stock (no `getVideoEncoderParams`), the BlitzKVM firmware with its build unverified, the bundled build, or an older one. The installed binary's SHA-256 over SSH tells builds apart, because fork builds keep upstream's `VERSION`.
   - The app ships the build pinned by `macos/Support/Firmware.json`. `make firmware` checks `FORK_BINARY` against it and gzips it: 13 MB in the app.
   - Install: `gunzip` over SSH into `jetkvm_app.update.part`, compare SHA-256, back up the running app to `jetkvm_app.backup`, rename to `jetkvm_app.update`, `sync`, reboot. The device moves the file into place at boot, as for an OTA update, then the session reconnects.
 - **Tailscale:** not installed, needs login, stopped, or running (with its MagicDNS name).
@@ -1419,9 +1420,9 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
 - **Not verifiable here:** video, because the Mac mini's HDMI output was asleep (the bridge reported 0×0 timings and the capture delivered no frames, so the device restarted its encoder every 1.6 s).
 
 **Both firmware builds in the app (same day).**
-- **What ships:** the app carries the JetKVM Desktop build and JetKVM's own latest release (0.5.9; nothing newer upstream, not even on `dev` since 2026-10-05), so switching needs no download. `Support/Firmware.json` lists both, pinned by SHA-256 (`3b955de5…` for JetKVM 0.5.9, identical to the stock copy saved on the device).
+- **What ships:** the app carries the BlitzKVM build and JetKVM's own latest release (0.5.9; nothing newer upstream, not even on `dev` since 2026-10-05), so switching needs no download. `Support/Firmware.json` lists both, pinned by SHA-256 (`3b955de5…` for JetKVM 0.5.9, identical to the stock copy saved on the device).
 - **Build:** `make firmware` gzips each build (13 MB apiece). JetKVM's comes from its GitHub release once and is cached.
-- **Firmware row:** names the build by hash. Its button installs the JetKVM Desktop build, and a menu reinstalls either build or switches to JetKVM's own (a split button, or a menu beside the Up to Date badge).
+- **Firmware row:** names the build by hash. Its button installs the BlitzKVM build, and a menu reinstalls either build or switches to JetKVM's own (a split button, or a menu beside the Up to Date badge).
 - **Rows:** the state on one line, its meaning in a second paragraph.
 - **Verified on `.107`:**
   - The switch to JetKVM 0.5.9 worked through the app, including the restart.
@@ -1443,7 +1444,7 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
 
 - `jetkvm/kvm` (`dev` @ `8f6c300`, `release/0.5.9`): https://github.com/jetkvm/kvm. REMB revert: https://github.com/jetkvm/kvm/pull/1693
 - `jetkvm/cloud-api` @ `00eb00de`: https://github.com/jetkvm/cloud-api (context only; Cloud dropped)
-- Upstream client: https://github.com/lkarlslund/jetkvm-desktop
+- Upstream client: the origin repository (README)
 - Regi: https://github.com/mcuelenaere/regi
 - JetRemote: https://apps.apple.com/us/app/jetremote/id6778190897
 - Moonlight Metal/VideoToolbox renderer: https://github.com/moonlight-stream/moonlight-qt/blob/master/app/streaming/video/ffmpeg-renderers/vt_metal.mm

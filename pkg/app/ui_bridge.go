@@ -5,7 +5,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/ui"
+	"github.com/wottpal/blitzkvm/pkg/ui"
 )
 
 func (a *App) newUIContext(screen *ebiten.Image, runtime *ui.Runtime, register func(chromeButton)) *ui.Context {

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
+	"github.com/wottpal/blitzkvm/pkg/video/openh264"
 	"net/http"
 	"runtime"
 	"strings"
@@ -14,7 +14,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/client"
 )
 
 func TestHTTPBootstrapFlow(t *testing.T) {

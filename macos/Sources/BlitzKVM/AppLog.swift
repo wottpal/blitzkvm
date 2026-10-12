@@ -1,14 +1,14 @@
 import Foundation
 
 /// Appends diagnostics (including every engine helper's stderr) to
-/// ~/Library/Logs/jetkvm-desktop/app.log, next to the Go client's logs. The
+/// ~/Library/Logs/BlitzKVM/app.log, next to the Go client's logs. The
 /// file is rotated to app.log.1 when it passes 10 MB. When started from a
 /// terminal, lines are echoed to stderr too.
 enum AppLog {
     private static let maxSize = 10 << 20
     private static let queue = DispatchQueue(label: "jetkvm.applog", qos: .utility)
     private static let echo = isatty(STDERR_FILENO) == 1
-    private static let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/jetkvm-desktop")
+    private static let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/BlitzKVM")
     // Queue state.
     private static var fd: Int32 = -1
     private static var size = 0

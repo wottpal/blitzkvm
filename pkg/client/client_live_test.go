@@ -2,7 +2,7 @@ package client
 
 import (
 	"context"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
+	"github.com/wottpal/blitzkvm/pkg/video/openh264"
 	"os"
 	"sync"
 	"testing"

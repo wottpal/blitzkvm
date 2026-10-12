@@ -23,11 +23,11 @@ import (
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/jsonrpc"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/signaling"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
+	"github.com/wottpal/blitzkvm/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/logging"
+	"github.com/wottpal/blitzkvm/pkg/protocol/jsonrpc"
+	"github.com/wottpal/blitzkvm/pkg/protocol/signaling"
+	"github.com/wottpal/blitzkvm/pkg/virtualmedia"
 )
 
 type AuthMode string
@@ -367,7 +367,7 @@ func defaultDeviceState() DeviceState {
 		USBConfig: client.USBConfig{
 			VendorID:     "0xCafe",
 			ProductID:    "0x4000",
-			SerialNumber: "JETKVM-DESKTOP",
+			SerialNumber: "BLITZKVM-EMULATOR",
 			Manufacturer: "JetKVM",
 			Product:      "JetKVM Default",
 		},
@@ -1213,7 +1213,7 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 	preference := s.state.VideoCodec
 	s.mu.Unlock()
 	mimeType := resolveCodec(offer.SDP, preference)
-	videoTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: mimeType}, "video", "jetkvm-desktop-emulator")
+	videoTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: mimeType}, "video", "blitzkvm-emulator")
 	if err != nil {
 		cancel()
 		_ = pc.Close()

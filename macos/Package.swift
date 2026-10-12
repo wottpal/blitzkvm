@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "JetKVMDesktop",
+    name: "BlitzKVM",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "JetKVMDesktop", targets: ["JetKVMDesktop"]),
+        .executable(name: "BlitzKVM", targets: ["BlitzKVM"]),
     ],
     targets: [
         // Platform-independent logic (wire protocol, Annex-B handling, key
         // mapping, geometry); unit tested without a window server.
         .target(name: "JetKVMCore"),
         .executableTarget(
-            name: "JetKVMDesktop",
+            name: "BlitzKVM",
             dependencies: ["JetKVMCore"]
         ),
         .testTarget(name: "JetKVMCoreTests", dependencies: ["JetKVMCore"]),

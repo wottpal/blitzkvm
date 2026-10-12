@@ -3,7 +3,7 @@ package hotkeys
 import (
 	"testing"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/input"
+	"github.com/wottpal/blitzkvm/pkg/input"
 )
 
 func TestWindowManagerDisabledDoesNotConsumeKeys(t *testing.T) {

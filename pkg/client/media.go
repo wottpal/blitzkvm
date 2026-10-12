@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
+	"github.com/wottpal/blitzkvm/pkg/virtualmedia"
 )
 
 func (c *Client) UnmountMedia(ctx context.Context) error {

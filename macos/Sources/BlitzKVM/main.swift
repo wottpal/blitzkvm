@@ -3,7 +3,7 @@ import JetKVMCore
 
 /// AppKit drops keyUp events while ⌘ is held before they reach any view, so a
 /// remote key pressed with ⌘ would never be released. Forward them.
-final class JetKVMApplication: NSApplication {
+final class BlitzKVMApplication: NSApplication {
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyUp, event.modifierFlags.contains(.command) {
             keyWindow?.sendEvent(event)
@@ -258,7 +258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func open(_ device: Device, address: String, password: String?, reprobe: Bool = false) {
         guard let engineURL = EngineProcess.locateHelper() else {
-            fail("jetkvm-engine helper not found (set JETKVM_ENGINE or run `make app`)")
+            fail("blitzkvm-engine helper not found (set BLITZKVM_ENGINE or run `make app`)")
             return
         }
         let controller = DeviceWindowController(device: device, address: address, password: password, engineURL: engineURL)
@@ -410,9 +410,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Hide JetKVM Desktop", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "Hide BlitzKVM", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit JetKVM Desktop", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit BlitzKVM", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let appItem = NSMenuItem()
         appItem.submenu = appMenu
         main.addItem(appItem)
@@ -749,7 +749,7 @@ extension AppDelegate: NSMenuItemValidation {
 signal(SIGPIPE, SIG_IGN)
 
 let options = Options.parse(CommandLine.arguments)
-let app = JetKVMApplication.shared
+let app = BlitzKVMApplication.shared
 let delegate = AppDelegate(options: options)
 app.delegate = delegate
 app.setActivationPolicy(.regular)

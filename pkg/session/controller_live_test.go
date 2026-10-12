@@ -2,12 +2,12 @@ package session
 
 import (
 	"context"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
+	"github.com/wottpal/blitzkvm/pkg/video/openh264"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/client"
 )
 
 func TestLiveControllerConnectsAndForwardsSafeInput(t *testing.T) {

@@ -102,12 +102,12 @@ class VideoView: NSView {
     private var easuTexture: MTLTexture?
     /// RCAS strength in stops (0 = strongest). 0.5 sharpens text edges
     /// without a dark rim around light text on dark backgrounds.
-    /// JETKVM_RCAS_STOPS overrides it (A/B checks).
-    private static let rcasStops = Float(ProcessInfo.processInfo.environment["JETKVM_RCAS_STOPS"] ?? "") ?? 0.5
-    /// JETKVM_UPSCALER=fsr uses FSR at 2× too, =catmull enlarges with
+    /// BLITZKVM_RCAS_STOPS overrides it (A/B checks).
+    private static let rcasStops = Float(ProcessInfo.processInfo.environment["BLITZKVM_RCAS_STOPS"] ?? "") ?? 0.5
+    /// BLITZKVM_UPSCALER=fsr uses FSR at 2× too, =catmull enlarges with
     /// Catmull-Rom instead of FSR (A/B checks).
-    private static let fsrUpscaling = ProcessInfo.processInfo.environment["JETKVM_UPSCALER"] != "catmull"
-    private static let textUpscaling = fsrUpscaling && ProcessInfo.processInfo.environment["JETKVM_UPSCALER"] != "fsr"
+    private static let fsrUpscaling = ProcessInfo.processInfo.environment["BLITZKVM_UPSCALER"] != "catmull"
+    private static let textUpscaling = fsrUpscaling && ProcessInfo.processInfo.environment["BLITZKVM_UPSCALER"] != "fsr"
 
     private static let shaderSource = """
     #include <metal_stdlib>
@@ -416,8 +416,8 @@ class VideoView: NSView {
         // mid-scan). With display sync, each present waits for our own next
         // vsync and holds a drawable for a refresh. Measured from decode to
         // screen at 60 Hz: 52 -> 18 ms in a window, 48 -> 7 ms in full
-        // screen. JETKVM_DISPLAY_SYNC=1 turns it back on (A/B).
-        metalLayer.displaySyncEnabled = ProcessInfo.processInfo.environment["JETKVM_DISPLAY_SYNC"] == "1"
+        // screen. BLITZKVM_DISPLAY_SYNC=1 turns it back on (A/B).
+        metalLayer.displaySyncEnabled = ProcessInfo.processInfo.environment["BLITZKVM_DISPLAY_SYNC"] == "1"
         metalLayer.backgroundColor = NSColor.black.cgColor
         // The remote desktop's pixels are sRGB-encoded (the capture only
         // changes the matrix, not the transfer function). Tagging them sRGB
@@ -613,8 +613,8 @@ class VideoView: NSView {
         }
     }
 
-    /// JETKVM_GPU_TIMING=1 logs the average GPU time per rendered frame.
-    private static let gpuTiming = ProcessInfo.processInfo.environment["JETKVM_GPU_TIMING"] == "1"
+    /// BLITZKVM_GPU_TIMING=1 logs the average GPU time per rendered frame.
+    private static let gpuTiming = ProcessInfo.processInfo.environment["BLITZKVM_GPU_TIMING"] == "1"
     private let gpuTimes = Locked((total: 0.0, count: 0, upscaledTotal: 0.0, upscaledCount: 0, slowWindows: 0))
     /// Set when frames with the text upscaler take too long on this GPU.
     private let textUpscalerTooSlow = Locked(false)
@@ -959,8 +959,8 @@ class VideoView: NSView {
         var lumaBias: Float
     }
 
-    /// JETKVM_CHROMA=bicubic turns the luma-guided chroma off (A/B checks).
-    static let guidedChroma = ProcessInfo.processInfo.environment["JETKVM_CHROMA"] != "bicubic"
+    /// BLITZKVM_CHROMA=bicubic turns the luma-guided chroma off (A/B checks).
+    static let guidedChroma = ProcessInfo.processInfo.environment["BLITZKVM_CHROMA"] != "bicubic"
 
     struct ScaleParams {
         var origin: SIMD2<Float>
@@ -983,8 +983,8 @@ class VideoView: NSView {
     /// limited-range YCbCr, while firmware 0.5.9 tags HD streams as BT.709.
     /// Measured against a known test image on the live device, BT.601 fits
     /// within 0.5 code values and BT.709 is off by 8 (saturated colors
-    /// visibly wrong). JETKVM_COLOR_MATRIX=709 restores the declared matrix.
-    static let forceBT601 = ProcessInfo.processInfo.environment["JETKVM_COLOR_MATRIX"] != "709"
+    /// visibly wrong). BLITZKVM_COLOR_MATRIX=709 restores the declared matrix.
+    static let forceBT601 = ProcessInfo.processInfo.environment["BLITZKVM_COLOR_MATRIX"] != "709"
 
     static func colorParams(for buffer: CVPixelBuffer) -> ColorParams {
         let matrixKey = CVBufferCopyAttachment(buffer, kCVImageBufferYCbCrMatrixKey, nil) as? String

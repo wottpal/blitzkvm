@@ -60,7 +60,7 @@ The app works with stock firmware too: there it only uses the quality factor.
 
 ```bash
 git clone https://github.com/jetkvm/kvm && cd kvm && git checkout release/0.5.9
-git apply ../jetkvm-desktop/firmware/jetkvm-0.5.9-desktop-encoder.patch
+git apply ../blitzkvm/firmware/jetkvm-0.5.9-desktop-encoder.patch
 bash -c 'source scripts/build_utils.sh && build_docker_image'   # linux/amd64 buildkit image (Rosetta)
 (cd ui && nvm use) && make frontend                              # Node 22, embedded via go:embed
 make build_release VERSION=0.5.9                                 # bin/jetkvm_app, ARM uClibc

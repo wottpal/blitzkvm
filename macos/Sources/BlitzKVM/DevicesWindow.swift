@@ -544,7 +544,7 @@ private struct SetupBadge: View {
     private var help: String {
         guard let summary else { return "Check the firmware, password and Tailscale" }
         func state(_ value: Bool?, _ yes: String, _ no: String) -> String { value.map { $0 ? yes : no } ?? "not checked" }
-        return ["Firmware: " + state(summary.firmwareUpToDate, "up to date", "not JetKVM Desktop's latest"),
+        return ["Firmware: " + state(summary.firmwareUpToDate, "up to date", "not BlitzKVM's latest"),
                 "Password: " + state(summary.passwordSet, "set", "off"),
                 "Tailscale: " + state(summary.tailscaleConnected, "connected", "not set up")].joined(separator: "\n")
     }

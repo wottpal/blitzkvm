@@ -1,6 +1,6 @@
 # Build output
-/jetkvm-desktop
-/jetkvm-engine
+/blitzkvm-legacy
+/blitzkvm-engine
 /emulator-serve
 /bin/
 /macos/build/

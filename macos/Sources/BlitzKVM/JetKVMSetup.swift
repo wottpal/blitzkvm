@@ -21,11 +21,11 @@ final class JetKVMSetupModel: ObservableObject {
     @Published private(set) var tailscale = Row<TailscaleState>()
     /// Whether the device asks for a password.
     @Published private(set) var password = Row<Bool>()
-    /// The firmware builds this app ships, the recommended JetKVM Desktop
+    /// The firmware builds this app ships, the recommended BlitzKVM
     /// build first.
     let builds: [(build: FirmwareBuild, binary: URL)] = JetKVMSetupModel.bundledFirmware()
 
-    var recommended: FirmwareBuild? { builds.first { $0.build.kind == .desktop }?.build }
+    var recommended: FirmwareBuild? { builds.first { $0.build.kind == .blitzkvm }?.build }
 
     private weak var controller: DeviceWindowController?
     private var tailscaleWatch: Task<Void, Never>?
@@ -61,7 +61,7 @@ final class JetKVMSetupModel: ObservableObject {
         var firmwareUpToDate: Bool?
         switch firmware.value {
         case .bundled(let build)?: firmwareUpToDate = build == recommended
-        case .otherDesktop?, .stock?: firmwareUpToDate = false
+        case .otherBlitzKVM?, .stock?: firmwareUpToDate = false
         case .unverified?, nil: firmwareUpToDate = nil
         }
         var tailscaleConnected: Bool?
@@ -79,7 +79,7 @@ final class JetKVMSetupModel: ObservableObject {
         guard let engine = controller?.engine else { return }
         do {
             let version = try await engine.call("getLocalVersion", as: LocalVersion.self)
-            // Only the JetKVM Desktop firmware answers this.
+            // Only the BlitzKVM firmware answers this.
             let hasEncoderControl = (try? await engine.call("getVideoEncoderParams", as: JSONValue.self)) != nil
             var installed: String?
             if ssh, let shell {
@@ -121,7 +121,7 @@ final class JetKVMSetupModel: ObservableObject {
 
     // MARK: Firmware
 
-    /// Turns on SSH to tell which JetKVM Desktop build runs.
+    /// Turns on SSH to tell which BlitzKVM build runs.
     func verifyFirmware() {
         guard !firmware.isWorking else { return }
         Task {
@@ -435,7 +435,7 @@ struct JetKVMShell {
                                                     attributes: [.posixPermissions: 0o700])
             let keygen = Process()
             keygen.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
-            keygen.arguments = ["-q", "-t", "ed25519", "-N", "", "-C", "JetKVM Desktop (\(Host.current().localizedName ?? "Mac"))",
+            keygen.arguments = ["-q", "-t", "ed25519", "-N", "", "-C", "BlitzKVM (\(Host.current().localizedName ?? "Mac"))",
                                 "-f", privateKey.path]
             try keygen.run()
             keygen.waitUntilExit()

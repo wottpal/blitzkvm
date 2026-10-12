@@ -4,8 +4,8 @@ import Foundation
 /// next to it in the app's resources).
 public struct FirmwareBuild: Decodable, Equatable, Identifiable {
     public enum Kind: String, Decodable {
-        /// The JetKVM Desktop firmware (github.com/wottpal/kvm).
-        case desktop
+        /// The BlitzKVM firmware (github.com/wottpal/kvm).
+        case blitzkvm
         /// JetKVM's own release.
         case stock
     }
@@ -28,8 +28,8 @@ public struct FirmwareBuild: Decodable, Equatable, Identifiable {
     /// "0.5.9-fork.4"
     public var version: String { tag.hasPrefix("release/") ? String(tag.dropFirst(8)) : tag }
 
-    /// "JetKVM Desktop 0.5.9-fork.4", "JetKVM 0.5.9"
-    public var title: String { kind == .desktop ? "JetKVM Desktop \(version)" : "JetKVM \(version)" }
+    /// "BlitzKVM 0.5.9-fork.4", "JetKVM 0.5.9"
+    public var title: String { kind == .blitzkvm ? "BlitzKVM \(version)" : "JetKVM \(version)" }
 
     /// The gzipped binary's file name in the app's resources.
     public var fileName: String { tag.replacingOccurrences(of: "/", with: "-") + ".gz" }
@@ -45,16 +45,16 @@ public struct FirmwareBuild: Decodable, Equatable, Identifiable {
 public enum FirmwareState: Equatable {
     /// One of the builds this app ships.
     case bundled(FirmwareBuild)
-    /// A JetKVM Desktop build this app doesn't ship (an older one).
-    case otherDesktop
-    /// The JetKVM Desktop firmware; which build takes SSH to tell.
+    /// A BlitzKVM build this app doesn't ship (an older one).
+    case otherBlitzKVM
+    /// The BlitzKVM firmware; which build takes SSH to tell.
     case unverified
     /// JetKVM's own firmware in a version this app doesn't ship, or one it
     /// couldn't check without SSH.
     case stock(String)
 
     /// From what the device answers: whether it has the encoder control only
-    /// the JetKVM Desktop firmware has, its app version, and (over SSH) the
+    /// the BlitzKVM firmware has, its app version, and (over SSH) the
     /// SHA-256 of the installed app. Fork builds keep upstream's version, so
     /// only the hash tells builds apart.
     public static func evaluate(hasEncoderControl: Bool, appVersion: String, installedSHA256: String?,
@@ -63,7 +63,7 @@ public enum FirmwareState: Equatable {
             return .bundled(build)
         }
         guard hasEncoderControl else { return .stock(appVersion) }
-        return installedSHA256 == nil ? .unverified : .otherDesktop
+        return installedSHA256 == nil ? .unverified : .otherBlitzKVM
     }
 }
 
@@ -239,7 +239,7 @@ public enum JetKVMSSH {
 /// How far JetKVM Setup is, as of its last check: kept with the device, so
 /// the Devices window shows it without connecting. nil: not checked.
 public struct SetupSummary: Codable, Equatable {
-    /// The JetKVM Desktop build this app ships runs.
+    /// The BlitzKVM build this app ships runs.
     public var firmwareUpToDate: Bool?
     /// The JetKVM is on a tailnet.
     public var tailscaleConnected: Bool?

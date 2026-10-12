@@ -18,15 +18,15 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/pion/webrtc/v4"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/discovery"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/hotkeys"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/input"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/session"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/ui"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
+	"github.com/wottpal/blitzkvm/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/discovery"
+	"github.com/wottpal/blitzkvm/pkg/hotkeys"
+	"github.com/wottpal/blitzkvm/pkg/input"
+	"github.com/wottpal/blitzkvm/pkg/logging"
+	"github.com/wottpal/blitzkvm/pkg/session"
+	"github.com/wottpal/blitzkvm/pkg/ui"
+	"github.com/wottpal/blitzkvm/pkg/video/openh264"
+	"github.com/wottpal/blitzkvm/pkg/virtualmedia"
 )
 
 type Config struct {
@@ -3640,7 +3640,7 @@ func (a *App) syncSessionState() {
 
 func (a *App) syncWindowTitle() {
 	if a.launcherOpen {
-		title := "jetkvm-desktop"
+		title := "BlitzKVM"
 		if title != a.lastTitle {
 			ebiten.SetWindowTitle(title)
 			a.lastTitle = title
@@ -3651,7 +3651,7 @@ func (a *App) syncWindowTitle() {
 		return
 	}
 	snap := a.ctrl.Snapshot()
-	title := "jetkvm-desktop"
+	title := "BlitzKVM"
 	if snap.DeviceID != "" {
 		title = snap.DeviceID
 	} else if snap.Hostname != "" {

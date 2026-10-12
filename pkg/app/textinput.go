@@ -6,7 +6,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/ui"
+	"github.com/wottpal/blitzkvm/pkg/ui"
 )
 
 type textBinding struct {

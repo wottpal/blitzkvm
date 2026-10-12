@@ -12,7 +12,7 @@ import (
 
 	openh264 "github.com/Azunyan1111/openh264-go"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/video"
+	"github.com/wottpal/blitzkvm/pkg/video"
 )
 
 // DecodeStats describes the OpenH264 decoding sink.

@@ -14,14 +14,14 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/hotkeys"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/input"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/auth"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/tlspin"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/video"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
+	"github.com/wottpal/blitzkvm/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/hotkeys"
+	"github.com/wottpal/blitzkvm/pkg/input"
+	"github.com/wottpal/blitzkvm/pkg/logging"
+	"github.com/wottpal/blitzkvm/pkg/protocol/auth"
+	"github.com/wottpal/blitzkvm/pkg/protocol/tlspin"
+	"github.com/wottpal/blitzkvm/pkg/video"
+	"github.com/wottpal/blitzkvm/pkg/virtualmedia"
 )
 
 //go:generate go tool github.com/dmarkham/enumer -type=Phase -linecomment -text -output controller_enums.go

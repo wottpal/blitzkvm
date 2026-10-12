@@ -1,12 +1,12 @@
-# jetkvm-desktop (wottpal fork)
+# BlitzKVM
 
 A native macOS client for [JetKVM](https://github.com/jetkvm/kvm) devices, built to replace Jump Desktop for daily remote work: several devices, reached over a LAN or any VPN (Tailscale is the reference), in long, latency-sensitive sessions.
 
 This repository is a private fork of [lkarlslund/jetkvm-desktop](https://github.com/lkarlslund/jetkvm-desktop). It contains:
 
 - **The native macOS app** (`macos/`): Swift/AppKit, VideoToolbox decoding, Metal rendering. It runs one Go helper process per device. This is the product.
-- **The Go engine** (`pkg/`, `cmd/jetkvm-engine`): the JetKVM protocol, session lifecycle, video assembly and input, shared by both clients.
-- **The legacy Ebiten client** (`cmd/jetkvm-desktop`, `pkg/app`, `pkg/ui`): upstream's cross-platform UI. It still builds and serves as a manual test client; it gets no new features and will be retired.
+- **The Go engine** (`pkg/`, `cmd/blitzkvm-engine`): the JetKVM protocol, session lifecycle, video assembly and input, shared by both clients.
+- **The legacy Ebiten client** (`cmd/blitzkvm-legacy`, `pkg/app`, `pkg/ui`): upstream's cross-platform UI. It still builds and serves as a manual test client; it gets no new features and will be retired.
 - **A firmware-faithful emulator** (`pkg/emulator`, `test/emulator-serve`): a fake JetKVM that behaves like firmware 0.5.9, so everything can be tested without touching real hardware.
 
 The engineering plan, roadmap, decisions and the execution report live in [`plans/2026-10-10-engineering-plan.md`](plans/2026-10-10-engineering-plan.md). Read §19–§20 for the current status before planning new work.
@@ -15,9 +15,9 @@ The engineering plan, roadmap, decisions and the execution report live in [`plan
 
 | Path | What it is |
 |---|---|
-| `macos/` | SwiftPM package and Makefile for the app. `Sources/JetKVMCore` holds testable logic (wire protocol, device library, key mapping, geometry, certificate pinning, serial text filter); `Sources/JetKVMDesktop` holds the AppKit/SwiftUI app; `Tests/` holds the unit tests. |
-| `cmd/jetkvm-engine` | The helper the app launches per device. It speaks `pkg/engineipc` over stdin/stdout and logs to stderr. |
-| `cmd/jetkvm-desktop` | The legacy Ebiten client. |
+| `macos/` | SwiftPM package and Makefile for the app. `Sources/JetKVMCore` holds testable logic (wire protocol, device library, key mapping, geometry, certificate pinning, serial text filter); `Sources/BlitzKVM` holds the AppKit/SwiftUI app; `Tests/` holds the unit tests. |
+| `cmd/blitzkvm-engine` | The helper the app launches per device. It speaks `pkg/engineipc` over stdin/stdout and logs to stderr. |
+| `cmd/blitzkvm-legacy` | The legacy Ebiten client. |
 | `pkg/client` | One WebRTC connection to a device: auth, signaling, RPC, HID-RPC, video, serial. |
 | `pkg/session` | Connection lifecycle (reconnect, backoff, identity and TLS pinning, events) on top of `pkg/client`. |
 | `pkg/engine`, `pkg/engineipc` | The helper's command loop and the app↔helper framing. |
@@ -54,35 +54,35 @@ Run root targets from the repository root and macOS targets with `make -C macos 
 | `make check` | Everything fork CI runs: vet, generate-check, race tests, timing tests, govulncheck, OpenH264 tests, Swift tests |
 | `make layouts UPSTREAM=../kvm` | Regenerates `pkg/input/layouts_gen.go` from a `jetkvm/kvm` checkout |
 | `make emulator` | Runs the emulator on `http://127.0.0.1:8080` (no password) |
-| `make -C macos app` | Builds and signs `macos/build/JetKVM Desktop.app`; a signed build is also copied to `~/Downloads` |
-| `make -C macos firmware` | Bundles the firmware builds JetKVM Setup installs, pinned by SHA-256 in `macos/Support/Firmware.json`: the JetKVM Desktop build from `FORK_BINARY` (default: `bin/jetkvm_app` of a [wottpal/kvm](https://github.com/wottpal/kvm) clone next to this repository), and JetKVM's own release from its GitHub release (downloaded once into `macos/build/firmware-cache`). `make app` runs it; a build whose binary is missing is left out |
+| `make -C macos app` | Builds and signs `macos/build/BlitzKVM.app`; a signed build is also copied to `~/Downloads` |
+| `make -C macos firmware` | Bundles the firmware builds JetKVM Setup installs, pinned by SHA-256 in `macos/Support/Firmware.json`: the BlitzKVM build from `FORK_BINARY` (default: `bin/jetkvm_app` of a [wottpal/kvm](https://github.com/wottpal/kvm) clone next to this repository), and JetKVM's own release from its GitHub release (downloaded once into `macos/build/firmware-cache`). `make app` runs it; a build whose binary is missing is left out |
 | `make -C macos test` | Swift unit tests (`JetKVMCoreTests`) |
 | `make -C macos selftest` | End to end: the app against the emulator (video, injected input, helper crash recovery) |
 | `make -C macos selftest-extras` | End to end over http and https: virtual media (upload, mount, eject, delete), serial console, address probing with certificate pins |
 | `make -C macos selftest-stalls` | End to end with the fork's keyframe policy: the picture may stand still no longer than a link stall, and resumes once a hidden window is shown |
 | `make -C macos run DEVICE=jetkvm.local` | Builds and opens the app connected to a device |
 | `make -C macos install` | Copies the app to `/Applications` |
-| `make -C macos notarize` | Notarizes with the Xcode account and staples; leaves `macos/build/JetKVM-Desktop.zip` (see Signing) |
+| `make -C macos notarize` | Notarizes with the Xcode account and staples; leaves `macos/build/BlitzKVM.zip` (see Signing) |
 
 Focused checks, by what you changed:
 
 - When you edit `pkg/emulator`, `pkg/client`, `pkg/session` or `pkg/engine`, run `go test -race -count=1 ./pkg/<package>`. If you touched video, NACK or netem code, also run `make test-timing`.
 - When you edit `macos/Sources/JetKVMCore`, run `make -C macos test`.
-- When you edit `macos/Sources/JetKVMDesktop`, `pkg/engineipc` or engine commands, run `make -C macos selftest` and `make -C macos selftest-extras`. If you touched video, the decoder or keyframe handling, also run `make -C macos selftest-stalls`.
+- When you edit `macos/Sources/BlitzKVM`, `pkg/engineipc` or engine commands, run `make -C macos selftest` and `make -C macos selftest-extras`. If you touched video, the decoder or keyframe handling, also run `make -C macos selftest-stalls`.
 - Before you push, run `make check` (or its steps individually while the tree is dirty, since `generate-check` needs a clean tree).
 
 A passing self-test prints a JSON report and ends with `selftest passed: …`. Any other ending is a failure.
 
 ## Using the app
 
-Open `~/Downloads/JetKVM Desktop.app` (or `/Applications/` after `make -C macos install`). The Devices window (⌘N) holds the device library: a name, an ordered list of addresses (LAN IP, `.local` name, VPN name; `https://…` for TLS) and per-device preferences. Addresses are probed over HTTP in parallel and the earliest that answers wins; probing never opens a WebRTC session, because that would take over an existing one. Devices show as a gallery of screens that light up while the device answers (the same probe, every 30 s while the window is visible); the most recently used one starts selected, so Return connects it.
+Open `~/Downloads/BlitzKVM.app` (or `/Applications/` after `make -C macos install`). The Devices window (⌘N) holds the device library: a name, an ordered list of addresses (LAN IP, `.local` name, VPN name; `https://…` for TLS) and per-device preferences. Addresses are probed over HTTP in parallel and the earliest that answers wins; probing never opens a WebRTC session, because that would take over an existing one. Devices show as a gallery of screens that light up while the device answers (the same probe, every 30 s while the window is visible); the most recently used one starts selected, so Return connects it.
 
 **JetKVM Setup** (Device › Set Up JetKVM…, or the setup badge on a device in the Devices window) shows three things and fixes each with one button. The badge shows how far a device is ("Setup 2/3", a dot per step) as of the last check; every connection checks quietly, and a click on the badge connects and opens the sheet.
-- **Firmware:** the app ships two builds, so nothing is downloaded: the JetKVM Desktop firmware (recommended) and JetKVM's own latest release, both pinned by SHA-256 in `macos/Support/Firmware.json`. The row shows which runs (by the installed binary's hash). Its button installs the JetKVM Desktop build; its menu reinstalls either or switches to JetKVM's own. Installing uploads the build next to the running app, checks it, and restarts the JetKVM, which moves it into place as it does an update (about a minute). The previous build stays as `/userdata/jetkvm/jetkvm_app.backup`. JetKVM's automatic updates replace a JetKVM Desktop build with their next release.
+- **Firmware:** the app ships two builds, so nothing is downloaded: the BlitzKVM firmware (recommended) and JetKVM's own latest release, both pinned by SHA-256 in `macos/Support/Firmware.json`. The row shows which runs (by the installed binary's hash). Its button installs the BlitzKVM build; its menu reinstalls either or switches to JetKVM's own. Installing uploads the build next to the running app, checks it, and restarts the JetKVM, which moves it into place as it does an update (about a minute). The previous build stays as `/userdata/jetkvm/jetkvm_app.backup`. JetKVM's automatic updates replace a BlitzKVM build with their next release.
 - **Password:** set the JetKVM's first password (kept in your keychain), so not everyone who can reach it controls the computer.
 - **Tailscale:** Install downloads the current release for 32-bit ARM from pkgs.tailscale.com, checks it against its SHA-256, and installs it as `tailscale configure jetkvm` expects, so it starts at boot. The JetKVM doesn't restart. The kernel's `tun` module gives it a real `tailscale0` interface. Your browser opens to log in, and once the JetKVM is on the tailnet its name (e.g. `mac-mini-jetkvm.<tailnet>.ts.net`) is added to the device's addresses. Turn off key expiry for it in the admin console, or it drops off the tailnet when its key expires.
 
-Installing uses SSH: the app turns on Developer Mode and adds its own key (`~/Library/Application Support/JetKVM Desktop/SSH/`) to the device's keys, keeping any others.
+Installing uses SSH: the app turns on Developer Mode and adds its own key (`~/Library/Application Support/BlitzKVM/SSH/`) to the device's keys, keeping any others.
 
 **Remote access:** list the LAN address first and the tailnet name second. At home the LAN address answers first; away, the tailnet name does. Video takes the route of the address the app connected to, and the status bar names it: via LAN, via Tailscale, via Tailscale relay `<region>` (no direct path: Tailscale relays it, much slower), via VPN, or via internet.
 
@@ -131,7 +131,7 @@ The fork also brings **still screens to near-lossless** (plan §23). Half a seco
 
 The app hands each frame to the window server as soon as the GPU is done instead of waiting for its own vsync (the window server still flips at vblank and keeps only the newest frame, so nothing tears), takes the newest frame after the drawable rather than before, and runs the text upscaler only on the tiles that changed. What remains is mostly outside the app: the target's own input-to-display time, one HDMI frame of capture (16.7 ms) and the encoder's fixed 13 ms per 1080p frame.
 
-Colors: the JetKVM's HDMI bridge outputs BT.601 YCbCr while firmware 0.5.9 tags HD streams BT.709, so the app always decodes BT.601 (`VideoView.colorParams`; `JETKVM_COLOR_MATRIX=709` restores the declared matrix).
+Colors: the JetKVM's HDMI bridge outputs BT.601 YCbCr while firmware 0.5.9 tags HD streams BT.709, so the app always decodes BT.601 (`VideoView.colorParams`; `BLITZKVM_COLOR_MATRIX=709` restores the declared matrix).
 
 Permissions: grant Accessibility to capture system shortcuts. macOS also asks for Local Network access on first use. If the first address probe gets no answer (device asleep, VPN still coming up, permission prompt pending), the window opens anyway and keeps connecting.
 
@@ -143,26 +143,26 @@ Command-line options (also used by the self-tests):
 | `--view-only` | Never send keyboard or mouse input |
 | `--scale actualSize\|fit\|pixelExact\|integer\|matchWindow`, `--match-scale 1.5`, `--match-refresh 60\|auto`, `--scaling-filter lanczos`, `--profile mac\|pc`, `--window-size 1280x720`, `--full-screen` | View and input overrides |
 | `--selftest <seconds>` and `--crash-engine-after`, `--inject-input`, `--exercise-extras`, `--snapshot <png>`, `--hide-after <seconds>`, `--max-freeze-ms <ms>`, `--set-quality-after 4:low,9:maximum`, `--toggle-status-bar-after <seconds>` | Self-test mode (prints JSON, exits 0 on success). The window floats above other windows and never captures your own keyboard or pointer; only `--inject-input` sends input |
-| `--setup check\|install-tailscale\|login\|install-firmware[=desktop\|stock]\|password=<new password>`, `--setup-snapshot <png>`, `--wake` | With `--selftest`: opens JetKVM Setup, runs the action, and reports the three states (`setup`, `setupOK`); the snapshot renders the sheet. `--wake` wakes the target once connected (no keystrokes) |
+| `--setup check\|install-tailscale\|login\|install-firmware[=blitzkvm\|stock]\|password=<new password>`, `--setup-snapshot <png>`, `--wake` | With `--selftest`: opens JetKVM Setup, runs the action, and reports the three states (`setup`, `setupOK`); the snapshot renders the sheet. `--wake` wakes the target once connected (no keystrokes) |
 | `--latency-probe <samples>` | Measures input-to-photon latency against `tools/latency-probe/latency.html` on the target (prints JSON, exits) |
 
-Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `JETKVM_DEBUG_BLACKHOLE=period:duration` (seconds) makes the helper drop all session traffic for `duration` every `period`, to reproduce network hiccups. `JETKVM_ENGINE` points at a helper binary for development. `JETKVM_DESKTOP_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.
+Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `BLITZKVM_DEBUG_BLACKHOLE=period:duration` (seconds) makes the helper drop all session traffic for `duration` every `period`, to reproduce network hiccups. `BLITZKVM_ENGINE` points at a helper binary for development. `BLITZKVM_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.
 
 Where things live:
 
-- Device library: `~/Library/Application Support/JetKVM Desktop/devices.json`.
-- Passwords: the login keychain, service `xyz.scio.jetkvm-mac`, account = the device's ID (the entry's UUID until the ID is learned on first connect).
-- Logs: `~/Library/Logs/jetkvm-desktop/app.log` holds app messages and each helper's stderr. The legacy client writes `jetkvm-desktop.log` there when not started from a terminal.
+- Device library: `~/Library/Application Support/BlitzKVM/devices.json`.
+- Passwords: the login keychain, service `xyz.scio.blitzkvm`, account = the device's ID (the entry's UUID until the ID is learned on first connect).
+- Logs: `~/Library/Logs/BlitzKVM/app.log` holds app messages and each helper's stderr. The legacy client writes `blitzkvm-legacy.log` there when not started from a terminal.
 
 ## Architecture
 
 ```
-JetKVM Desktop.app (Swift)                          one helper per device
+BlitzKVM.app (Swift)                          one helper per device
   DeviceWindowController ── VideoDecoder (VideoToolbox) ── VideoView (Metal)
   InputController, VirtualMediaWindow, SerialConsoleWindow
         │  length-prefixed frames over stdin/stdout (pkg/engineipc ⇄ EngineProtocol.swift)
         ▼
-  jetkvm-engine (Go): engine → session.Controller → client.Client
+  blitzkvm-engine (Go): engine → session.Controller → client.Client
         │  HTTPS/HTTP login, WebSocket signaling, WebRTC (H.264/H.265 RTP; data channels rpc, hidrpc, serial)
         ▼
   JetKVM device (firmware 0.5.9)        or        pkg/emulator for tests
@@ -206,7 +206,7 @@ Ask the owner before you:
 
 `make -C macos app` signs with the first "Developer ID Application" identity in the login keychain (currently Scio Labs, team `79UD4HPFRD`), using the hardened runtime and a secure timestamp. Without such an identity it signs ad hoc. In that case Accessibility and Local Network grants reset on every rebuild. Override with `SIGN_IDENTITY="…"`. Set `COPY_TO=` (empty) to skip the `~/Downloads` copy.
 
-`make -C macos notarize` notarizes with the Apple ID signed into Xcode (Settings → Accounts, team `79UD4HPFRD`); it needs no app-specific password or API key. `macos/scripts/notarize.sh` wraps the signed app in a minimal Xcode archive, uploads it with `xcodebuild -exportArchive`, and waits until Apple has processed it (usually a few minutes). It then fetches the stapled app with `xcodebuild -exportNotarizedApp` and leaves `macos/build/JetKVM-Desktop.zip`, also copied to `~/Downloads`. Notarizing publishes the build to Apple, so only do it when the owner asks for a shareable build.
+`make -C macos notarize` notarizes with the Apple ID signed into Xcode (Settings → Accounts, team `79UD4HPFRD`); it needs no app-specific password or API key. `macos/scripts/notarize.sh` wraps the signed app in a minimal Xcode archive, uploads it with `xcodebuild -exportArchive`, and waits until Apple has processed it (usually a few minutes). It then fetches the stapled app with `xcodebuild -exportNotarizedApp` and leaves `macos/build/BlitzKVM.zip`, also copied to `~/Downloads`. Notarizing publishes the build to Apple, so only do it when the owner asks for a shareable build.
 
 ## Troubleshooting
 
@@ -225,12 +225,12 @@ Ask the owner before you:
 Upstream's client still builds and works against devices and the emulator. It finds devices on the local network, connects by hostname, mDNS name or IP, and shows video, input, stats and the core settings in one window.
 
 ```bash
-go run ./cmd/jetkvm-desktop                    # launcher with discovery
-go run ./cmd/jetkvm-desktop jetkvm.local       # connect directly
-go run ./cmd/jetkvm-desktop --password-stdin 192.168.1.50 < password.txt
+go run ./cmd/blitzkvm-legacy                    # launcher with discovery
+go run ./cmd/blitzkvm-legacy jetkvm.local       # connect directly
+go run ./cmd/blitzkvm-legacy --password-stdin 192.168.1.50 < password.txt
 ```
 
-Flags: `--password-stdin`, `--password-env NAME` (default `JETKVM_PASSWORD`), `--log-level`, `--rpc-timeout`. Its experimental USB-network settings UI is hidden unless `JETKVM_DESKTOP_ENABLE_EXPERIMENTAL_USB_NETWORK=1`. Screenshots: [`docs/launcher.png`](docs/launcher.png), [`docs/settings.png`](docs/settings.png).
+Flags: `--password-stdin`, `--password-env NAME` (default `JETKVM_PASSWORD`), `--log-level`, `--rpc-timeout`. Its experimental USB-network settings UI is hidden unless `BLITZKVM_ENABLE_EXPERIMENTAL_USB_NETWORK=1`. Screenshots: [`docs/launcher.png`](docs/launcher.png), [`docs/settings.png`](docs/settings.png).
 
 ## Related docs
 

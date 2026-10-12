@@ -1,4 +1,4 @@
-// Package engine is the core of the jetkvm-engine helper process: it runs one
+// Package engine is the core of the blitzkvm-engine helper process: it runs one
 // JetKVM session (session.Controller) and speaks the engineipc protocol with
 // the native app over a pair of byte streams (the helper's stdin/stdout).
 package engine
@@ -16,12 +16,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/engineipc"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/input"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/session"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/video"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
+	"github.com/wottpal/blitzkvm/pkg/engineipc"
+	"github.com/wottpal/blitzkvm/pkg/input"
+	"github.com/wottpal/blitzkvm/pkg/logging"
+	"github.com/wottpal/blitzkvm/pkg/session"
+	"github.com/wottpal/blitzkvm/pkg/video"
+	"github.com/wottpal/blitzkvm/pkg/virtualmedia"
 )
 
 const (

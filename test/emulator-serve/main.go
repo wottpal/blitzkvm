@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/emulator"
+	"github.com/wottpal/blitzkvm/pkg/emulator"
 )
 
 func main() {

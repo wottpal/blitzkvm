@@ -461,29 +461,29 @@ final class RemoteDisplayTests: XCTestCase {
 }
 
 final class JetKVMSetupTests: XCTestCase {
-    private let desktop = FirmwareBuild(kind: .desktop, tag: "release/0.5.9-fork.4", sha256: String(repeating: "ab", count: 32), size: 1)
+    private let fork = FirmwareBuild(kind: .blitzkvm, tag: "release/0.5.9-fork.4", sha256: String(repeating: "ab", count: 32), size: 1)
     private let stock = FirmwareBuild(kind: .stock, tag: "release/0.5.9", sha256: String(repeating: "ef", count: 32), size: 1)
 
     func testFirmwareState() {
-        let bundled = [desktop, stock]
+        let bundled = [fork, stock]
         XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: String(repeating: "AB", count: 32),
-                                              bundled: bundled), .bundled(desktop))
+                                              bundled: bundled), .bundled(fork))
         XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: false, appVersion: "0.5.9", installedSHA256: String(repeating: "ef", count: 32),
                                               bundled: bundled), .bundled(stock))
         XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: String(repeating: "cd", count: 32),
-                                              bundled: bundled), .otherDesktop)
+                                              bundled: bundled), .otherBlitzKVM)
         XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: nil, bundled: bundled), .unverified)
         XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: false, appVersion: "0.5.10", installedSHA256: String(repeating: "cd", count: 32),
                                               bundled: bundled), .stock("0.5.10"))
-        XCTAssertEqual(desktop.title, "JetKVM Desktop 0.5.9-fork.4")
+        XCTAssertEqual(fork.title, "BlitzKVM 0.5.9-fork.4")
         XCTAssertEqual(stock.title, "JetKVM 0.5.9")
-        XCTAssertEqual(desktop.fileName, "release-0.5.9-fork.4.gz")
+        XCTAssertEqual(fork.fileName, "release-0.5.9-fork.4.gz")
     }
 
     func testFirmwareManifest() throws {
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../Support/Firmware.json")
         let builds = try FirmwareBuild.manifest(Data(contentsOf: url))
-        XCTAssertEqual(builds.map(\.kind), [.desktop, .stock], "the recommended build first")
+        XCTAssertEqual(builds.map(\.kind), [.blitzkvm, .stock], "the recommended build first")
         XCTAssertTrue(builds.allSatisfy { $0.sha256.count == 64 && $0.size > 0 })
     }
 

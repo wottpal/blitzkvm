@@ -1,4 +1,4 @@
-module github.com/lkarlslund/jetkvm-desktop
+module github.com/wottpal/blitzkvm
 
 go 1.26.2
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persistent KVM session over jetkvm-engine with a control API on 127.0.0.1.
+"""Persistent KVM session over blitzkvm-engine with a control API on 127.0.0.1.
 
 kvmd.py ENGINE ADDRESS PORT [--h265]
 Commands (JSON lines): key {combo}, paste {text}, rel {dx,dy,buttons}, click,

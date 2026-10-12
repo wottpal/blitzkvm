@@ -13,12 +13,12 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/app"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
+	"github.com/wottpal/blitzkvm/pkg/app"
+	"github.com/wottpal/blitzkvm/pkg/logging"
 )
 
 const defaultPasswordEnv = "JETKVM_PASSWORD"
-const experimentalUSBNetworkEnv = "JETKVM_DESKTOP_ENABLE_EXPERIMENTAL_USB_NETWORK"
+const experimentalUSBNetworkEnv = "BLITZKVM_ENABLE_EXPERIMENTAL_USB_NETWORK"
 
 func readPassword(r io.Reader) (string, error) {
 	data, err := io.ReadAll(r)
@@ -57,7 +57,7 @@ func main() {
 	passwordEnv := ""
 
 	rootCmd := &cobra.Command{
-		Use:   "jetkvm-desktop [base-url-or-host]",
+		Use:   "blitzkvm-legacy [base-url-or-host]",
 		Short: "Desktop JetKVM client",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -75,8 +75,8 @@ func main() {
 			}
 			if !logging.StderrIsTerminal() {
 				// Launched without a terminal (e.g. from an .app bundle): keep
-				// logs and crash reports in ~/Library/Logs/jetkvm-desktop.
-				if f, err := logging.OpenLogFile("jetkvm-desktop"); err == nil {
+				// logs and crash reports in ~/Library/Logs/BlitzKVM.
+				if f, err := logging.OpenLogFile("blitzkvm-legacy"); err == nil {
 					defer f.Close()
 					logging.SetOutput(f, false)
 					_ = logging.EnableCrashOutput(f)
@@ -97,13 +97,13 @@ func main() {
 			ebiten.SetWindowSize(windowWidth, windowHeight)
 			ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 			ebiten.SetTPS(ebiten.SyncWithFPS)
-			ebiten.SetWindowTitle("jetkvm-desktop")
+			ebiten.SetWindowTitle("BlitzKVM")
 			return ebiten.RunGame(clientApp)
 		},
 	}
 	rootCmd.Flags().BoolVar(&passwordFromStdin, "password-stdin", false, "Read password for local auth mode from stdin")
 	rootCmd.Flags().StringVar(&passwordEnv, "password-env", "", fmt.Sprintf("Read password for local auth mode from the named environment variable (default fallback: %s)", defaultPasswordEnv))
-	rootCmd.Flags().StringVar(&logLevel, "log-level", "", fmt.Sprintf("Log level: error, warn, info, debug, trace (default: error; env: JETKVM_DESKTOP_LOG_LEVEL; experimental USB network UI env: %s)", experimentalUSBNetworkEnv))
+	rootCmd.Flags().StringVar(&logLevel, "log-level", "", fmt.Sprintf("Log level: error, warn, info, debug, trace (default: error; env: BLITZKVM_LOG_LEVEL; experimental USB network UI env: %s)", experimentalUSBNetworkEnv))
 	rootCmd.Flags().DurationVar(&cfg.RPCTimeout, "rpc-timeout", 5*time.Second, "Timeout for JSON-RPC requests")
 
 	if err := rootCmd.Execute(); err != nil {

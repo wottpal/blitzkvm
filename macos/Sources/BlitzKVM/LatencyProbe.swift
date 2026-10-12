@@ -20,16 +20,16 @@ final class LatencyProbe {
     /// so they can never reach another app on the remote.
     private let marker = CGRect(x: 1000, y: 330, width: 200, height: 200)
     private var markerSeen = false
-    /// JETKVM_PROBE_POINTER=1: moves the pointer between two spots on the
+    /// BLITZKVM_PROBE_POINTER=1: moves the pointer between two spots on the
     /// page's black area instead of pressing a key, and waits for the
     /// cursor to show at the new spot.
-    private let pointerMode = ProcessInfo.processInfo.environment["JETKVM_PROBE_POINTER"] == "1"
+    private let pointerMode = ProcessInfo.processInfo.environment["BLITZKVM_PROBE_POINTER"] == "1"
     private let targets = [CGPoint(x: 1400, y: 700), CGPoint(x: 1600, y: 820)]
     private var target = 0
-    /// JETKVM_PROBE_PAIR_GAP=S: each sample first presses a key that is not
+    /// BLITZKVM_PROBE_PAIR_GAP=S: each sample first presses a key that is not
     /// measured, then the measured one S seconds later (S near 0.55 lands it
     /// on the still refresh the first change triggers).
-    private let pairGap = Double(ProcessInfo.processInfo.environment["JETKVM_PROBE_PAIR_GAP"] ?? "")
+    private let pairGap = Double(ProcessInfo.processInfo.environment["BLITZKVM_PROBE_PAIR_GAP"] ?? "")
     private var aborted: String?
     private let lock = NSLock()
     private var bright: Bool?
@@ -64,8 +64,8 @@ final class LatencyProbe {
     }
 
     func start() {
-        // JETKVM_PROBE_FULLSCREEN=1 measures in full screen.
-        if ProcessInfo.processInfo.environment["JETKVM_PROBE_FULLSCREEN"] == "1" {
+        // BLITZKVM_PROBE_FULLSCREEN=1 measures in full screen.
+        if ProcessInfo.processInfo.environment["BLITZKVM_PROBE_FULLSCREEN"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.controller?.window?.toggleFullScreen(nil) }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in self?.next() }

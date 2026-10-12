@@ -31,31 +31,31 @@ jobs:
           - os: ubuntu-24.04
             name: linux-amd64
             archive_ext: tar.gz
-            client_bin: jetkvm-desktop
+            client_bin: blitzkvm-legacy
             goos: linux
             goarch: amd64
           - os: ubuntu-24.04-arm
             name: linux-aarch64
             archive_ext: tar.gz
-            client_bin: jetkvm-desktop
+            client_bin: blitzkvm-legacy
             goos: linux
             goarch: arm64
           - os: macos-15-intel
             name: macos-amd64
             archive_ext: tar.gz
-            client_bin: jetkvm-desktop
+            client_bin: blitzkvm-legacy
             goos: darwin
             goarch: amd64
           - os: macos-15
             name: macos-aarch64
             archive_ext: tar.gz
-            client_bin: jetkvm-desktop
+            client_bin: blitzkvm-legacy
             goos: darwin
             goarch: arm64
           - os: windows-latest
             name: windows-amd64
             archive_ext: zip
-            client_bin: jetkvm-desktop.exe
+            client_bin: blitzkvm-legacy.exe
             goos: windows
             goarch: amd64
     steps:
@@ -85,9 +85,9 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist/pkg
-          go build -trimpath -ldflags="-s -w" -o "dist/pkg/${{ matrix.client_bin }}" ./cmd/jetkvm-desktop
+          go build -trimpath -ldflags="-s -w" -o "dist/pkg/${{ matrix.client_bin }}" ./cmd/blitzkvm-legacy
           cp README.md dist/pkg/
-          tar -C dist/pkg -czf "dist/jetkvm-desktop-${{ steps.version.outputs.version }}-${{ matrix.name }}.tar.gz" .
+          tar -C dist/pkg -czf "dist/blitzkvm-legacy-${{ steps.version.outputs.version }}-${{ matrix.name }}.tar.gz" .
 
       - name: Build release binaries (Windows)
         if: runner.os == 'Windows'
@@ -98,9 +98,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist/pkg | Out-Null
           $env:CGO_LDFLAGS = "-static"
-          go build -trimpath -ldflags='-s -w -extldflags "-static"' -o "dist/pkg/${{ matrix.client_bin }}" ./cmd/jetkvm-desktop
+          go build -trimpath -ldflags='-s -w -extldflags "-static"' -o "dist/pkg/${{ matrix.client_bin }}" ./cmd/blitzkvm-legacy
           Copy-Item README.md dist/pkg/README.md
-          Compress-Archive -Path dist/pkg/* -DestinationPath "dist/jetkvm-desktop-${{ steps.version.outputs.version }}-${{ matrix.name }}.zip"
+          Compress-Archive -Path dist/pkg/* -DestinationPath "dist/blitzkvm-legacy-${{ steps.version.outputs.version }}-${{ matrix.name }}.zip"
 
       - name: Verify Windows DLL dependencies
         if: runner.os == 'Windows'
@@ -169,5 +169,5 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.name }}
-          path: dist/jetkvm-desktop-${{ steps.version.outputs.version }}-${{ matrix.name }}.${{ matrix.archive_ext }}
+          path: dist/blitzkvm-legacy-${{ steps.version.outputs.version }}-${{ matrix.name }}.${{ matrix.archive_ext }}
           if-no-files-found: error

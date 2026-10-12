@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/emulator"
+	"github.com/wottpal/blitzkvm/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/emulator"
 )
 
 // feed runs the governor over n one-second samples produced by next.

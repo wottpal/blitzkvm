@@ -5,7 +5,7 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/hidrpc"
+	"github.com/wottpal/blitzkvm/pkg/protocol/hidrpc"
 )
 
 // HID modifier bits used by layout tables.

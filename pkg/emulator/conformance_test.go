@@ -18,11 +18,11 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/auth"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/hidrpc"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/video"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
+	"github.com/wottpal/blitzkvm/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/protocol/auth"
+	"github.com/wottpal/blitzkvm/pkg/protocol/hidrpc"
+	"github.com/wottpal/blitzkvm/pkg/video"
+	"github.com/wottpal/blitzkvm/pkg/video/openh264"
 )
 
 // End-to-end checks of the engine against firmware-0.5.9 behaviour.

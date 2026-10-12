@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/hidrpc"
+	"github.com/wottpal/blitzkvm/pkg/logging"
+	"github.com/wottpal/blitzkvm/pkg/protocol/hidrpc"
 )
 
 // HID-RPC handling modelled on jetkvm/kvm hidrpc.go and

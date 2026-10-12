@@ -12,9 +12,9 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/auth"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/tlspin"
+	"github.com/wottpal/blitzkvm/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/protocol/auth"
+	"github.com/wottpal/blitzkvm/pkg/protocol/tlspin"
 )
 
 // Session lifecycle. One goroutine (run) owns connecting, watching and

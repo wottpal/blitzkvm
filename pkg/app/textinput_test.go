@@ -3,7 +3,7 @@ package app
 import (
 	"testing"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/ui"
+	"github.com/wottpal/blitzkvm/pkg/ui"
 )
 
 func TestCurrentTextBindingDefaultsToLauncherInput(t *testing.T) {

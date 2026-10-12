@@ -341,8 +341,8 @@ final class SelfTest {
                 }
             } && model.tailscale.error == nil
         case let a where a.hasPrefix("install-firmware"):
-            // install-firmware (the recommended build), =desktop or =stock
-            let kind = a.split(separator: "=").dropFirst().first.flatMap { FirmwareBuild.Kind(rawValue: String($0)) } ?? .desktop
+            // install-firmware (the recommended build), =blitzkvm or =stock
+            let kind = a.split(separator: "=").dropFirst().first.flatMap { FirmwareBuild.Kind(rawValue: String($0)) } ?? .blitzkvm
             guard let build = model.builds.first(where: { $0.build.kind == kind })?.build else {
                 ok = false
                 break

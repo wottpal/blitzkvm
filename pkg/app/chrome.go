@@ -11,11 +11,11 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/hotkeys"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/input"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/session"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/ui"
+	"github.com/wottpal/blitzkvm/pkg/hotkeys"
+	"github.com/wottpal/blitzkvm/pkg/input"
+	"github.com/wottpal/blitzkvm/pkg/logging"
+	"github.com/wottpal/blitzkvm/pkg/session"
+	"github.com/wottpal/blitzkvm/pkg/ui"
 )
 
 //go:generate go tool github.com/dmarkham/enumer -type=iconKind,settingsSection -linecomment -json -text -output chrome_enums.go

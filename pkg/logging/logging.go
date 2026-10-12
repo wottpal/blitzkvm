@@ -16,7 +16,7 @@ import (
 
 const (
 	defaultLevel = zerolog.ErrorLevel
-	envLogLevel  = "JETKVM_DESKTOP_LOG_LEVEL"
+	envLogLevel  = "BLITZKVM_LOG_LEVEL"
 
 	// maxLogFileSize bounds the log file; on open, a larger file is rotated to <name>.1.
 	maxLogFileSize = 10 << 20
@@ -82,7 +82,7 @@ func StderrIsTerminal() bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-// DefaultLogDir returns ~/Library/Logs/jetkvm-desktop on macOS and a
+// DefaultLogDir returns ~/Library/Logs/BlitzKVM on macOS and a
 // per-user cache directory elsewhere.
 func DefaultLogDir() (string, error) {
 	if runtime.GOOS == "darwin" {
@@ -90,13 +90,13 @@ func DefaultLogDir() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return filepath.Join(home, "Library", "Logs", "jetkvm-desktop"), nil
+		return filepath.Join(home, "Library", "Logs", "BlitzKVM"), nil
 	}
 	cache, err := os.UserCacheDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(cache, "jetkvm-desktop", "logs"), nil
+	return filepath.Join(cache, "blitzkvm", "logs"), nil
 }
 
 // OpenLogFile opens (appending) <DefaultLogDir>/<name>.log, rotating it to

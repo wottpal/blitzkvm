@@ -2,10 +2,10 @@ import Foundation
 import Security
 
 /// Device passwords in the login keychain (generic password items, service
-/// xyz.scio.jetkvm-mac, account = the JetKVM device ID). The file-based
+/// xyz.scio.blitzkvm, account = the JetKVM device ID). The file-based
 /// keychain needs no provisioning profile, unlike the data-protection one.
 enum Keychain {
-    static let service = "xyz.scio.jetkvm-mac"
+    static let service = "xyz.scio.blitzkvm"
 
     static func password(account: String) -> String? {
         let query: [CFString: Any] = [
@@ -34,7 +34,7 @@ enum Keychain {
         guard status == errSecItemNotFound else { return false }
         var add = base
         add[kSecValueData] = data
-        add[kSecAttrLabel] = "JetKVM Desktop (\(account))"
+        add[kSecAttrLabel] = "BlitzKVM (\(account))"
         add[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
         return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
     }

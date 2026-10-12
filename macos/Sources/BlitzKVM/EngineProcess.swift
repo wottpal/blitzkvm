@@ -18,7 +18,7 @@ struct EngineError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// Runs and supervises the Go helper (`jetkvm-engine`): one process per
+/// Runs and supervises the Go helper (`blitzkvm-engine`): one process per
 /// device session. If it crashes, it is restarted with backoff and the last
 /// connect command is replayed, so the window survives engine failures.
 final class EngineProcess {
@@ -50,16 +50,16 @@ final class EngineProcess {
     }
 
     /// Finds the helper next to the app binary (Contents/Helpers or
-    /// Contents/MacOS), or at $JETKVM_ENGINE for development.
+    /// Contents/MacOS), or at $BLITZKVM_ENGINE for development.
     static func locateHelper() -> URL? {
-        if let path = ProcessInfo.processInfo.environment["JETKVM_ENGINE"], FileManager.default.isExecutableFile(atPath: path) {
+        if let path = ProcessInfo.processInfo.environment["BLITZKVM_ENGINE"], FileManager.default.isExecutableFile(atPath: path) {
             return URL(fileURLWithPath: path)
         }
         let bundle = Bundle.main.bundleURL
         let candidates = [
-            bundle.appendingPathComponent("Contents/Helpers/jetkvm-engine"),
-            bundle.appendingPathComponent("Contents/MacOS/jetkvm-engine"),
-            Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("jetkvm-engine"),
+            bundle.appendingPathComponent("Contents/Helpers/blitzkvm-engine"),
+            bundle.appendingPathComponent("Contents/MacOS/blitzkvm-engine"),
+            Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("blitzkvm-engine"),
         ].compactMap { $0 }
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }

@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/emulator"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/tlspin"
+	"github.com/wottpal/blitzkvm/pkg/emulator"
+	"github.com/wottpal/blitzkvm/pkg/protocol/tlspin"
 )
 
 // The genuine device CA is pinned. An interceptor terminates TLS with its

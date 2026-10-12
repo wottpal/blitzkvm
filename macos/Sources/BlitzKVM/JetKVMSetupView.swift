@@ -1,7 +1,7 @@
 import JetKVMCore
 import SwiftUI
 
-/// Set Up JetKVM: the JetKVM Desktop firmware, a password and Tailscale,
+/// Set Up JetKVM: the BlitzKVM firmware, a password and Tailscale,
 /// each with its state and the one action that moves it forward.
 struct JetKVMSetupView: View {
     @ObservedObject var model: JetKVMSetupModel
@@ -71,7 +71,7 @@ struct JetKVMSetupView: View {
 
     // MARK: Rows
 
-    /// The firmware row: the build that runs, the JetKVM Desktop build as
+    /// The firmware row: the build that runs, the BlitzKVM build as
     /// the main action, and every build the app ships in its menu, so
     /// switching between them (or reinstalling one) is one choice away.
     private var firmwareRow: some View {
@@ -94,17 +94,17 @@ struct JetKVMSetupView: View {
         switch row.value {
         case .bundled(let build)? where build == recommended:
             content = RowContent(detail: build.title, badge: "Up to Date", menu: choices(installed: build))
-        case .bundled(let build)? where build.kind == .desktop:
+        case .bundled(let build)? where build.kind == .blitzkvm:
             content = RowContent(detail: build.title, note: newer,
                                  action: .init(title: "Update…", perform: install(recommended)), menu: choices(installed: build))
         case .bundled(let build)?:
             content = RowContent(detail: "\(build.title), JetKVM's own firmware", note: benefit,
                                  action: .init(title: "Install…", perform: install(recommended)), menu: choices(installed: build))
-        case .otherDesktop?:
-            content = RowContent(detail: "An older JetKVM Desktop build", note: newer,
+        case .otherBlitzKVM?:
+            content = RowContent(detail: "An older BlitzKVM build", note: newer,
                                  action: .init(title: "Update…", perform: install(recommended)), menu: choices(installed: nil))
         case .unverified?:
-            content = RowContent(detail: "JetKVM Desktop firmware", note: "Check whether it's \(recommended.version).",
+            content = RowContent(detail: "BlitzKVM firmware", note: "Check whether it's \(recommended.version).",
                                  action: .init(title: "Check", perform: model.verifyFirmware), menu: choices(installed: nil))
         case .stock(let version)?:
             content = RowContent(detail: "JetKVM \(version), JetKVM's own firmware", note: benefit,
@@ -175,7 +175,7 @@ struct JetKVMSetupView: View {
                     + "The current firmware is kept as a backup."
                 return build.kind == .stock
                     ? "JetKVM's own firmware, as released. " + restart
-                        + " Sharper text, near-lossless still screens and the largest Match Window sizes need the JetKVM Desktop firmware."
+                        + " Sharper text, near-lossless still screens and the largest Match Window sizes need the BlitzKVM firmware."
                     : restart + " JetKVM's automatic updates replace this build with their next release."
             case .tailscale(let passwordOff):
                 let base = "It's downloaded from tailscale.com and installed without restarting the JetKVM. Your browser then opens to log in."

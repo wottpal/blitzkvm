@@ -101,7 +101,7 @@ public final class DeviceStore {
     public static func defaultURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return base.appendingPathComponent("JetKVM Desktop", isDirectory: true).appendingPathComponent("devices.json")
+        return base.appendingPathComponent("BlitzKVM", isDirectory: true).appendingPathComponent("devices.json")
     }
 
     public func load() {

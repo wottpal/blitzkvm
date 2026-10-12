@@ -142,7 +142,7 @@ func preferencesPath() (string, error) {
 	if root == "" {
 		return "", errors.New("config directory unavailable")
 	}
-	return filepath.Join(root, "jetkvm-desktop", "preferences.json"), nil
+	return filepath.Join(root, "blitzkvm", "preferences.json"), nil
 }
 
 func (p *Preferences) normalize() {

@@ -1,6 +1,6 @@
 package client
 
-// Debug aid: JETKVM_DEBUG_BLACKHOLE="period:duration" (seconds) drops all of
+// Debug aid: BLITZKVM_DEBUG_BLACKHOLE="period:duration" (seconds) drops all of
 // the session's UDP traffic (both ways) for the last `duration` seconds of
 // every `period`, to reproduce network hiccups. It measured the SCTP stall
 // that sctpRTOMax bounds (plan §25). Unset, nothing is wrapped.
@@ -33,7 +33,7 @@ func blackholeActive() bool {
 }
 
 func applyDebugBlackhole(se *webrtc.SettingEngine) {
-	spec := os.Getenv("JETKVM_DEBUG_BLACKHOLE")
+	spec := os.Getenv("BLITZKVM_DEBUG_BLACKHOLE")
 	parts := strings.Split(spec, ":")
 	if len(parts) != 2 {
 		return

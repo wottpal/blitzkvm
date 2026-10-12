@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/jsonrpc"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
+	"github.com/wottpal/blitzkvm/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/protocol/jsonrpc"
+	"github.com/wottpal/blitzkvm/pkg/virtualmedia"
 )
 
 const mqttPasswordMask = "********"

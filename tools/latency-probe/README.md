@@ -13,7 +13,7 @@ the user.
 2. Run the app with the probe, against a device whose target is **not** the Mac you run it on:
 
    ```sh
-   "macos/build/JetKVM Desktop.app/Contents/MacOS/JetKVMDesktop" --device <address> --latency-probe 40
+   "macos/build/BlitzKVM.app/Contents/MacOS/BlitzKVM" --device <address> --latency-probe 40
    ```
 
    It connects, takes 40 samples about a second apart, prints a JSON report and exits.
@@ -25,10 +25,10 @@ stops as soon as it is gone. So keys never reach another app on the remote when 
 
 | Variable | Effect |
 |---|---|
-| `JETKVM_PROBE_POINTER=1` | Moves the pointer between two spots instead of pressing a key; waits for the cursor at the new spot |
-| `JETKVM_PROBE_FULLSCREEN=1` | Measures with the window in full screen |
-| `JETKVM_PROBE_PAIR_GAP=S` | Presses an unmeasured key first, then the measured one S seconds later (to hit the still refresh) |
-| `JETKVM_DISPLAY_SYNC=1` | A/B: the old presentation (display sync on) |
+| `BLITZKVM_PROBE_POINTER=1` | Moves the pointer between two spots instead of pressing a key; waits for the cursor at the new spot |
+| `BLITZKVM_PROBE_FULLSCREEN=1` | Measures with the window in full screen |
+| `BLITZKVM_PROBE_PAIR_GAP=S` | Presses an unmeasured key first, then the measured one S seconds later (to hit the still refresh) |
+| `BLITZKVM_DISPLAY_SYNC=1` | A/B: the old presentation (display sync on) |
 
 ## Report
 

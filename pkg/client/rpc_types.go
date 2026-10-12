@@ -3,7 +3,7 @@ package client
 import (
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
+	"github.com/wottpal/blitzkvm/pkg/virtualmedia"
 )
 
 type LocalVersion struct {

@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/emulator"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/engine"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/engineipc"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/tlspin"
+	"github.com/wottpal/blitzkvm/pkg/emulator"
+	"github.com/wottpal/blitzkvm/pkg/engine"
+	"github.com/wottpal/blitzkvm/pkg/engineipc"
+	"github.com/wottpal/blitzkvm/pkg/protocol/tlspin"
 )
 
 type harness struct {

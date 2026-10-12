@@ -18,12 +18,12 @@ import (
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/auth"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/hidrpc"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/jsonrpc"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/signaling"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/video"
+	"github.com/wottpal/blitzkvm/pkg/logging"
+	"github.com/wottpal/blitzkvm/pkg/protocol/auth"
+	"github.com/wottpal/blitzkvm/pkg/protocol/hidrpc"
+	"github.com/wottpal/blitzkvm/pkg/protocol/jsonrpc"
+	"github.com/wottpal/blitzkvm/pkg/protocol/signaling"
+	"github.com/wottpal/blitzkvm/pkg/video"
 )
 
 // ErrClosed is returned by calls on a client that has been closed.

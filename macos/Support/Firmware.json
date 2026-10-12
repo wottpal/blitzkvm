@@ -1,7 +1,7 @@
 {
   "builds": [
     {
-      "kind": "desktop",
+      "kind": "blitzkvm",
       "tag": "release/0.5.9-fork.4",
       "sha256": "9052cccccf3dd4355a4292728574f8d2ef21a1e2596d27dbce9923acfdc05d65",
       "size": 31547016

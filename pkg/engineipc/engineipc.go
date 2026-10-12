@@ -1,5 +1,5 @@
 // Package engineipc defines the wire protocol between the native macOS app
-// and its jetkvm-engine helper (one helper process per device session).
+// and its blitzkvm-engine helper (one helper process per device session).
 //
 // Every message is a frame: a 4-byte big-endian length (of type + payload),
 // a 1-byte type, then the payload. Control messages carry JSON; the hot paths

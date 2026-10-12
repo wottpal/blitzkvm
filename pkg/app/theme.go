@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/ui"
+	"github.com/wottpal/blitzkvm/pkg/ui"
 )
 
 const systemThemeCacheTTL = time.Minute

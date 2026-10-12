@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/emulator"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/auth"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/protocol/tlspin"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/video/openh264"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/virtualmedia"
+	"github.com/wottpal/blitzkvm/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/emulator"
+	"github.com/wottpal/blitzkvm/pkg/protocol/auth"
+	"github.com/wottpal/blitzkvm/pkg/protocol/tlspin"
+	"github.com/wottpal/blitzkvm/pkg/video/openh264"
+	"github.com/wottpal/blitzkvm/pkg/virtualmedia"
 )
 
 func TestControllerConnects(t *testing.T) {

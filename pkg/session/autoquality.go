@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/logging"
+	"github.com/wottpal/blitzkvm/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/logging"
 )
 
 // Automatic stream quality.

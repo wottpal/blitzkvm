@@ -71,7 +71,7 @@ for (name, c) in [("blue", rgb(0.35, 0.6, 1)), ("green", rgb(0.3, 0.85, 0.4)), (
     text("13px \(name)  " + sample, x: 976, y: y, size: 13, color: c)
     y += 22
 }
-for line in ["$ go test -race ./pkg/... && make -C macos selftest", "ok  github.com/lkarlslund/jetkvm-desktop/pkg/video 0.412s", "PASS: 34 tests, 0 failures  [0O1lI|]"] {
+for line in ["$ go test -race ./pkg/... && make -C macos selftest", "ok  github.com/wottpal/blitzkvm/pkg/video 0.412s", "PASS: 34 tests, 0 failures  [0O1lI|]"] {
     text(line, x: 976, y: y, size: 12, color: rgb(0.75, 0.95, 0.75), mono: true)
     y += 17
 }

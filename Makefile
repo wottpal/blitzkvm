@@ -7,7 +7,7 @@ build:
 
 # Helper process used by the native macOS app (one process per device session).
 engine:
-	$(GO) build -trimpath -o bin/jetkvm-engine ./cmd/jetkvm-engine
+	$(GO) build -trimpath -o bin/blitzkvm-engine ./cmd/blitzkvm-engine
 
 # Local fake JetKVM for manual testing: `make emulator` then connect to http://127.0.0.1:8080
 emulator:

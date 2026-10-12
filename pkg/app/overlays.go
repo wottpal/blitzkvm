@@ -11,10 +11,10 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"golang.design/x/clipboard"
 
-	"github.com/lkarlslund/jetkvm-desktop/pkg/client"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/input"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/session"
-	"github.com/lkarlslund/jetkvm-desktop/pkg/ui"
+	"github.com/wottpal/blitzkvm/pkg/client"
+	"github.com/wottpal/blitzkvm/pkg/input"
+	"github.com/wottpal/blitzkvm/pkg/session"
+	"github.com/wottpal/blitzkvm/pkg/ui"
 )
 
 var clipboardReady bool

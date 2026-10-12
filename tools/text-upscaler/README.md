@@ -1,6 +1,6 @@
 # Text upscaler
 
-The app enlarges the remote picture exactly 2× (Actual Size on a Retina screen) with a small convolutional network instead of FSR: `macos/Sources/JetKVMDesktop/TextUpscaler.swift`, weights in `TextUpscalerWeights.swift`. These two scripts make the weights.
+The app enlarges the remote picture exactly 2× (Actual Size on a Retina screen) with a small convolutional network instead of FSR: `macos/Sources/BlitzKVM/TextUpscaler.swift`, weights in `TextUpscalerWeights.swift`. These two scripts make the weights.
 
 | File | Purpose |
 |---|---|
@@ -13,7 +13,7 @@ swiftc -O gen.swift -o /tmp/gen && /tmp/gen /tmp/pairs 3000 11     # 3000 pairs,
 (cd ../quality-bench && swift make_pattern.swift pattern.png && swift make_pattern.swift pattern2x.png 2)
 uv venv -q venv && uv pip install -q --python venv/bin/python torch numpy pillow scikit-image
 venv/bin/python train.py /tmp/pairs --channels 8 --steps 30000 \
-  --swift ../../macos/Sources/JetKVMDesktop/TextUpscalerWeights.swift   # ~2.5 min on Apple silicon (MPS)
+  --swift ../../macos/Sources/BlitzKVM/TextUpscalerWeights.swift   # ~2.5 min on Apple silicon (MPS)
 ```
 
 ## Results

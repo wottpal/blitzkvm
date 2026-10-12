@@ -94,11 +94,11 @@ jobs:
             local missing=0
             local asset
             local expected_assets=(
-              "jetkvm-desktop-${tag}-linux-amd64.tar.gz"
-              "jetkvm-desktop-${tag}-linux-aarch64.tar.gz"
-              "jetkvm-desktop-${tag}-macos-amd64.tar.gz"
-              "jetkvm-desktop-${tag}-macos-aarch64.tar.gz"
-              "jetkvm-desktop-${tag}-windows-amd64.zip"
+              "blitzkvm-legacy-${tag}-linux-amd64.tar.gz"
+              "blitzkvm-legacy-${tag}-linux-aarch64.tar.gz"
+              "blitzkvm-legacy-${tag}-macos-amd64.tar.gz"
+              "blitzkvm-legacy-${tag}-macos-aarch64.tar.gz"
+              "blitzkvm-legacy-${tag}-windows-amd64.zip"
               "SHA256SUMS.txt"
             )
 
@@ -171,11 +171,11 @@ jobs:
           find dist -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} release/ \;
 
           expected_assets=(
-            "jetkvm-desktop-${RELEASE_TAG}-linux-amd64.tar.gz"
-            "jetkvm-desktop-${RELEASE_TAG}-linux-aarch64.tar.gz"
-            "jetkvm-desktop-${RELEASE_TAG}-macos-amd64.tar.gz"
-            "jetkvm-desktop-${RELEASE_TAG}-macos-aarch64.tar.gz"
-            "jetkvm-desktop-${RELEASE_TAG}-windows-amd64.zip"
+            "blitzkvm-legacy-${RELEASE_TAG}-linux-amd64.tar.gz"
+            "blitzkvm-legacy-${RELEASE_TAG}-linux-aarch64.tar.gz"
+            "blitzkvm-legacy-${RELEASE_TAG}-macos-amd64.tar.gz"
+            "blitzkvm-legacy-${RELEASE_TAG}-macos-aarch64.tar.gz"
+            "blitzkvm-legacy-${RELEASE_TAG}-windows-amd64.zip"
           )
           for asset in "${expected_assets[@]}"; do
             if [[ ! -f "release/$asset" ]]; then
@@ -188,7 +188,7 @@ jobs:
           short_sha="$(git rev-parse --short=12 "$RELEASE_SHA")"
           built_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           {
-            echo "## JetKVM Desktop ${RELEASE_TAG}"
+            echo "## BlitzKVM ${RELEASE_TAG}"
             echo
             echo "Rolling release for Linux, macOS, and Windows, built from ${short_sha} at ${built_at}."
             echo
