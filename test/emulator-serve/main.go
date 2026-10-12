@@ -81,6 +81,7 @@ func main() {
 	serveCmd.Flags().DurationVar(&cfg.Netem.HoldFor, "hold-for", 0, "How long each stall (--hold-every) holds outgoing RTP")
 	serveCmd.Flags().Float64Var(&cfg.Netem.Rate, "rate", 0, "Link rate for outgoing RTP in bits per second (0: unlimited)")
 	serveCmd.Flags().BoolVar(&cfg.KeyframeOnRequest, "keyframe-on-request", false, "Send a keyframe on RTCP PLI/FIR, like the patched firmware")
+	serveCmd.Flags().BoolVar(&cfg.Desktop, "desktop", false, "Move the test pattern's box over a still screen of text: large keyframes, small frames between")
 	serveCmd.Flags().DurationVar(&cfg.RebootDowntime, "reboot-downtime", 20*time.Second, "How long the device is unreachable after a reboot RPC")
 	serveCmd.Flags().BoolVar(&cfg.TLS, "tls", false, "Serve https with a self-signed device CA, like the firmware's self-signed TLS mode")
 	serveCmd.Flags().BoolVar(&cfg.EncoderPatch, "encoder-patch", false, "Answer get/setVideoEncoderParams like firmware with the desktop encoder patch")

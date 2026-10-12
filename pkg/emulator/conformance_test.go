@@ -438,7 +438,7 @@ func TestH264HighProfileReplayDecodes(t *testing.T) {
 }
 
 func TestBurnedTimestampRoundTrips(t *testing.T) {
-	img := newPatternFrame(640, 360, 7)
+	img := newPatternFrame(640, 360, 7, nil)
 	at := time.UnixMilli(1760000000123)
 	burnTimestamp(img, at)
 	got, ok := BurnedTimestamp(img.Y, img.YStride, 640, 360)

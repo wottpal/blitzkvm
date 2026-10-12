@@ -133,6 +133,7 @@ type StatsSnapshot struct {
 	FramesPerSecond float64
 	FramesDropped   uint64
 	KeyframeWaits   uint64
+	LateRepairs     uint64 // keyframe waits cancelled by a late NACK repair
 	RoundTripMs     float64
 	// Path is the network the selected candidate pair runs over (PathLAN,
 	// PathTailscale, ...); PathRemote is its remote address.
@@ -221,6 +222,9 @@ type Client struct {
 	inputStallLogged bool
 	inputAcked       uint64
 	rttNanos         atomic.Int64
+
+	// impair is the link model of BLITZKVM_IMPAIR, if set (impair.go).
+	impair atomic.Pointer[impairment]
 
 	closeCh        chan struct{}
 	closeOnce      sync.Once
@@ -325,7 +329,8 @@ func (c *Client) peer() *webrtc.PeerConnection {
 }
 
 // newAPI builds a pion API with explicit codecs carrying RTCP feedback (NACK,
-// PLI, FIR) and the default interceptors (NACK generator, RTCP reports, TWCC).
+// PLI, FIR), the default interceptors (NACK responder, RTCP reports, stats,
+// TWCC) and our own NACK generator.
 // Offering only what we can decode matters: JetKVM picks H.265 whenever the
 // offer mentions it.
 func (c *Client) newAPI(local []net.IP) (*webrtc.API, error) {
@@ -353,19 +358,14 @@ func (c *Client) newAPI(local []net.IP) (*webrtc.API, error) {
 		}
 	}
 	registry := &interceptor.Registry{}
-	// NACK faster than pion's default 100 ms: the assembler holds a frame
-	// while its missing packets are retransmitted.
+	// NACKs come from nackGenerator, which repeats them a round trip apart
+	// (nack.go); pion's own generator gets no streams.
 	if err := webrtc.RegisterDefaultInterceptorsWithOptions(m, registry,
-		webrtc.WithNackGeneratorOptions(
-			nack.GeneratorInterval(video.NACKInterval),
-			// The device resends on every NACK; bound the repeats so a
-			// congested link is not flooded (6 × 40 ms ≈ the assembler's
-			// longest wait for a missing packet).
-			nack.GeneratorMaxNacksPerPacket(6),
-		),
+		webrtc.WithNackGeneratorOptions(nack.GeneratorStreamsFilter(func(*interceptor.StreamInfo) bool { return false })),
 	); err != nil {
 		return nil, err
 	}
+	registry.Add(nackGeneratorFactory{rtt: c.rtt})
 
 	se := webrtc.SettingEngine{}
 	// The device encrypts every video packet in pure Go: its ARMv7 core has
@@ -392,7 +392,13 @@ func (c *Client) newAPI(local []net.IP) (*webrtc.API, error) {
 	// 3.6 s more, and minutes after longer ones. Capped at 1 s (pion's
 	// minimum RTO) it is back within 0.7 s.
 	se.SetSCTPRTOMax(sctpRTOMax)
-	applyDebugBlackhole(&se)
+	n, err := c.testNet()
+	if err != nil {
+		return nil, err
+	}
+	if n != nil {
+		se.SetNet(n)
+	}
 	return webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(registry), webrtc.WithSettingEngine(se)), nil
 }
 
@@ -737,7 +743,7 @@ func (c *Client) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 	c.emitLifecycle(LifecycleEvent{Type: "video_ready"})
 
 	go func() {
-		err := video.Receive(c.ctx, track, asm, func() time.Duration { return time.Duration(c.rttNanos.Load()) })
+		err := video.Receive(c.ctx, track, asm, c.rtt)
 		sink.Close()
 		if c.ctx.Err() == nil {
 			// The track ended while the session lives on: the picture
@@ -750,6 +756,10 @@ func (c *Client) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		}
 	}()
 }
+
+// rtt is the selected candidate pair's latest round-trip time (0 before the
+// first measurement).
+func (c *Client) rtt() time.Duration { return time.Duration(c.rttNanos.Load()) }
 
 func (c *Client) handleTransportDisconnect(state webrtc.PeerConnectionState, source string) {
 	select {
@@ -782,6 +792,9 @@ func (c *Client) Close() error {
 		c.pcMu.Unlock()
 		if pc != nil {
 			err = pc.Close()
+		}
+		if im := c.impair.Load(); im != nil {
+			im.stop()
 		}
 		c.videoMu.Lock()
 		sink := c.videoSink
@@ -1394,6 +1407,7 @@ func (c *Client) Stats() StatsSnapshot {
 		as := c.assembler.Stats()
 		stats.FramesDropped = as.DroppedFrames
 		stats.KeyframeWaits = as.KeyframeWaits
+		stats.LateRepairs = as.LateRepairs
 		if c.frames == nil {
 			stats.VideoReady = as.Frames > 0
 		}

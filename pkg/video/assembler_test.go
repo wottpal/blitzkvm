@@ -137,40 +137,158 @@ func TestAssemblerWaitsForRetransmission(t *testing.T) {
 	}
 }
 
-func TestAssemblerDropsAndWaitsForKeyframeAfterDeadline(t *testing.T) {
-	var out sink
-	a := NewAssembler(CodecH264, out.deliver, out.request)
-	now := time.Unix(0, 0)
+func (s *sink) requests() int {
+	time.Sleep(10 * time.Millisecond) // keyframe requests run on their own goroutine
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.keyframes
+}
+
+// brokenStream delivers a keyframe, then a P-frame missing its middle packet
+// (seq 12) and a P-frame that depends on it, all at now.
+func brokenStream(a *Assembler, now time.Time) (missing *rtp.Packet) {
 	for _, p := range frame(10, 1000, true, 1) {
 		a.Push(p, now)
 	}
 	broken := frame(11, 2000, false, 3)
 	a.Push(broken[0], now)
 	a.Push(broken[2], now)
-	// The next P-frame arrives complete but depends on the broken one.
 	for _, p := range frame(14, 3000, false, 1) {
 		a.Push(p, now)
 	}
-	a.Tick(now.Add(maxGapDeadline + time.Millisecond))
+	return broken[1]
+}
+
+func TestAssemblerAsksForKeyframeAfterDeadlineAndResumesAtIt(t *testing.T) {
+	var out sink
+	a := NewAssembler(CodecH264, out.deliver, out.request)
+	now := time.Unix(0, 0)
+	brokenStream(a, now)
+	a.Tick(now.Add(a.gapDeadline() - time.Millisecond))
+	if st := a.Stats(); st.KeyframeWaits != 0 || out.requests() != 0 {
+		t.Fatalf("asked for a keyframe before the deadline: %+v", st)
+	}
+	a.Tick(now.Add(a.gapDeadline()))
 	if out.count() != 1 {
 		t.Fatalf("emitted frames that depend on a lost frame: %d", out.count())
 	}
-	st := a.Stats()
-	if st.KeyframeWaits != 1 || st.DroppedFrames < 1 {
-		t.Fatalf("expected a keyframe wait, got %+v", st)
+	if st := a.Stats(); st.KeyframeWaits != 1 || out.requests() != 1 {
+		t.Fatalf("expected a keyframe wait and request, got %+v", st)
 	}
 	for _, p := range frame(15, 4000, true, 2) {
-		a.Push(p, now.Add(300*time.Millisecond))
+		a.Push(p, now.Add(500*time.Millisecond))
 	}
 	if out.count() != 2 || !out.units[1].Keyframe {
-		t.Fatalf("did not recover at the next keyframe: %d units", out.count())
+		t.Fatalf("did not resume at the keyframe: %d units", out.count())
 	}
-	time.Sleep(10 * time.Millisecond) // keyframe request runs on its own goroutine
-	out.mu.Lock()
-	requested := out.keyframes
-	out.mu.Unlock()
-	if requested == 0 {
-		t.Fatal("no keyframe was requested after the loss")
+	if st := a.Stats(); st.DroppedFrames != 2 || st.LateRepairs != 0 {
+		t.Fatalf("want the two frames before the keyframe dropped: %+v", st)
+	}
+	for _, p := range frame(17, 5000, false, 1) {
+		a.Push(p, now.Add(510*time.Millisecond))
+	}
+	if out.count() != 3 {
+		t.Fatalf("frame after the keyframe not emitted: %d", out.count())
+	}
+}
+
+func TestAssemblerLateRepairCancelsKeyframeWait(t *testing.T) {
+	var out sink
+	a := NewAssembler(CodecH264, out.deliver, out.request)
+	now := time.Unix(0, 0)
+	missing := brokenStream(a, now)
+	a.Tick(now.Add(time.Second))
+	if st := a.Stats(); st.KeyframeWaits != 1 {
+		t.Fatalf("no keyframe wait after the deadline: %+v", st)
+	}
+	a.Push(missing, now.Add(time.Second+time.Millisecond)) // the repair, late
+	if out.count() != 3 {
+		t.Fatalf("held frames not emitted after the late repair: %d", out.count())
+	}
+	for _, p := range frame(15, 4000, false, 1) {
+		a.Push(p, now.Add(time.Second+2*time.Millisecond))
+	}
+	if out.count() != 4 {
+		t.Fatalf("still waiting for a keyframe after the repair: %d", out.count())
+	}
+	if st := a.Stats(); st.LateRepairs != 1 || st.DroppedFrames != 0 {
+		t.Fatalf("stats %+v", st)
+	}
+}
+
+func TestAssemblerDeadlineRunsFromLastRepair(t *testing.T) {
+	var out sink
+	a := NewAssembler(CodecH264, out.deliver, out.request)
+	now := time.Unix(0, 0)
+	for _, p := range frame(10, 1000, true, 1) {
+		a.Push(p, now)
+	}
+	// A keyframe-sized loss: 20 packets, repaired one by one.
+	big := frame(11, 2000, false, 22)
+	a.Push(big[0], now)
+	a.Push(big[21], now)
+	step := a.gapDeadline() / 2
+	for i := 1; i < 21; i++ {
+		at := now.Add(time.Duration(i) * step)
+		a.Tick(at)
+		a.Push(big[i], at)
+	}
+	if st := a.Stats(); st.KeyframeWaits != 0 || out.count() != 2 {
+		t.Fatalf("a repair under way timed out: %+v, %d units", st, out.count())
+	}
+}
+
+func TestAssemblerTakesKeyframeBehindGapAtOnce(t *testing.T) {
+	var out sink
+	a := NewAssembler(CodecH264, out.deliver, out.request)
+	now := time.Unix(0, 0)
+	brokenStream(a, now)
+	// A keyframe (another client asked for one) arrives within the deadline.
+	for _, p := range frame(15, 4000, true, 3) {
+		a.Push(p, now.Add(10*time.Millisecond))
+	}
+	if out.count() != 2 || !out.units[1].Keyframe {
+		t.Fatalf("keyframe behind the gap not emitted: %d units", out.count())
+	}
+	if st := a.Stats(); st.KeyframeWaits != 0 || st.DroppedFrames != 2 || out.requests() != 0 {
+		t.Fatalf("stats %+v, %d requests", st, out.requests())
+	}
+}
+
+func TestAssemblerGapDeadlineScalesWithRTT(t *testing.T) {
+	a := NewAssembler(CodecH264, func(AccessUnit) {}, nil)
+	for _, tc := range []struct{ rtt, want time.Duration }{
+		{time.Millisecond, 102250 * time.Microsecond}, // as before on a LAN
+		{100 * time.Millisecond, 325 * time.Millisecond},
+		{200 * time.Millisecond, 550 * time.Millisecond},
+		{time.Second, maxGapDeadline},
+	} {
+		a.SetRTT(tc.rtt)
+		if got := a.gapDeadline(); got != tc.want {
+			t.Errorf("RTT %s: deadline %s, want %s", tc.rtt, got, tc.want)
+		}
+	}
+}
+
+func TestCarriesKeyframe(t *testing.T) {
+	for _, tc := range []struct {
+		codec   Codec
+		payload []byte
+		want    bool
+	}{
+		{CodecH264, []byte{0x65, 0x88, 0x80}, true},                                // IDR slice
+		{CodecH264, []byte{0x7c, 0x85, 0x01}, true},                                // FU-A of an IDR
+		{CodecH264, []byte{0x7c, 0x81, 0x01}, false},                               // FU-A of a P slice
+		{CodecH264, []byte{0x78, 0, 2, 0x67, 0x42, 0, 2, 0x65, 0x88}, true},        // STAP-A: SPS, IDR
+		{CodecH264, []byte{0x78, 0, 2, 0x67, 0x42, 0, 2, 0x68, 0xce}, false},       // STAP-A: SPS, PPS
+		{CodecH265, []byte{0x62, 0x01, 0x93, 0xaf}, true},                          // FU of IDR_W_RADL
+		{CodecH265, []byte{0x62, 0x01, 0x81, 0xaf}, false},                         // FU of TRAIL_R
+		{CodecH265, []byte{0x60, 0x01, 0, 2, 0x40, 0x01, 0, 2, 0x28, 0x01}, true},  // AP: VPS, IDR_N_LP
+		{CodecH265, []byte{0x60, 0x01, 0, 2, 0x40, 0x01, 0, 2, 0x02, 0x01}, false}, // AP: VPS, TRAIL_R
+	} {
+		if got := carriesKeyframe(tc.codec, tc.payload); got != tc.want {
+			t.Errorf("%s % x: got %v", tc.codec, tc.payload, got)
+		}
 	}
 }
 

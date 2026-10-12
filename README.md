@@ -47,7 +47,7 @@ Run root targets from the repository root and macOS targets with `make -C macos 
 | `make build` | `go build ./...` |
 | `make test` | Go tests (`-p 1`) plus the vendored OpenH264 module's tests |
 | `make test-race` | Go tests with the race detector |
-| `make test-timing` | Timing-sensitive tests that skip themselves under `-race` (NACK loss repair) |
+| `make test-timing` | Timing-sensitive tests that skip themselves under `-race` (NACK loss repair, also at long round trips) |
 | `make vet` / `make vulncheck` | `go vet`; govulncheck |
 | `make generate` | Regenerates the enumer files (`*_enums.go`) |
 | `make generate-check` | Regenerates, then fails if `git diff` is not empty, so it also fails on any uncommitted change |
@@ -146,7 +146,7 @@ Command-line options (also used by the self-tests):
 | `--setup check\|install-tailscale\|login\|restart\|install-firmware[=blitzkvm\|stock]\|password=<new password>\|change-password=<new password>\|remove-password`, `--setup-snapshot <png>`, `--wake` | With `--selftest`: opens JetKVM Setup, runs the action, and reports the three states (`setup`, `setupOK`); the snapshot renders the sheet. `--wake` wakes the target once connected (no keystrokes) |
 | `--latency-probe <samples>` | Measures input-to-photon latency against `tools/latency-probe/latency.html` on the target (prints JSON, exits) |
 
-Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `BLITZKVM_DEBUG_BLACKHOLE=period:duration` (seconds) makes the helper drop all session traffic for `duration` every `period`, to reproduce network hiccups. `BLITZKVM_ENGINE` points at a helper binary for development. `BLITZKVM_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.
+Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `BLITZKVM_DEBUG_BLACKHOLE=period:duration` (seconds) makes the helper drop all session traffic for `duration` every `period`, to reproduce network hiccups. `BLITZKVM_IMPAIR` runs the session's traffic through a model of a slow link, both ways (`pkg/netimpair`): a profile (`lte`, `lte-congested`, `wifi-hotel`, `derp`), settings (`rate=4mbit,queue=1s,delay=40ms,jitter=5ms,loss=1%,burst=3,outage-every=20s,outage=200ms-800ms`, or `trace=<Mahimahi file>` for the rate), or a profile with overrides (`lte,loss=1%`). The helper logs what the link did when the session ends; `BLITZKVM_BENCH=60s go test -run TestSlowLinkBenchmark ./pkg/emulator` compares the profiles. `BLITZKVM_ENGINE` points at a helper binary for development. `BLITZKVM_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.
 
 Where things live:
 

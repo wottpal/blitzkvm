@@ -22,7 +22,7 @@ test-race:
 
 # Timing-sensitive tests skip themselves under the race detector.
 test-timing:
-	$(GO) test -count=1 -run 'TestPacketLossIsRepairedByNACK' ./pkg/emulator
+	$(GO) test -count=1 -run 'TestPacketLossIsRepairedByNACK|TestNACKRepairAtLongRoundTrips' ./pkg/emulator
 
 vet:
 	$(GO) vet ./...

@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/pion/transport/v5"
-	"github.com/pion/transport/v5/stdnet"
-	"github.com/pion/webrtc/v4"
 )
 
 var blackholeStart = time.Now()
@@ -32,44 +30,21 @@ func blackholeActive() bool {
 	return time.Since(blackholeStart)%s.period >= s.period-s.duration
 }
 
-func applyDebugBlackhole(se *webrtc.SettingEngine) {
+// blackholeFromEnv reads BLITZKVM_DEBUG_BLACKHOLE and reports whether it is
+// set (testNet then wraps the session's sockets in blackholeConn).
+func blackholeFromEnv() bool {
 	spec := os.Getenv("BLITZKVM_DEBUG_BLACKHOLE")
 	parts := strings.Split(spec, ":")
 	if len(parts) != 2 {
-		return
+		return false
 	}
 	p, err1 := strconv.ParseFloat(parts[0], 64)
 	d, err2 := strconv.ParseFloat(parts[1], 64)
 	if err1 != nil || err2 != nil || p <= d {
-		return
+		return false
 	}
 	blackholeCfg.Store(&blackholeSchedule{time.Duration(p * float64(time.Second)), time.Duration(d * float64(time.Second))})
-	n, err := stdnet.NewNet()
-	if err != nil {
-		return
-	}
-	se.SetNet(blackholeNet{n})
-}
-
-type blackholeNet struct{ *stdnet.Net }
-
-func (n blackholeNet) ListenUDP(network string, laddr *net.UDPAddr) (transport.UDPConn, error) {
-	c, err := n.Net.ListenUDP(network, laddr)
-	if err != nil {
-		return nil, err
-	}
-	return &blackholeConn{c}, nil
-}
-
-func (n blackholeNet) ListenPacket(network, address string) (net.PacketConn, error) {
-	c, err := n.Net.ListenPacket(network, address)
-	if err != nil {
-		return nil, err
-	}
-	if u, ok := c.(transport.UDPConn); ok {
-		return &blackholeConn{u}, nil
-	}
-	return c, nil
+	return true
 }
 
 type blackholeConn struct{ transport.UDPConn }

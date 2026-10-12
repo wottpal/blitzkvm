@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"math/rand/v2"
 	"os"
 	"runtime"
 	"strings"
@@ -45,7 +46,7 @@ func (s *Server) startVideo(ctx context.Context, mimeType string, track *webrtc.
 		if s.cfg.ReplayH264 != "" {
 			return startReplay(ctx, s.cfg.ReplayH264, h264AUD, s.cfg.FPS, track)
 		}
-		return startTestPattern(ctx, s.cfg.Width, s.cfg.Height, s.cfg.FPS, s.cfg.GOP, track, keyframeReq)
+		return startTestPattern(ctx, s.cfg.Width, s.cfg.Height, s.cfg.FPS, s.cfg.GOP, s.cfg.Desktop, track, keyframeReq)
 	case webrtc.MimeTypeH265:
 		if s.cfg.ReplayH265 != "" {
 			return startReplay(ctx, s.cfg.ReplayH265, h265AUD, s.cfg.FPS, track)
@@ -63,7 +64,11 @@ func (s *Server) startVideo(ctx context.Context, mimeType string, track *webrtc.
 // Baseline; the OpenH264 encoder cannot produce the device's High profile).
 // Every frame carries a timestamp barcode (see BurnedTimestamp) so latency
 // harnesses can compare capture time against encode time.
-func startTestPattern(ctx context.Context, width, height, fps, gop int, track *webrtc.TrackLocalStaticSample, keyframeReq <-chan struct{}) error {
+func startTestPattern(ctx context.Context, width, height, fps, gop int, desktop bool, track *webrtc.TrackLocalStaticSample, keyframeReq <-chan struct{}) error {
+	var background *image.YCbCr
+	if desktop {
+		background = desktopBackground(width, height)
+	}
 	params := openh264.NewEncoderParams()
 	params.Width = width
 	params.Height = height
@@ -94,7 +99,7 @@ func startTestPattern(ctx context.Context, width, height, fps, gop int, track *w
 				if frameIndex%gop == 0 {
 					_ = encoder.ForceKeyFrame()
 				}
-				img := newPatternFrame(width, height, frameIndex)
+				img := newPatternFrame(width, height, frameIndex, background)
 				burnTimestamp(img, time.Now())
 				payload, err := encoder.Encode(img)
 				if err != nil {
@@ -122,22 +127,63 @@ func closeEncoder(encoder *openh264.Encoder) {
 	_ = encoder.Close()
 }
 
-func newPatternFrame(width, height, frameIndex int) *image.YCbCr {
+// newPatternFrame draws frame frameIndex: a moving box over a moving
+// gradient, or over a copy of background if set.
+func newPatternFrame(width, height, frameIndex int, background *image.YCbCr) *image.YCbCr {
 	img := image.NewYCbCr(image.Rect(0, 0, width, height), image.YCbCrSubsampleRatio420)
 	phase := frameIndex % 255
-	for y := 0; y < height; y++ {
-		row := img.Y[y*img.YStride:]
-		for x := 0; x < width; x++ {
-			row[x] = uint8((x + y + phase) % 256)
+	if background != nil {
+		copy(img.Y, background.Y)
+		copy(img.Cb, background.Cb)
+		copy(img.Cr, background.Cr)
+	} else {
+		for y := 0; y < height; y++ {
+			row := img.Y[y*img.YStride:]
+			for x := 0; x < width; x++ {
+				row[x] = uint8((x + y + phase) % 256)
+			}
 		}
-	}
-	for y := 0; y < height/2; y++ {
-		for x := 0; x < width/2; x++ {
-			img.Cb[y*img.CStride+x] = uint8((x*2 + phase*3) % 256)
-			img.Cr[y*img.CStride+x] = uint8((y*2 + phase*5) % 256)
+		for y := 0; y < height/2; y++ {
+			for x := 0; x < width/2; x++ {
+				img.Cb[y*img.CStride+x] = uint8((x*2 + phase*3) % 256)
+				img.Cr[y*img.CStride+x] = uint8((y*2 + phase*5) % 256)
+			}
 		}
 	}
 	fillLuma(img, 20+(frameIndex*7)%max(1, width-120), 20+(frameIndex*5)%max(1, height-80), 100, 60, 235)
+	return img
+}
+
+// desktopBackground is a still screen full of text: rows of 5×7 glyphs,
+// dark on light. Like a real desktop it costs much to code once (a
+// keyframe) and nothing while it stays.
+func desktopBackground(width, height int) *image.YCbCr {
+	img := image.NewYCbCr(image.Rect(0, 0, width, height), image.YCbCrSubsampleRatio420)
+	for i := range img.Y {
+		img.Y[i] = 235
+	}
+	for i := range img.Cb {
+		img.Cb[i], img.Cr[i] = 128, 128
+	}
+	rng := rand.New(rand.NewPCG(1, 2))
+	var glyphs [64]uint64
+	for i := range glyphs {
+		for bit := range 35 {
+			if rng.Float64() < 0.3 {
+				glyphs[i] |= 1 << bit
+			}
+		}
+	}
+	for y := 4; y+7 <= height; y += 12 {
+		for x := 4; x+5 <= width; x += 6 {
+			glyph := glyphs[rng.IntN(len(glyphs))]
+			for bit := range 35 {
+				if glyph&(1<<bit) != 0 {
+					img.Y[(y+bit/5)*img.YStride+x+bit%5] = 16
+				}
+			}
+		}
+	}
 	return img
 }
 

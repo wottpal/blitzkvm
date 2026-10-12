@@ -64,6 +64,10 @@ type Config struct {
 	// KeyframeOnRequest makes the test pattern send an IDR on RTCP PLI/FIR,
 	// like the patched firmware (stock 0.5.9 ignores both).
 	KeyframeOnRequest bool
+	// Desktop puts the test pattern's moving box on a still screen of text
+	// instead of a moving gradient: keyframes are large and the frames
+	// between them small, as in the device's stream.
+	Desktop bool
 	// ReplayH264 / ReplayH265 are Annex-B clips with access-unit delimiters.
 	// When set they replace the OpenH264 test pattern for that codec.
 	ReplayH264 string
@@ -190,6 +194,8 @@ type Server struct {
 	listener   net.Listener
 	limiter    *loginLimiter
 	netemStats NetemStats
+	// keyframeRequests counts PLI and FIR received.
+	keyframeRequests atomic.Int64
 
 	mu           sync.Mutex
 	serveCtx     context.Context // ends with ListenAndServe
@@ -532,6 +538,9 @@ func (s *Server) NegotiatedCodecs() []string {
 	defer s.mu.Unlock()
 	return append([]string(nil), s.negotiated...)
 }
+
+// KeyframeRequests is the number of PLI and FIR packets received.
+func (s *Server) KeyframeRequests() int64 { return s.keyframeRequests.Load() }
 
 // NetemStats exposes what the configured network impairment did.
 func (s *Server) NetemStats() (sent, dropped int64) {
@@ -1237,6 +1246,7 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 			for _, p := range packets {
 				switch p.(type) {
 				case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+					s.keyframeRequests.Add(1)
 					if s.cfg.KeyframeOnRequest {
 						select {
 						case keyframeReq <- struct{}{}:
