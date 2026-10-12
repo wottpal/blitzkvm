@@ -16,11 +16,16 @@
   // localized change per key); the counter shows how many arrived.
   let on = false, count = 0;
   const sq = document.getElementById("sq"), n = document.getElementById("n");
-  addEventListener("keydown", (e) => {
-    if (e.metaKey || e.ctrlKey || e.altKey) return; // leave browser shortcuts alone
-    e.preventDefault();
+  const flip = () => {
     on = !on;
     sq.style.background = on ? "#fff" : "#000";
     n.textContent = ++count;
+  };
+  addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return; // leave browser shortcuts alone
+    e.preventDefault();
+    flip();
   });
+  // A wheel tick flips it too (BLITZKVM_PROBE_WHEEL); the page never scrolls.
+  addEventListener("wheel", (e) => { e.preventDefault(); flip(); }, { passive: false });
 </script>

@@ -24,6 +24,9 @@ final class LatencyProbe {
     /// page's black area instead of pressing a key, and waits for the
     /// cursor to show at the new spot.
     private let pointerMode = ProcessInfo.processInfo.environment["BLITZKVM_PROBE_POINTER"] == "1"
+    /// BLITZKVM_PROBE_WHEEL=1: a wheel tick instead of a key (the page flips
+    /// its square on wheel events too).
+    private let wheelMode = ProcessInfo.processInfo.environment["BLITZKVM_PROBE_WHEEL"] == "1"
     /// Pointer spots as fractions of the remote picture: on the page's black
     /// area below its marker, clear of the counter, at any size from 1280×720.
     private let targets = [CGPoint(x: 0.62, y: 0.86), CGPoint(x: 0.72, y: 0.93)]
@@ -129,6 +132,8 @@ final class LatencyProbe {
         if pointerMode {
             // The device's absolute range is 0...32767 across the remote picture.
             controller.engine.write(EngineProtocol.absolutePointer(x: Int32(targets[target].x * 32767), y: Int32(targets[target].y * 32767), buttons: 0))
+        } else if wheelMode {
+            controller.engine.write(EngineProtocol.wheel(y: target == 0 ? 1 : -1, x: 0))
         } else {
             controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
