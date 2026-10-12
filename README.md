@@ -55,6 +55,7 @@ Run root targets from the repository root and macOS targets with `make -C macos 
 | `make layouts UPSTREAM=../kvm` | Regenerates `pkg/input/layouts_gen.go` from a `jetkvm/kvm` checkout |
 | `make emulator` | Runs the emulator on `http://127.0.0.1:8080` (no password) |
 | `make -C macos app` | Builds and signs `macos/build/JetKVM Desktop.app`; a signed build is also copied to `~/Downloads` |
+| `make -C macos firmware` | Bundles the JetKVM Desktop firmware for JetKVM Setup: checks `FORK_BINARY` (default: `bin/jetkvm_app` of a [wottpal/kvm](https://github.com/wottpal/kvm) clone next to this repository) against `macos/Support/Firmware.json` and gzips it. `make app` runs it; without the binary the app builds without firmware |
 | `make -C macos test` | Swift unit tests (`JetKVMCoreTests`) |
 | `make -C macos selftest` | End to end: the app against the emulator (video, injected input, helper crash recovery) |
 | `make -C macos selftest-extras` | End to end over http and https: virtual media (upload, mount, eject, delete), serial console, address probing with certificate pins |
@@ -74,7 +75,16 @@ A passing self-test prints a JSON report and ends with `selftest passed: …`. A
 
 ## Using the app
 
-Open `~/Downloads/JetKVM Desktop.app` (or `/Applications/` after `make -C macos install`). The Devices window (⌘N) holds the device library: a name, an ordered list of addresses (LAN IP, `.local` name, VPN name; `https://…` for TLS) and per-device preferences. Addresses are probed over HTTP in parallel and the earliest that answers wins; probing never opens a WebRTC session, because that would take over an existing one.
+Open `~/Downloads/JetKVM Desktop.app` (or `/Applications/` after `make -C macos install`). The Devices window (⌘N) holds the device library: a name, an ordered list of addresses (LAN IP, `.local` name, VPN name; `https://…` for TLS) and per-device preferences. Addresses are probed over HTTP in parallel and the earliest that answers wins; probing never opens a WebRTC session, because that would take over an existing one. Devices show as a gallery of screens that light up while the device answers (the same probe, every 30 s while the window is visible); the most recently used one starts selected, so Return connects it.
+
+**JetKVM Setup** (Device › Set Up JetKVM…, or Set Up JetKVM… on a device in the Devices window) shows three things and fixes each with one button:
+- **Firmware:** whether the JetKVM runs the JetKVM Desktop build this app ships (`macos/Support/Firmware.json`, checked by SHA-256). Install uploads it next to the running app, checks it, and restarts the JetKVM, which moves it into place as it does an update (about a minute). The previous build stays as `/userdata/jetkvm/jetkvm_app.backup`. JetKVM's automatic updates replace it with their next release.
+- **Tailscale:** Install downloads the current release for 32-bit ARM from pkgs.tailscale.com, checks it against its SHA-256, and installs it as `tailscale configure jetkvm` expects, so it starts at boot. The JetKVM doesn't restart. The kernel's `tun` module gives it a real `tailscale0` interface. Your browser opens to log in, and once the JetKVM is on the tailnet its name (e.g. `mac-mini-jetkvm.<tailnet>.ts.net`) is added to the device's addresses. Turn off key expiry for it in the admin console, or it drops off the tailnet when its key expires.
+- **Password:** set the JetKVM's first password (kept in your keychain), so not everyone who can reach it controls the computer.
+
+Installing uses SSH: the app turns on Developer Mode and adds its own key (`~/Library/Application Support/JetKVM Desktop/SSH/`) to the device's keys, keeping any others.
+
+**Remote access:** list the LAN address first and the tailnet name second. At home the LAN address answers first; away, the tailnet name does. Video takes the route of the address the app connected to, and the status bar names it: via LAN, via Tailscale, via Tailscale relay `<region>` (no direct path: Tailscale relays it, much slower), via VPN, or via internet.
 
 Features: Retina-sharp video, keyboard capture including system shortcuts (⌃⌘ releases), a pointer that goes exactly where you hover, Mac/PC modifier profiles, paste as keystrokes (⌥⌘V), stream quality presets, power control (ATX/DC), virtual media (⇧⌘M), serial console (⇧⌘L), extension port switching, H.265 (measured sharper than H.264 at every bitrate on the JetKVM encoder), several devices as tabs.
 
@@ -98,7 +108,7 @@ Full screen: the menu bar, and with it the window's title bar and buttons, slide
 
 View › Exact Pixels at Whole-Number Scales switches to nearest-neighbor where the scale is a whole number. View › Scaling Filter swaps the enlargement filter for experiments (Automatic stays the default): FSR 1 with light, strong or no sharpening, Lanczos‑3, Catmull‑Rom, sharp bilinear, bilinear or nearest neighbor. Shrinking stays antialiased with any of them. View › Show Status Bar (⌘/) hides the status line in every window. A window keeps its picture size; in full screen the picture gains the line, and Match Window follows.
 
-When the picture stalls for more than about half a second (connecting, a display resize, a stream that paused, no HDMI signal), a large overlay says why and what happens next. The last picture stays underneath, dimmed. Keyboard and pointer keep working.
+When the picture stalls for more than about half a second (connecting, a display resize, a stream that paused, no HDMI signal), a large overlay says why and what happens next, under an icon for the state (it pulses while the wait ends by itself). The last picture stays underneath, dimmed. Keyboard and pointer keep working.
 
 **Picture pipeline** (`VideoView.swift`):
 - **Chroma:** the JetKVM sends color at half resolution. The app rebuilds it from the full-resolution luma, since within a few pixels desktop content mixes two colors. Colored text measures 51 dB against 28 dB with plain upsampling.
@@ -133,6 +143,7 @@ Command-line options (also used by the self-tests):
 | `--view-only` | Never send keyboard or mouse input |
 | `--scale actualSize\|fit\|pixelExact\|integer\|matchWindow`, `--match-scale 1.5`, `--match-refresh 60\|auto`, `--scaling-filter lanczos`, `--profile mac\|pc`, `--window-size 1280x720`, `--full-screen` | View and input overrides |
 | `--selftest <seconds>` and `--crash-engine-after`, `--inject-input`, `--exercise-extras`, `--snapshot <png>`, `--hide-after <seconds>`, `--max-freeze-ms <ms>`, `--set-quality-after 4:low,9:maximum`, `--toggle-status-bar-after <seconds>` | Self-test mode (prints JSON, exits 0 on success). The window floats above other windows and never captures your own keyboard or pointer; only `--inject-input` sends input |
+| `--setup check\|install-tailscale\|login\|install-firmware\|password=<new password>`, `--setup-snapshot <png>` | With `--selftest`: opens JetKVM Setup, runs the action, and reports the three states (`setup`, `setupOK`); the snapshot renders the sheet |
 | `--latency-probe <samples>` | Measures input-to-photon latency against `tools/latency-probe/latency.html` on the target (prints JSON, exits) |
 
 Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `JETKVM_DEBUG_BLACKHOLE=period:duration` (seconds) makes the helper drop all session traffic for `duration` every `period`, to reproduce network hiccups. `JETKVM_ENGINE` points at a helper binary for development. `JETKVM_DESKTOP_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.

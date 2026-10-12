@@ -1362,6 +1362,67 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
 
 **Menu:** Stream Quality moved from the Device menu to View.
 
+## 30. Devices gallery, JetKVM Setup, remote access over Tailscale (2026-10-12)
+
+**Ask (PM):** the Devices window looked dated; every picture-overlay state should have an icon; and Tailscale should fit in, so the KVM and the Mac behind it are reachable from other networks. The app should become a configurator for the JetKVM: check and install the fork firmware and Tailscale (only when asked), and show the state of both.
+
+**Devices window.** Three designs came from independent design agents, and the PM picked one: a gallery of screens.
+- Each device is a 16:10 screen that glows amber, like the app icon, while the device answers the HTTP probe (every 30 s, only while the window is on screen, never a session).
+- Screens grow to fill the window, so one device is a large tile and many make a grid.
+- The most recently used device starts selected, so Return connects. A click anywhere on a screen connects too, and the pointer turns into a hand over it.
+- Removing a device asks first.
+- Relative times are in English with the user's region ("Connected 2 days ago"), not the system language.
+- The add/edit form is a grouped form. Its notes appear only when they apply: the ⌘/Ctrl swap and Match Window.
+
+**Picture overlay.** Each state has an SF Symbol: connecting, reconnecting, restarting, resizing, no picture, starting and waiting. The symbol pulses while the wait ends by itself and stays still for no signal.
+
+**Tailscale on the JetKVM (findings, all verified on `.107`, system 0.2.8):**
+- **Official and supported.** JetKVM documents an installer (`jetkvm.com/install-tailscale.sh`). Tailscale itself has `tailscale configure jetkvm` (since 1.86). It writes `/userdata/init.d/S22tailscale`, which the system's `RkLunch.sh` runs at boot, and links `/bin/tailscale`. Tailscale keeps its state in `/userdata/tailscale/var` and uses nftables there ("nft-jetkvm").
+- **Real TUN.** `/dev/net/tun` is missing until something loads the module. The kernel ships `tun.ko`, `nf_tables.ko` and `wireguard.ko` as modules in `/oem/usr/ko` (`/lib/modules/5.10.160` links there), and tailscaled runs `modprobe tun` itself. The JetKVM therefore gets a `tailscale0` interface (MTU 1280), not userspace networking. That matters for video: the firmware's ICE agent advertises host candidates on every interface, so its tailnet address becomes a candidate. In userspace mode the web UI would load and WebRTC would not.
+- **The firmware only reports status.** `getTailscaleStatus` reads `tailscale status --json`, and the web UI shows it with a control-server URL. It installs nothing.
+- **Memory.** The device has 199 MB RAM with about 145 MB available before Tailscale.
+- **Alternatives rejected.**
+  - A subnet router elsewhere sends home traffic through the router, and `192.168.1.x` collides with other networks.
+  - The Mac mini as router is gone when the Mac sleeps or hangs.
+  - JetKVM Cloud was already out of scope (§10).
+
+**Engine:**
+- **Video follows the chosen route** (`pkg/client/route.go`).
+  - The engine resolves the device's host and asks the system which local address it would send from (a connected UDP socket, no packets).
+  - It gathers ICE candidates only on those addresses: the LAN at home, `utun` (Tailscale) away, loopback for the emulator.
+  - Before, with Tailscale on both ends, ICE could pick the tailnet pair at home and push the whole stream through WireGuard on the JetKVM's single Cortex-A7 core.
+- **Path in stats:** `Path` (`lan`, `tailscale`, `vpn`, `internet`, `loopback`) and `PathRemote` come from the selected candidate pair. Tailscale is recognised by 100.64.0.0/10 or fd7a:115c:a1e0::/48 on either end, so a subnet router counts too. Another VPN is recognised by its point-to-point interface.
+- **`createPassword`** sets a password-less device's first password, and the session uses it from then on.
+- **Emulator:** `--tailscale running|none|needs-login`.
+
+**JetKVM Setup (the configurator).** Device › Set Up JetKVM…, or Set Up JetKVM… on a device in the gallery, which connects first. One sheet with three rows: state, then one action.
+- **Firmware:** stock (no `getVideoEncoderParams`), the JetKVM Desktop firmware with its build unverified, the bundled build, or an older one. The installed binary's SHA-256 over SSH tells builds apart, because fork builds keep upstream's `VERSION`.
+  - The app ships the build pinned by `macos/Support/Firmware.json`. `make firmware` checks `FORK_BINARY` against it and gzips it: 13 MB in the app.
+  - Install: `gunzip` over SSH into `jetkvm_app.update.part`, compare SHA-256, back up the running app to `jetkvm_app.backup`, rename to `jetkvm_app.update`, `sync`, reboot. The device moves the file into place at boot, as for an OTA update, then the session reconnects.
+- **Tailscale:** not installed, needs login, stopped, or running (with its MagicDNS name).
+  - Install: the current stable ARM tarball from pkgs.tailscale.com, checked against its `.sha256`, streamed over SSH. The binaries are replaced while `var/` is kept, then `tailscale configure jetkvm`, then the daemon starts. No reboot.
+  - Then `tailscale up --hostname=<device>-jetkvm` runs detached, and the app opens the login URL once.
+  - When the device is running on the tailnet, its name is appended to the device's addresses.
+  - After a restart, Tailscale needs login without a URL; Log In asks the JetKVM for a new one.
+- **Password:** off or on. Set Password calls `createPassword` and stores the password in the keychain.
+- **SSH:** the app's own ed25519 key in Application Support. When SSH doesn't answer, the app turns on Developer Mode over the session (`setDevModeState`) and appends its key to the device's keys (`setSSHKeyState`), keeping the others. The host key is filed under the device ID (`HostKeyAlias`), trusted on first use.
+- **Status bar:** "via LAN", "via Tailscale", or "via Tailscale relay `<region>`". The relay comes from this Mac's `tailscale status --json` (a peer with no current address and a relay), checked every 30 s.
+
+**Verified:**
+- **Tests:** Go tests, including path kinds, the route to loopback, the controller pinning ICE to the route, and `createPassword` with a reconnect. 47 Swift tests, including firmware states, Tailscale states and hostnames, relay parsing and SSH arguments. `selftest`, `selftest-extras` and `selftest-stalls` pass.
+- **Emulator** (`--setup`): stock firmware, the fork with its build unverified, Tailscale in all three states, and Set Password, with the sheet rendered each time.
+- **Device `.107`:**
+  - **Check:** fork, build unverified, Tailscale not installed, no password, video via LAN.
+  - **Install Tailscale:** 52 s from click to login URL. `tailscale0` came up and `tun` loaded.
+  - **Reinstall firmware:** 80 s from click until reconnected. The device rebooted and runs `9052cccc…`, the backup was written, and tailscaled came back at boot (needs login).
+  - **Log in:** a new URL opened in the browser.
+- **Not verifiable here:** video, because the Mac mini's HDMI output was asleep (the bridge reported 0×0 timings and the capture delivered no frames, so the device restarted its encoder every 1.6 s).
+
+**Decisions:**
+- **No GitHub release yet.** The firmware ships inside the app, so builds need the fork's binary locally.
+- **Tailscale installs without restarting the JetKVM**, unlike JetKVM's script, so the target's display is not re-plugged.
+- **The password is a row of the sheet**, because a JetKVM on a shared tailnet is reachable by everyone the tailnet's ACLs allow.
+
 ## Appendix A: Key sources
 
 - `jetkvm/kvm` (`dev` @ `8f6c300`, `release/0.5.9`): https://github.com/jetkvm/kvm. REMB revert: https://github.com/jetkvm/kvm/pull/1693
