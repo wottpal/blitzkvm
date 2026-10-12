@@ -24,7 +24,9 @@ final class LatencyProbe {
     /// page's black area instead of pressing a key, and waits for the
     /// cursor to show at the new spot.
     private let pointerMode = ProcessInfo.processInfo.environment["BLITZKVM_PROBE_POINTER"] == "1"
-    private let targets = [CGPoint(x: 1400, y: 700), CGPoint(x: 1600, y: 820)]
+    /// Pointer spots as fractions of the remote picture: on the page's black
+    /// area below its marker, clear of the counter, at any size from 1280×720.
+    private let targets = [CGPoint(x: 0.62, y: 0.86), CGPoint(x: 0.72, y: 0.93)]
     private var target = 0
     /// BLITZKVM_PROBE_PAIR_GAP=S: each sample first presses a key that is not
     /// measured, then the measured one S seconds later (S near 0.55 lands it
@@ -87,7 +89,6 @@ final class LatencyProbe {
         decodedSerial = nil
         let done = results.count + misses >= samples
         let known = bright
-        let size = remoteSize
         if !markerSeen && known != nil {
             aborted = "probe page not on screen (marker missing); no key sent"
         }
@@ -104,7 +105,6 @@ final class LatencyProbe {
         lock.lock()
         expectBright = !known
         target ^= 1
-        let point = targets[target]
         sentAt = CACurrentMediaTime()
         lock.unlock()
         if let pairGap, !pointerMode {
@@ -128,7 +128,7 @@ final class LatencyProbe {
         }
         if pointerMode {
             // The device's absolute range is 0...32767 across the remote picture.
-            controller.engine.write(EngineProtocol.absolutePointer(x: Int32(point.x * 32767 / size.width), y: Int32(point.y * 32767 / size.height), buttons: 0))
+            controller.engine.write(EngineProtocol.absolutePointer(x: Int32(targets[target].x * 32767), y: Int32(targets[target].y * 32767), buttons: 0))
         } else {
             controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
@@ -150,7 +150,7 @@ final class LatencyProbe {
         markerSeen = mark > 100 && mark < 156
         if pointerMode {
             // The arrow's white body sits just below and right of its tip.
-            let p = targets[target]
+            let p = CGPoint(x: targets[target].x * remoteSize.width, y: targets[target].y * remoteSize.height)
             let cursor = (maxLuma(buffer, CGRect(x: p.x, y: p.y, width: 14, height: 20)) ?? 0) > 150
             if let sentAt, current == nil, cursor {
                 current = ((now - sentAt) * 1000, nil)

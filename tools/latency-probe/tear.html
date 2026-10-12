@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>tear probe</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; }
+</style>
+<canvas id="c"></canvas>
+<script>
+  // Three strips (near the top, the middle and the bottom) show the same
+  // frame counter as 16 bits between a white and a black end block. A
+  // captured frame whose strips disagree was read before it was fully
+  // written (tools/latency-probe/tear.py checks a recording).
+  const c = document.getElementById("c"), g = c.getContext("2d");
+  const resize = () => { c.width = innerWidth; c.height = innerHeight; };
+  addEventListener("resize", resize);
+  resize();
+  let n = 0;
+  const strip = (y, h) => {
+    const w = c.width / 18;
+    g.fillStyle = "#fff"; g.fillRect(0, y, w, h);
+    for (let b = 0; b < 16; b++) {
+      g.fillStyle = (n >> (15 - b)) & 1 ? "#fff" : "#000";
+      g.fillRect(w * (b + 1), y, w, h);
+    }
+    g.fillStyle = "#000"; g.fillRect(w * 17, y, w, h);
+  };
+  const frame = () => {
+    n = (n + 1) & 0xffff;
+    g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height);
+    const h = 32;
+    strip(8, h);
+    strip(Math.round(c.height / 2 - h / 2), h);
+    strip(c.height - h - 8, h);
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+</script>
