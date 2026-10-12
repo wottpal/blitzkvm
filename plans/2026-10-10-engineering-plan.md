@@ -1418,6 +1418,22 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
   - **Log in:** a new URL opened in the browser.
 - **Not verifiable here:** video, because the Mac mini's HDMI output was asleep (the bridge reported 0×0 timings and the capture delivered no frames, so the device restarted its encoder every 1.6 s).
 
+**Both firmware builds in the app (same day).**
+- **What ships:** the app carries the JetKVM Desktop build and JetKVM's own latest release (0.5.9; nothing newer upstream, not even on `dev` since 2026-10-05), so switching needs no download. `Support/Firmware.json` lists both, pinned by SHA-256 (`3b955de5…` for JetKVM 0.5.9, identical to the stock copy saved on the device).
+- **Build:** `make firmware` gzips each build (13 MB apiece). JetKVM's comes from its GitHub release once and is cached.
+- **Firmware row:** names the build by hash. Its button installs the JetKVM Desktop build, and a menu reinstalls either build or switches to JetKVM's own (a split button, or a menu beside the Up to Date badge).
+- **Rows:** the state on one line, its meaning in a second paragraph.
+- **Verified on `.107`:**
+  - The switch to JetKVM 0.5.9 worked through the app, including the restart.
+  - On stock, the app connects, its RPCs answer, and the sheet reads "JetKVM 0.5.9" by hash. Tailscale status, SSH and the path ("via LAN") work, and tailscaled survives the switch.
+- **Not verified:** video. The JetKVM has reported no HDMI signal since about 10:15, while the Mac mini's USB stays configured, so it is awake. That predates the firmware changes.
+
+**Wake Computer.**
+- **Why it's needed:** firmware 0.5.9 stopped ordinary keyboard and mouse input from waking a suspended host (upstream #1471). Its web UI has a "Try to wake" button calling `wakeHost`, a wake-only HID report; the app had nothing.
+- **What it does:** Device › Wake Computer sends a one-pixel relative nudge there and back (a sleeping display) and `wakeHost` (a suspended host). The no-signal overlay points to it.
+- **Self-tests:** `--wake` does the same.
+- **Not enough here:** it didn't bring the Mac mini's picture back, so the cause there is the Mac's display arrangement, not sleep.
+
 **Decisions:**
 - **No GitHub release yet.** The firmware ships inside the app, so builds need the fork's binary locally.
 - **Tailscale installs without restarting the JetKVM**, unlike JetKVM's script, so the target's display is not re-plugged.
