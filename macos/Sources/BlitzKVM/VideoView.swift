@@ -689,7 +689,9 @@ class VideoView: NSView {
     }
 
     /// The share as above, and the blocks that changed visibly (runs of
-    /// neighbours in a row joined).
+    /// neighbours in a row joined), each grown by `visibleMargin` within
+    /// the change: a glyph's coding artifacts spill a few rows into the
+    /// next block, invisibly.
     static func visibleChange(_ a: CVPixelBuffer, _ b: CVPixelBuffer, in rect: PixelRect) -> (share: Double, rects: [PixelRect]) {
         let size = 64
         let all = PixelRect(width: CVPixelBufferGetWidth(b), height: CVPixelBufferGetHeight(b))
@@ -712,11 +714,11 @@ class VideoView: NSView {
                     changed += 1
                     run = run.union(block)
                 } else if !run.isEmpty {
-                    rects.append(run)
+                    rects.append(run.outset(by: visibleMargin).intersection(area))
                     run = .empty
                 }
             }
-            if !run.isEmpty { rects.append(run) }
+            if !run.isEmpty { rects.append(run.outset(by: visibleMargin).intersection(area)) }
         }
         let blocks = all.cells(of: size)
         return (Double(changed) / Double(blocks.width * blocks.height), rects)
@@ -726,6 +728,7 @@ class VideoView: NSView {
     /// 90% of the blocks it changes change by 2–21 code values, against 220
     /// for scrolling or a window switch, which move edges.
     static let visibleDelta: UInt8 = 32
+    static let visibleMargin = 8
 
     /// Whether some byte of two rows differs by more than `visibleDelta`.
     private static func changesVisibly(_ a: UnsafeRawPointer, _ b: UnsafeRawPointer, count: Int) -> Bool {
