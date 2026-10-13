@@ -228,6 +228,8 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 			s.HIDReady = true
 			s.LastError = ""
 			s.CertSHA256 = c.pin.Pinned()
+			// A new session starts with the device's defaults.
+			s.ClientRefresh, s.MinQP, s.StillQP = false, 0, 0
 		})
 		go c.bootstrap(ctx, cl)
 		go c.autoQuality(ctx, cl)

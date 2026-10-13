@@ -252,7 +252,7 @@ func TestControllerQualityLevelsOnPatchedFirmware(t *testing.T) {
 		s := controller.Snapshot()
 		want := emulator.EncoderParams{MinQP: l.MinQP, MaxQP: emulator.DefaultEncoderParams.MaxQP,
 			GOPSeconds: emulator.DefaultEncoderParams.GOPSeconds, MaxFPS: l.MaxFPS, StillQP: l.StillQP,
-			BitrateKbps: factorKbps(l.Factor, s.VideoWidth, s.VideoHeight)}
+			BitrateKbps: factorKbps(l.Factor, s.VideoWidth, s.VideoHeight), AutoRefresh: true}
 		want.MaxBitrateKbps = want.BitrateKbps * 3 / 2
 		if got := srv.State().EncoderParams; got != want {
 			t.Fatalf("%s: device params %+v, want %+v", name, got, want)
@@ -264,6 +264,64 @@ func TestControllerQualityLevelsOnPatchedFirmware(t *testing.T) {
 	// The stock quality factor is left alone on the live path.
 	if f := srv.State().StreamQualityFactor; f != 0.75 {
 		t.Fatalf("quality factor changed to %v", f)
+	}
+}
+
+// Client-driven still refresh: on firmware that offers refreshRegions, a
+// client that plans refreshes turns the device's own off with every level,
+// also after a reconnect (the device drops overrides with the session).
+// Other clients, and firmware without the feature, keep the device's.
+func TestControllerClientRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		d13, wantsIt  bool
+		clientRefresh bool
+	}{
+		{name: "client plans, D13", d13: true, wantsIt: true, clientRefresh: true},
+		{name: "client does not plan, D13", d13: true},
+		{name: "client plans, before D13", wantsIt: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, ctx, cancel := startEmulatorWith(t, emulator.Config{EncoderPatch: true, RefreshRegions: tc.d13})
+			defer cancel()
+			controller := New(Config{
+				BaseURL:         srv.BaseURL(),
+				ICELoopbackOnly: true,
+				Password:        "secret",
+				RPCTimeout:      2 * time.Second,
+				Reconnect:       true,
+				ReconnectBase:   50 * time.Millisecond,
+				QualityLevel:    "high",
+				ClientRefresh:   tc.wantsIt,
+			})
+			controller.Start(ctx)
+			defer controller.Stop()
+			l := qualityLadder[levelIndex("high")]
+			check := func(when string) {
+				t.Helper()
+				deadline := time.Now().Add(5 * time.Second)
+				for controller.Snapshot().MinQP == 0 && time.Now().Before(deadline) {
+					time.Sleep(25 * time.Millisecond)
+				}
+				s := controller.Snapshot()
+				if s.ClientRefresh != tc.clientRefresh || s.MinQP != l.MinQP || s.StillQP != l.StillQP {
+					t.Fatalf("%s: snapshot clientRefresh %v minQp %d stillQp %d, want %v %d %d", when, s.ClientRefresh, s.MinQP, s.StillQP, tc.clientRefresh, l.MinQP, l.StillQP)
+				}
+				if got := srv.State().EncoderParams; got.AutoRefresh == tc.clientRefresh || got.MinQP != l.MinQP {
+					t.Fatalf("%s: device params %+v", when, got)
+				}
+			}
+			waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+			check("connected")
+
+			srv.DisconnectSession()
+			deadline := time.Now().Add(5 * time.Second)
+			for srv.SessionCount() < 2 && time.Now().Before(deadline) {
+				time.Sleep(25 * time.Millisecond)
+			}
+			waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+			check("reconnected")
+		})
 	}
 }
 

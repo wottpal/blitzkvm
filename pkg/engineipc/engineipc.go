@@ -108,6 +108,10 @@ type Command struct {
 	Target int64 `json:"target,omitempty"`
 	// Paused stops sending video while the app shows none (setVideoPaused).
 	Paused bool `json:"paused,omitempty"`
+	// ClientRefresh: the app refreshes still pictures itself through the
+	// refreshRegions RPC where the firmware offers it (connect; see
+	// session.Config.ClientRefresh).
+	ClientRefresh bool `json:"clientRefresh,omitempty"`
 }
 
 // Event is a JSON message from the engine. Type "snapshot" carries the

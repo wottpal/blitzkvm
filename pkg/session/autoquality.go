@@ -26,6 +26,13 @@ import (
 // frame rate and the still-screen refresh QP. Stock firmware only takes the
 // stream quality factor, which restarts its video pipeline (a short stall),
 // so levels change rarely.
+//
+// Each live level also says who refreshes still pictures: with
+// Config.ClientRefresh, on firmware that offers refreshRegions, the device's
+// own refresh is off (autoRefresh false) and the client asks for refreshes.
+// The device merges partial updates, but drops every override when the
+// stream stops or another session takes over; sending it with every level
+// keeps both together, and a reconnect applies both again.
 
 // QualityLevel is one rung of the ladder.
 type QualityLevel struct {
@@ -264,18 +271,25 @@ func (c *Controller) applyLevel(ctx context.Context, cl *client.Client, level in
 	if live {
 		c.mu.RLock()
 		w, h := c.snapshot.VideoWidth, c.snapshot.VideoHeight
+		clientRefresh := c.cfg.ClientRefresh
 		c.mu.RUnlock()
+		clientRefresh = clientRefresh && cl.HasFirmwareFeature(ctx, client.FeatureRefreshRegions)
 		target := factorKbps(l.Factor, w, h)
 		// Firmware from before the still refresh ignores stillQp.
-		params := map[string]any{"params": map[string]any{
+		update := map[string]any{
 			"minQp": l.MinQP, "maxFps": l.MaxFPS, "bitrateKbps": target, "maxBitrateKbps": target * 3 / 2,
 			"stillQp": l.StillQP,
-		}}
-		if err := cl.Call(ctx, "setVideoEncoderParams", params, nil); err != nil {
+		}
+		if clientRefresh {
+			update["autoRefresh"] = false
+		}
+		if err := cl.Call(ctx, "setVideoEncoderParams", map[string]any{"params": update}, nil); err != nil {
 			log.Warn().Err(err).Msg("set encoder params")
 			return err
 		}
-		log.Info().Str("level", l.Name).Int("kbps", target).Int("maxFps", l.MaxFPS).Int("minQp", l.MinQP).Int("stillQp", l.StillQP).Msg("stream quality (live)")
+		c.setStateFor(cl, func(s *Snapshot) { s.ClientRefresh, s.MinQP, s.StillQP = clientRefresh, l.MinQP, l.StillQP })
+		log.Info().Str("level", l.Name).Int("kbps", target).Int("maxFps", l.MaxFPS).Int("minQp", l.MinQP).Int("stillQp", l.StillQP).
+			Bool("clientRefresh", clientRefresh).Msg("stream quality (live)")
 		return nil
 	}
 	// Stock firmware: only the factor, and only when it changes (each change

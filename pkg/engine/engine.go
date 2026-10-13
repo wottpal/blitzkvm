@@ -352,6 +352,7 @@ func (e *Engine) startSession(baseURL string, cmd engineipc.Command) {
 		OfferH265:        cmd.OfferH265,
 		AutoQuality:      cmd.AutoQuality,
 		QualityLevel:     cmd.QualityLevel,
+		ClientRefresh:    cmd.ClientRefresh,
 		OnAccessUnit:     e.onAccessUnit,
 		OnSerialText:     e.onSerialText,
 	})

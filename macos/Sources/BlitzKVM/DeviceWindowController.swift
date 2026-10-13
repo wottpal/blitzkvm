@@ -11,6 +11,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     let engine: EngineProcess
     let decoder = VideoDecoder()
     let input = InputController()
+    /// Asks for still refreshes where the firmware leaves them to the app.
+    let stillRefresh: StillRefresh
     private(set) var videoView: CaptureVideoView!
     private let statusLabel = NSTextField(labelWithString: "Starting…")
     private let hud = HintView()
@@ -148,7 +150,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         self.device = device
         self.address = address
         self.password = password
-        self.engine = EngineProcess(executableURL: engineURL)
+        let engine = EngineProcess(executableURL: engineURL)
+        self.engine = engine
+        self.stillRefresh = StillRefresh(engine: engine)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 760),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
@@ -173,7 +177,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
                 return hold != nil
             }
             guard !held else { return }
-            self.videoView.display(buffer)
+            let shown = self.videoView.display(buffer)
+            self.stillRefresh.frameShown(width: Int(size.width), height: Int(size.height), changed: shown, keyframe: header.keyframe)
             self.shownAt.withLock { $0 = now }
             let changed = self.videoSize.withLock { current -> Bool in
                 guard current != size else { return false }
@@ -183,7 +188,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             if changed { DispatchQueue.main.async { self.videoSizeChanged() } }
         }
         decoder.onKeyframeNeeded = { [weak self] in self?.engine.requestKeyframe() }
-        input.send = { [weak self] frame in self?.engine.write(frame) }
+        input.send = { [weak self] frame in
+            guard let self else { return }
+            self.engine.write(frame)
+            self.stillRefresh.inputSent(keysHeld: self.input.keysHeld)
+        }
         input.onCaptureChange = { [weak self] in self?.captureChanged($0) }
         applyPreferences()
     }
@@ -472,8 +481,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func start() throws {
         try engine.start()
-        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256, autoQuality: device.adaptiveQuality && !input.viewOnly,
-                       qualityLevel: input.viewOnly ? nil : device.qualityLevel)
+        connectEngine()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.input.ensureEventTap()
             self?.refreshStatus()
@@ -491,8 +499,15 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         pendingPasteID = nil
         fatalAlertShown = false
         decoder.reset()
-        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256, autoQuality: device.adaptiveQuality && !input.viewOnly,
-                       qualityLevel: input.viewOnly ? nil : device.qualityLevel)
+        connectEngine()
+    }
+
+    /// View-only sessions change no device settings: no quality level, and
+    /// the device keeps refreshing still pictures itself.
+    private func connectEngine() {
+        engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256,
+                       autoQuality: device.adaptiveQuality && !input.viewOnly, qualityLevel: input.viewOnly ? nil : device.qualityLevel,
+                       clientRefresh: !input.viewOnly)
     }
 
     func showVirtualMedia() {
@@ -640,6 +655,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         guard !isShutDown else { return }
         isShutDown = true
         displayFollower.cancel()
+        stillRefresh.stop()
         input.setCaptured(false)
         statusTimer?.invalidate()
         stallTimer?.invalidate()
@@ -782,6 +798,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             AppLog.log("\(device.name): \(snapshot.Phase) (\(snapshot.Status))")
         }
         self.snapshot = snapshot
+        stillRefresh.update(snapshot)
         if snapshot.Phase == "auth_failed" && !snapshot.Status.contains("locked") {
             // Wrong, empty or changed password: always ask (the engine has
             // stopped retrying). A lockout (429) must not trigger more tries.
@@ -866,6 +883,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func engine(_ engine: EngineProcess, didUpdateStats stats: [String: Any]) {
         lastStats = stats
+        stillRefresh.update(stats: stats)
         checkTailscaleRelay()
         watchVideo()
         refreshStatus()

@@ -75,6 +75,11 @@ type Config struct {
 	// is applied on each connect.
 	AutoQuality  bool
 	QualityLevel string
+	// ClientRefresh: the client refreshes still pictures itself
+	// (refreshRegions), so on firmware that offers it every level applied
+	// live turns the device's own still refresh off (autoRefresh). Only for
+	// clients that plan refreshes and send input.
+	ClientRefresh bool
 }
 
 type Snapshot struct {
@@ -119,6 +124,13 @@ type Snapshot struct {
 	// names the current rung of the ladder.
 	AutoQuality  bool
 	QualityLevel string
+	// ClientRefresh is on while the device leaves still refreshes to the
+	// client (Config.ClientRefresh on firmware that offers it, with a level
+	// applied live); MinQP and StillQP are that level's QP floor and still
+	// refresh QP.
+	ClientRefresh bool
+	MinQP         int
+	StillQP       int
 }
 
 type Controller struct {

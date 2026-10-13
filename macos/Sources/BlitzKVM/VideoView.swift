@@ -585,14 +585,16 @@ class VideoView: NSView {
     /// to the current one is not drawn: a still screen streams 60 frames a
     /// second, and each would cost a full upscale and a composite (a third
     /// of an M4 Max GPU in a 6016×2538 window), and a changed one redraws
-    /// only where it changed. Called on one thread.
-    func display(_ pixelBuffer: CVPixelBuffer) {
+    /// only where it changed. Called on one thread. Returns where the frame
+    /// differs from the one before, in its pixels.
+    @discardableResult
+    func display(_ pixelBuffer: CVPixelBuffer) -> PixelRect {
         let current = state.withLock { $0.frame }
         let changed = current.map { Self.changedRect($0, pixelBuffer) }
             ?? PixelRect(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
         if changed.isEmpty {
             state.withLock { $0.unchanged += 1 }
-            return
+            return changed
         }
         state.withLock {
             $0.frame = pixelBuffer
@@ -601,6 +603,7 @@ class VideoView: NSView {
             if $0.changes.count > Self.changeHistory { $0.changes.removeFirst() }
         }
         redraw()
+        return changed
     }
 
     /// Where two decoded NV12 frames differ, in luma pixels of `b`: empty

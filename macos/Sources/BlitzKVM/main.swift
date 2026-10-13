@@ -48,6 +48,8 @@ struct Options {
     var setupSnapshot: String?
     /// Self-test: send the wake-only signal once connected (no keystrokes).
     var wake = false
+    /// Self-test: type with pauses and check the still refreshes (SelfTest.typePauses).
+    var typePauses = false
 
     static func parse(_ args: [String]) -> Options {
         var o = Options()
@@ -89,6 +91,7 @@ struct Options {
             case "--setup": o.setup = next()
             case "--setup-snapshot": o.setupSnapshot = next()
             case "--wake": o.wake = true
+            case "--type-pauses": o.typePauses = true
             case "--window-size":
                 let parts = (next() ?? "").split(separator: "x").compactMap { Double($0) }
                 if parts.count == 2 { o.windowSize = (parts[0], parts[1]) }
@@ -306,6 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selfTest?.setupAction = options.setup
             selfTest?.setupSnapshotPath = options.setupSnapshot
             selfTest?.wake = options.wake
+            selfTest?.typePauses = options.typePauses
         }
         if let (w, h) = options.windowSize {
             controller.setContentSizeKeepingIt(NSSize(width: w, height: h))

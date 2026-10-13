@@ -8,6 +8,7 @@ import (
 	"image"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -178,6 +179,11 @@ type Client struct {
 	// identityVerified is set once ExpectedDeviceID has been confirmed.
 	identityVerified atomic.Bool
 
+	// features is what getFirmwareFeatures listed (nil on stock firmware);
+	// featuresProbed closes once the probe that follows HID readiness ended.
+	features       atomic.Pointer[[]string]
+	featuresProbed chan struct{}
+
 	videoMu    sync.RWMutex
 	videoSink  video.Sink
 	frames     video.FrameSource
@@ -287,6 +293,8 @@ func New(cfg Config) (*Client, error) {
 		rpcReady:   make(chan struct{}),
 		heldKeys:   map[byte]bool{},
 		closeCh:    make(chan struct{}),
+
+		featuresProbed: make(chan struct{}),
 	}
 	c.ch.Store(&channels{})
 	return c, nil
@@ -1618,18 +1626,40 @@ func (c *Client) writeSignal(msg any) error {
 	return c.signalConn.WriteJSON(msg)
 }
 
+// Protocol additions of the fork firmware, as getFirmwareFeatures names them.
+const (
+	// FeatureHIDRPCWheel: wheel reports over HID-RPC (D12).
+	FeatureHIDRPCWheel = "hidrpcWheel"
+	// FeatureRefreshRegions: the refreshRegions RPC and setVideoEncoderParams'
+	// autoRefresh, so the client plans still refreshes (D13).
+	FeatureRefreshRegions = "refreshRegions"
+)
+
 // probeFirmwareFeatures asks which protocol additions the firmware has (the
 // fork's getFirmwareFeatures; stock firmware has no such method).
 func (c *Client) probeFirmwareFeatures() {
+	defer close(c.featuresProbed)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var features []string
 	if err := c.Call(ctx, "getFirmwareFeatures", nil, &features); err != nil {
 		return
 	}
-	for _, f := range features {
-		if f == "hidrpcWheel" {
-			c.hidWheel.Store(true)
-		}
+	c.features.Store(&features)
+	c.hidWheel.Store(slices.Contains(features, FeatureHIDRPCWheel))
+}
+
+// HasFirmwareFeature reports whether getFirmwareFeatures listed name. It
+// waits for the probe, which starts once HID-RPC is ready; false if ctx ends
+// or the client closes first.
+func (c *Client) HasFirmwareFeature(ctx context.Context, name string) bool {
+	select {
+	case <-c.featuresProbed:
+	case <-ctx.Done():
+		return false
+	case <-c.closeCh:
+		return false
 	}
+	features := c.features.Load()
+	return features != nil && slices.Contains(*features, name)
 }

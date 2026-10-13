@@ -185,6 +185,12 @@ public struct PixelRect: Equatable {
     public var isEmpty: Bool { x1 <= x0 || y1 <= y0 }
     public var width: Int { isEmpty ? 0 : x1 - x0 }
     public var height: Int { isEmpty ? 0 : y1 - y0 }
+    public var area: Int { width * height }
+
+    /// Whether `other` lies inside (the empty rectangle lies in any).
+    public func contains(_ other: PixelRect) -> Bool {
+        other.isEmpty || (x0 <= other.x0 && y0 <= other.y0 && other.x1 <= x1 && other.y1 <= y1)
+    }
 
     /// The smallest rectangle holding both.
     public func union(_ other: PixelRect) -> PixelRect {

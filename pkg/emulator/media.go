@@ -46,7 +46,11 @@ func (s *Server) startVideo(ctx context.Context, mimeType string, track *webrtc.
 		if s.cfg.ReplayH264 != "" {
 			return startReplay(ctx, s.cfg.ReplayH264, h264AUD, s.cfg.FPS, track)
 		}
-		return startTestPattern(ctx, s.cfg.Width, s.cfg.Height, s.cfg.FPS, s.cfg.GOP, s.cfg.Desktop, track, keyframeReq)
+		var typed func() int64
+		if s.cfg.StillScreen {
+			typed = s.typed.Load
+		}
+		return startTestPattern(ctx, s.cfg.Width, s.cfg.Height, s.cfg.FPS, s.cfg.GOP, s.cfg.Desktop, typed, track, keyframeReq)
 	case webrtc.MimeTypeH265:
 		if s.cfg.ReplayH265 != "" {
 			return startReplay(ctx, s.cfg.ReplayH265, h265AUD, s.cfg.FPS, track)
@@ -63,8 +67,9 @@ func (s *Server) startVideo(ctx context.Context, mimeType string, track *webrtc.
 // startTestPattern encodes a moving pattern with OpenH264 (Constrained
 // Baseline; the OpenH264 encoder cannot produce the device's High profile).
 // Every frame carries a timestamp barcode (see BurnedTimestamp) so latency
-// harnesses can compare capture time against encode time.
-func startTestPattern(ctx context.Context, width, height, fps, gop int, desktop bool, track *webrtc.TrackLocalStaticSample, keyframeReq <-chan struct{}) error {
+// harnesses can compare capture time against encode time. With typed set, the
+// pattern stands still instead and shows that many typed glyphs.
+func startTestPattern(ctx context.Context, width, height, fps, gop int, desktop bool, typed func() int64, track *webrtc.TrackLocalStaticSample, keyframeReq <-chan struct{}) error {
 	var background *image.YCbCr
 	if desktop {
 		background = desktopBackground(width, height)
@@ -89,6 +94,8 @@ func startTestPattern(ctx context.Context, width, height, fps, gop int, desktop 
 		defer closeEncoder(encoder)
 
 		frameIndex := 0
+		var still *image.YCbCr
+		var drawn int64
 		for {
 			select {
 			case <-ctx.Done():
@@ -99,8 +106,19 @@ func startTestPattern(ctx context.Context, width, height, fps, gop int, desktop 
 				if frameIndex%gop == 0 {
 					_ = encoder.ForceKeyFrame()
 				}
-				img := newPatternFrame(width, height, frameIndex, background)
-				burnTimestamp(img, time.Now())
+				var img *image.YCbCr
+				if typed != nil {
+					if still == nil {
+						still = newPatternFrame(width, height, 0, background)
+					}
+					for n := typed(); drawn < n; drawn++ {
+						drawTypedGlyph(still, int(drawn))
+					}
+					img = still
+				} else {
+					img = newPatternFrame(width, height, frameIndex, background)
+					burnTimestamp(img, time.Now())
+				}
 				payload, err := encoder.Encode(img)
 				if err != nil {
 					return
@@ -185,6 +203,23 @@ func desktopBackground(width, height int) *image.YCbCr {
 		}
 	}
 	return img
+}
+
+// Typed glyphs on the still screen: dark blocks the size of a 1x glyph, in
+// lines from the top left, like text typed into an editor.
+const (
+	glyphWidth   = 8
+	glyphHeight  = 16
+	glyphAdvance = 10
+	glyphLine    = 24
+	glyphMargin  = 64
+)
+
+func drawTypedGlyph(img *image.YCbCr, index int) {
+	perLine := max(1, (img.Rect.Dx()-2*glyphMargin)/glyphAdvance)
+	x := glyphMargin + index%perLine*glyphAdvance
+	y := glyphMargin + index/perLine*glyphLine
+	fillLuma(img, x, y, glyphWidth, glyphHeight, 16)
 }
 
 // Timestamp barcode: 48 bits of Unix milliseconds, MSB first, drawn as

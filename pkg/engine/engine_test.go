@@ -597,3 +597,27 @@ func TestEngineUploadReplacesABiggerPartialUpload(t *testing.T) {
 		t.Fatalf("storage: %v", files)
 	}
 }
+
+// connect's clientRefresh reaches the session: on firmware that offers
+// refreshRegions the snapshot reports the level's QPs with the device's own
+// refresh off, and the app's refreshRegions calls pass through.
+func TestEngineClientRefresh(t *testing.T) {
+	srv := startEmulatorWith(t, emulator.Config{RefreshRegions: true})
+	h := startEngine(t)
+	// The level may already be in the first connected snapshot.
+	h.send(engineipc.Command{ID: 1, Cmd: "connect", BaseURL: srv.BaseURL(), Password: "pw", QualityLevel: "maximum", ClientRefresh: true})
+	h.waitForSnapshot(10*time.Second, "client refresh", func(snap map[string]any) bool {
+		return snap["Phase"] == "connected" && snap["ClientRefresh"] == true && snap["MinQP"] == float64(10) && snap["StillQP"] == float64(1)
+	})
+	if srv.State().EncoderParams.AutoRefresh {
+		t.Fatal("the device still refreshes on its own")
+	}
+	h.send(engineipc.Command{ID: 2, Cmd: "rpc", Method: "refreshRegions", Params: json.RawMessage(`{"rects":[{"x":0,"y":0,"w":16,"h":16}],"qp":1,"frames":2}`)})
+	var rpc engineipc.RPCResult
+	h.waitFor(5*time.Second, "refreshRegions result", func(f frame) bool {
+		return f.typ == engineipc.TypeRPCResult && json.Unmarshal(f.payload, &rpc) == nil && rpc.ID == 2
+	})
+	if rpc.Error != "" {
+		t.Fatalf("refreshRegions: %s", rpc.Error)
+	}
+}

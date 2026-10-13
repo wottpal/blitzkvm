@@ -126,12 +126,15 @@ public struct EngineCommand: Codable, Equatable {
     public var target: Int64?
     /// Stop sending video while the app shows none (cmd "setVideoPaused").
     public var paused: Bool?
+    /// The app refreshes still pictures itself (refreshRegions) where the
+    /// firmware offers it (connect).
+    public var clientRefresh: Bool?
 
     public init(id: Int64? = nil, cmd: String, baseURL: String? = nil, password: String? = nil,
                 deviceID: String? = nil, certSHA256: String? = nil, offerH265: Bool? = nil, autoQuality: Bool? = nil,
                 qualityLevel: String? = nil, method: String? = nil,
                 params: JSONValue? = nil, text: String? = nil, delay: Int? = nil, path: String? = nil, target: Int64? = nil,
-                paused: Bool? = nil, oldPassword: String? = nil) {
+                paused: Bool? = nil, oldPassword: String? = nil, clientRefresh: Bool? = nil) {
         self.id = id
         self.oldPassword = oldPassword
         self.cmd = cmd
@@ -149,6 +152,7 @@ public struct EngineCommand: Codable, Equatable {
         self.path = path
         self.target = target
         self.paused = paused
+        self.clientRefresh = clientRefresh
     }
 }
 
@@ -179,6 +183,11 @@ public struct SessionSnapshot: Decodable, Equatable {
     /// Whether the engine adapts quality to the link, and its current level.
     public var AutoQuality: Bool?
     public var QualityLevel: String?
+    /// The device leaves still refreshes to the app (RefreshPlanner), with
+    /// the current level's P-frame QP floor and still refresh QP.
+    public var ClientRefresh: Bool?
+    public var MinQP: Int?
+    public var StillQP: Int?
     /// The pinned certificate authority of an https device.
     public var CertSHA256: String?
     /// Go session.SerialSettings (field names as in Go), kept as JSON so a

@@ -60,6 +60,7 @@ Run root targets from the repository root and macOS targets with `make -C macos 
 | `make -C macos selftest` | End to end: the app against the emulator (video, injected input, helper crash recovery) |
 | `make -C macos selftest-extras` | End to end over http and https: virtual media (upload, mount, eject, delete), serial console, address probing with certificate pins |
 | `make -C macos selftest-stalls` | End to end with the fork's keyframe policy: the picture may stand still no longer than a link stall, and resumes once a hidden window is shown |
+| `make -C macos selftest-refresh` | End to end with fork firmware D13's still refresh: region refreshes after typing pauses, none while typing, a full refresh after a long pause; a view-only window leaves refreshes to the device |
 | `make -C macos run DEVICE=jetkvm.local` | Builds and opens the app connected to a device |
 | `make -C macos install` | Copies the app to `/Applications` |
 | `make -C macos notarize` | Notarizes with the Xcode account and staples; leaves `macos/build/BlitzKVM.zip` (see Signing) |
@@ -68,7 +69,7 @@ Focused checks, by what you changed:
 
 - When you edit `pkg/emulator`, `pkg/client`, `pkg/session` or `pkg/engine`, run `go test -race -count=1 ./pkg/<package>`. If you touched video, NACK or netem code, also run `make test-timing`.
 - When you edit `macos/Sources/JetKVMCore`, run `make -C macos test`.
-- When you edit `macos/Sources/BlitzKVM`, `pkg/engineipc` or engine commands, run `make -C macos selftest` and `make -C macos selftest-extras`. If you touched video, the decoder or keyframe handling, also run `make -C macos selftest-stalls`.
+- When you edit `macos/Sources/BlitzKVM`, `pkg/engineipc` or engine commands, run `make -C macos selftest` and `make -C macos selftest-extras`. If you touched video, the decoder or keyframe handling, also run `make -C macos selftest-stalls`; if you touched still refreshes (`RefreshPlanner`, `StillRefresh`, input or frame handling), `make -C macos selftest-refresh`.
 - Before you push, run `make check` (or its steps individually while the tree is dirty, since `generate-check` needs a clean tree).
 
 A passing self-test prints a JSON report and ends with `selftest passed: …`. Any other ending is a failure.
@@ -121,6 +122,12 @@ Stream quality (View › Stream Quality) is **Automatic** by default: the engine
 
 The fork also brings **still screens to near-lossless** (plan §23). Half a second after the screen stops changing, the device sends one keyframe at a very low QP (QP 1 at the maximum level, up to QP 17 at "low"). On the maximum level, text then measures 60 dB, against 53 dB before and 33 dB on stock firmware. The empty frames that follow keep it, and a still screen costs 0.07 Mbit/s.
 
+With firmware that leaves this to the client (fork D13: `getFirmwareFeatures` lists `refreshRegions`), **the app decides when to refresh** (`RefreshPlanner.swift`), in windows that send input. The device's own refresh sent that keyframe (250–350 KB) after every typing pause, and a keystroke right behind it waited 23–61 ms longer (90th percentile: 125 ms). The app knows which parts of the picture changed and when you type:
+- **After a typing pause** (picture still for 250 ms, no input for 400 ms) only the regions that changed are re-encoded: up to six rectangles on 16-pixel blocks, at the level's P-frame QP floor, without a keyframe (an 880×224 text area: 41.5 KB, 44 → 49 dB).
+- **After a long pause** (no input for 3 s, picture still for 1 s) the whole frame gets the near-lossless keyframe, over the LAN and links as fast as one.
+- **Slower links** get region refreshes only. Changes larger than about a third of the screen wait for a long pause there, and on the LAN for the keyframe.
+- A blinking caret or a ticking clock asks for nothing. View-only windows, the lowest quality level and other firmware keep the earlier behavior.
+
 **Latency** (plan §24, measured with `tools/latency-probe` at 60 Hz, LAN):
 
 | From | To | Before | Now |
@@ -142,7 +149,7 @@ Command-line options (also used by the self-tests):
 | `--device <address>` | Connect to an address instead of showing the device library |
 | `--view-only` | Never send keyboard or mouse input |
 | `--scale actualSize\|fit\|pixelExact\|integer\|matchWindow`, `--match-scale 1.5`, `--match-refresh 60\|auto`, `--scaling-filter lanczos`, `--local-pointer hidden\|dot\|arrow`, `--profile mac\|pc`, `--window-size 1280x720`, `--full-screen` | View and input overrides |
-| `--selftest <seconds>` and `--crash-engine-after`, `--inject-input`, `--exercise-extras`, `--snapshot <png>`, `--hide-after <seconds>`, `--max-freeze-ms <ms>`, `--set-quality-after 4:low,9:maximum`, `--toggle-status-bar-after <seconds>` | Self-test mode (prints JSON, exits 0 on success). The window floats above other windows and never captures your own keyboard or pointer; only `--inject-input` sends input |
+| `--selftest <seconds>` and `--crash-engine-after`, `--inject-input`, `--exercise-extras`, `--snapshot <png>`, `--hide-after <seconds>`, `--max-freeze-ms <ms>`, `--set-quality-after 4:low,9:maximum`, `--toggle-status-bar-after <seconds>`, `--type-pauses` | Self-test mode (prints JSON, exits 0 on success). The window floats above other windows and never captures your own keyboard or pointer; only `--inject-input` and `--type-pauses` (typing bursts, then checks the still refreshes) send input |
 | `--setup check\|install-tailscale\|login\|restart\|install-firmware[=blitzkvm\|stock]\|password=<new password>\|change-password=<new password>\|remove-password`, `--setup-snapshot <png>`, `--wake` | With `--selftest`: opens JetKVM Setup, runs the action, and reports the three states (`setup`, `setupOK`); the snapshot renders the sheet. `--wake` wakes the target once connected (no keystrokes) |
 | `--latency-probe <samples>` | Measures input-to-photon latency against `tools/latency-probe/latency.html` on the target (prints JSON, exits) |
 

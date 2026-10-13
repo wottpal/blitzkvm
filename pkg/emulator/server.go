@@ -95,6 +95,15 @@ type Config struct {
 	// firmware with the desktop encoder patch (firmware/); stock firmware
 	// does not know them.
 	EncoderPatch bool
+	// RefreshRegions models fork firmware D13 (implies EncoderPatch):
+	// getFirmwareFeatures lists hidrpcWheel and refreshRegions,
+	// setVideoEncoderParams takes autoRefresh, and refreshRegions is
+	// validated and logged (a full refresh sends a keyframe).
+	RefreshRegions bool
+	// StillScreen makes the H.264 test pattern a still picture that typing
+	// changes: each key press draws a glyph-sized block at a cursor, like an
+	// editor (no moving box and no timestamp barcode).
+	StillScreen bool
 }
 
 type FaultConfig struct {
@@ -212,6 +221,8 @@ type Server struct {
 	media        *virtualmedia.State
 	storage      map[string]storedFile
 	uploads      map[string]*pendingUpload
+	// typed counts key presses for the still screen to draw.
+	typed atomic.Int64
 }
 
 type storedFile struct {
@@ -234,6 +245,9 @@ type session struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	hidState  *hidState
+	// keyframeReq asks the session's encoder for a keyframe (PLI/FIR, full
+	// refreshes); never blocks.
+	keyframeReq chan struct{}
 
 	mu     sync.Mutex
 	rpc    *webrtc.DataChannel
@@ -269,6 +283,8 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.TakeoverCloseDelay == 0 {
 		cfg.TakeoverCloseDelay = time.Second
 	}
+	// D13 builds on the encoder patch.
+	cfg.EncoderPatch = cfg.EncoderPatch || cfg.RefreshRegions
 	s := &Server{
 		cfg:     cfg,
 		limiter: newLoginLimiter(),
@@ -1187,7 +1203,7 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 		return nil, "", err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	sess := &session{pc: pc, ctx: ctx, cancel: cancel, opened: map[string]bool{}, serverRef: s}
+	sess := &session{pc: pc, ctx: ctx, cancel: cancel, opened: map[string]bool{}, serverRef: s, keyframeReq: make(chan struct{}, 1)}
 	sess.hidState = newHIDState(ctx, sess)
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -1211,6 +1227,11 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 			sess.cancel()
 			s.mu.Lock()
 			isCurrent := s.session == sess
+			if isCurrent {
+				// The last session is gone: the stream stops, which drops
+				// encoder overrides.
+				s.state.EncoderParams = DefaultEncoderParams
+			}
 			s.mu.Unlock()
 			if isCurrent {
 				sess.hidState.clearKeyboard()
@@ -1234,7 +1255,6 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 		_ = pc.Close()
 		return nil, "", err
 	}
-	keyframeReq := make(chan struct{}, 1)
 	go func() {
 		// Read RTCP so interceptors (NACK responder, reports) see feedback.
 		// Like the stock device, PLI/FIR are otherwise ignored.
@@ -1248,10 +1268,7 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 				case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
 					s.keyframeRequests.Add(1)
 					if s.cfg.KeyframeOnRequest {
-						select {
-						case keyframeReq <- struct{}{}:
-						default:
-						}
+						sess.requestKeyframe()
 					}
 				}
 			}
@@ -1280,6 +1297,11 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 	s.session = sess
 	s.sessionCount++
 	s.negotiated = append(s.negotiated, mimeType)
+	if prev != nil {
+		// Encoder overrides belong to the session that set them (fork
+		// resetEncoderOverrides).
+		s.state.EncoderParams = DefaultEncoderParams
+	}
 	s.mu.Unlock()
 	if prev != nil {
 		_ = prev.sendEvent("otherSessionConnected", nil)
@@ -1312,7 +1334,7 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 		if !sess.waitConnected(ctx) {
 			return
 		}
-		if err := s.startVideo(ctx, mimeType, videoTrack, keyframeReq); err != nil {
+		if err := s.startVideo(ctx, mimeType, videoTrack, sess.keyframeReq); err != nil {
 			log := logging.Subsystem("emulator")
 			log.Warn().Err(err).Msg("video source failed")
 		}
@@ -1324,6 +1346,13 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 		return nil, "", err
 	}
 	return sess, signaling.EncodeSDP(rawAnswer), nil
+}
+
+func (sess *session) requestKeyframe() {
+	select {
+	case sess.keyframeReq <- struct{}{}:
+	default:
+	}
 }
 
 func (s *Server) appendInput(channel, typ, data string) {

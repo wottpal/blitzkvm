@@ -23,6 +23,8 @@ final class InputController {
     var viewOnly = false
     private(set) var captured = false
     private var pressedUsages = Set<UInt8>()
+    /// Keys are down on the remote (its own key repeat may be typing).
+    var keysHeld: Bool { !pressedUsages.isEmpty }
     private var lastButtons: UInt8 = 0
     private var scroll = ScrollAccumulator()
     private var eventTap: CFMachPort?

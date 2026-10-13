@@ -51,6 +51,16 @@ final class EngineProtocolTests: XCTestCase {
         XCTAssertEqual(object["baseURL"] as? String, "jetkvm.local")
         XCTAssertEqual(object["offerH265"] as? Bool, true)
         XCTAssertNil(object["password"])
+        let connect = try JSONSerialization.jsonObject(with: JSONEncoder().encode(EngineCommand(cmd: "connect", clientRefresh: true))) as! [String: Any]
+        XCTAssertEqual(connect["clientRefresh"] as? Bool, true)
+    }
+
+    func testSnapshotCarriesTheStillRefreshLevel() throws {
+        let json = #"{"Phase":"connected","Status":"connected","ClientRefresh":true,"MinQP":10,"StillQP":1}"#
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snapshot.ClientRefresh, true)
+        XCTAssertEqual(snapshot.MinQP, 10)
+        XCTAssertEqual(snapshot.StillQP, 1)
     }
 }
 

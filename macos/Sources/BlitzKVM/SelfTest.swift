@@ -12,6 +12,8 @@ import JetKVMCore
 /// (a hidden window stops decoding by design, minimized or covered alike).
 /// `--set-quality-after S:level,…` changes the stream quality during the run;
 /// `--toggle-status-bar-after S` shows or hides the status bar (not saved).
+/// `--type-pauses` checks the still refreshes the window asks for while
+/// typing (see typePauses).
 final class SelfTest {
     private weak var controller: DeviceWindowController?
     private let seconds: Double
@@ -38,6 +40,25 @@ final class SelfTest {
     var setupSnapshotPath: String?
     /// Sends the wake-only signal a second into the run (a sleeping target).
     var wake = false
+    /// Once the window refreshes still pictures itself (an emulator with
+    /// --refresh-regions --still-screen), types two short bursts, with a
+    /// pause after each, through the window's input path (without capturing
+    /// this Mac's keyboard). Passes when each pause brought one region
+    /// refresh that covers what the burst changed, nothing came while
+    /// typing, and the long pause at the end brought a full refresh (the
+    /// emulator on this Mac is a LAN-like link).
+    var typePauses = false
+    private struct Burst {
+        var first: Double
+        var last: Double
+        /// The picture before the burst and once its refresh came.
+        var before: CVPixelBuffer?
+        var changed: PixelRect?
+    }
+    private var bursts: [Burst] = []
+    private var refreshes: [(at: Double, refresh: RefreshPlanner.Refresh, error: String?)] = []
+    private var refreshActiveAt: Double?
+    private var latestFrame: CVPixelBuffer?
     private var setupReport: [String: Any]?
     private var setupOK = false
     private var finished = false
@@ -132,6 +153,9 @@ final class SelfTest {
                 self?.controller?.wakeComputer()
             }
         }
+        if typePauses {
+            Task { @MainActor [weak self] in await self?.typeWithPauses() }
+        }
         visibilityTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in self?.sampleVisibility() }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in self?.finish() }
     }
@@ -185,6 +209,73 @@ final class SelfTest {
             }
         }
         inputInjected = true
+    }
+
+    private var elapsed: Double { Date().timeIntervalSince(started) }
+
+    /// See typePauses.
+    @MainActor
+    private func typeWithPauses() async {
+        guard let controller else { return }
+        controller.stillRefresh.onSent = { [weak self] refresh, error in self?.refreshSent(refresh, error: error) }
+        guard await waitUntil(15, { controller.stillRefresh.isActive }) else { return }
+        refreshActiveAt = elapsed
+        // The start's full refresh comes after a second of stillness.
+        try? await Task.sleep(for: .seconds(2))
+        for (burst, (keys, pause)) in [(4, 1.5), (3, 0.0)].enumerated() {
+            lock.withLock { bursts.append(Burst(first: elapsed, last: elapsed, before: latestFrame)) }
+            for i in 0..<keys {
+                if i > 0 { try? await Task.sleep(for: .milliseconds(150)) }
+                let usage = UInt8(4 + burst * 4 + i) // a, b, c, d, then e, f, g
+                controller.input.send(EngineProtocol.key(hid: usage, pressed: true))
+                controller.input.send(EngineProtocol.key(hid: usage, pressed: false))
+            }
+            lock.withLock { bursts[burst].last = elapsed }
+            try? await Task.sleep(for: .seconds(pause))
+        }
+    }
+
+    private func refreshSent(_ refresh: RefreshPlanner.Refresh, error: String?) {
+        let at = elapsed
+        AppLog.log("selftest: still refresh \(refresh.isFull ? "full" : "\(refresh.rects)") at \(String(format: "%.2f", at)) s\(error.map { ": \($0)" } ?? "")")
+        lock.lock()
+        defer { lock.unlock() }
+        refreshes.append((at, refresh, error))
+        // The first region refresh after a burst: what the burst changed.
+        if !refresh.isFull, let i = bursts.lastIndex(where: { $0.last < at }), bursts[i].changed == nil,
+           let before = bursts[i].before, let now = latestFrame {
+            bursts[i].changed = VideoView.changedRect(before, now)
+        }
+    }
+
+    /// Problems with the refreshes typePauses saw (empty: passed).
+    private func refreshProblems() -> [String] {
+        var problems: [String] = []
+        guard refreshActiveAt != nil else { return ["client refresh never turned on"] }
+        guard bursts.count == 2 else { return ["typed \(bursts.count) of 2 bursts"] }
+        for (i, burst) in bursts.enumerated() {
+            let end = i + 1 < bursts.count ? bursts[i + 1].first : seconds
+            if refreshes.contains(where: { $0.at > burst.first && $0.at <= burst.last }) {
+                problems.append("burst \(i + 1): a refresh while typing")
+            }
+            let regions = refreshes.filter { !$0.refresh.isFull && $0.at > burst.last && $0.at < end }
+            guard let region = regions.first else {
+                problems.append("burst \(i + 1): no region refresh after it")
+                continue
+            }
+            if region.at < burst.last + 0.35 { problems.append("burst \(i + 1): region refresh only \(region.at - burst.last) s after the last key") }
+            let covered = region.refresh.rects.reduce(PixelRect.empty) { $0.union($1) }
+            if let changed = burst.changed, changed.isEmpty || !covered.contains(changed) {
+                problems.append("burst \(i + 1): changed \(changed), refreshed \(region.refresh.rects)")
+            } else if burst.changed == nil {
+                problems.append("burst \(i + 1): no frames to compare")
+            }
+        }
+        if let last = bursts.last, !refreshes.contains(where: { $0.refresh.isFull && $0.at >= last.last + 2.9 }) {
+            problems.append("no full refresh after the long pause")
+        }
+        problems += refreshes.compactMap { r in r.error.map { "refresh at \(r.at) s failed: \($0)" } }
+        return problems
     }
 
     @MainActor
@@ -272,6 +363,7 @@ final class SelfTest {
         CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
         lock.lock()
         decodedFrames += 1
+        if typePauses { latestFrame = buffer }
         if firstFrameAt == nil { firstFrameAt = now }
         if let gap = visibleGap(until: now) { freezesMs.append(gap) }
         if let shownAt, resumedAfterShowMs == nil { resumedAfterShowMs = now.timeIntervalSince(shownAt) * 1000 }
@@ -462,6 +554,21 @@ final class SelfTest {
             report["extras"] = extras
             report["extrasOK"] = extrasOK
         }
+        var refreshProblems: [String] = []
+        if typePauses {
+            lock.lock()
+            refreshProblems = self.refreshProblems()
+            report["stillRefresh"] = [
+                "activeAt": refreshActiveAt ?? -1,
+                "bursts": bursts.map { ["first": $0.first, "last": $0.last, "changed": $0.changed.map { "\($0)" } ?? "none"] as [String: Any] },
+                "refreshes": refreshes.map { r -> [String: Any] in
+                    ["at": (r.at * 100).rounded() / 100, "qp": r.refresh.qp, "frames": r.refresh.frames,
+                     "rects": r.refresh.rects.map { [$0.x0, $0.y0, $0.width, $0.height] }, "error": r.error ?? ""]
+                },
+                "problems": refreshProblems,
+            ] as [String: Any]
+            lock.unlock()
+        }
         if let snapshotPath {
             report["snapshotWritten"] = controller.videoView.writeSnapshot(to: URL(fileURLWithPath: snapshotPath))
         }
@@ -483,6 +590,7 @@ final class SelfTest {
         if exerciseExtras { ok = ok && extrasOK }
         if injectInput { ok = ok && doubleCommandCaptured }
         if setupAction != nil { ok = ok && setupOK }
+        if typePauses { ok = ok && refreshProblems.isEmpty }
         if let maxFreezeMs {
             // Hidden time says nothing about freezes; too much makes the run
             // inconclusive (the intended --hide-after pause aside).

@@ -125,6 +125,7 @@ final class LatencyProbe {
                 self.sentAt = CACurrentMediaTime()
                 self.lock.unlock()
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
+                controller.stillRefresh.inputSent(keysHeld: false) // like typing: the refresh planner sees it
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: false))
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + keyframeLead + 1.4) { [weak self] in self?.next() }
@@ -137,6 +138,7 @@ final class LatencyProbe {
             expectBright = known
             lock.unlock()
             controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
+            controller.stillRefresh.inputSent(keysHeld: false) // like typing: the refresh planner sees it
             controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: false))
             DispatchQueue.main.asyncAfter(deadline: .now() + pairGap) { [weak self] in
                 guard let self else { return }
@@ -144,6 +146,7 @@ final class LatencyProbe {
                 self.sentAt = CACurrentMediaTime()
                 self.lock.unlock()
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
+                controller.stillRefresh.inputSent(keysHeld: false) // like typing: the refresh planner sees it
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: false))
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + pairGap + 1.4) { [weak self] in self?.next() }
@@ -156,6 +159,7 @@ final class LatencyProbe {
             controller.engine.write(EngineProtocol.wheel(y: target == 0 ? 1 : -1, x: 0))
         } else {
             controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
+            controller.stillRefresh.inputSent(keysHeld: false) // like typing: the refresh planner sees it
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: false))
             }

@@ -264,10 +264,13 @@ final class EngineProcess {
     /// test pattern, which only its H.264 encoder can produce.
     static var offerH265 = true
 
-    func connect(baseURL: String, password: String?, deviceID: String?, certSHA256: String?, autoQuality: Bool, qualityLevel: String?) {
+    /// `clientRefresh`: the window refreshes still pictures itself
+    /// (StillRefresh) where the firmware offers it.
+    func connect(baseURL: String, password: String?, deviceID: String?, certSHA256: String?, autoQuality: Bool, qualityLevel: String?,
+                 clientRefresh: Bool) {
         let command = EngineCommand(cmd: "connect", baseURL: baseURL, password: password, deviceID: deviceID,
                                     certSHA256: certSHA256, offerH265: Self.offerH265, autoQuality: autoQuality,
-                                    qualityLevel: autoQuality ? nil : qualityLevel)
+                                    qualityLevel: autoQuality ? nil : qualityLevel, clientRefresh: clientRefresh)
         lastConnect = command
         send(command: command)
     }

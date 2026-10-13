@@ -83,6 +83,7 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 	}
 	// Upstream never answers -32602: parameter errors are handler errors.
 	invalid := failed
+	notFound := func() jsonrpc.Response { return jsonrpc.NewErrorResponse(req.ID, -32601, "Method not found", nil) }
 	if spec, found := rpcParams[req.Method]; found {
 		params, _ := req.Params.(map[string]any)
 		for _, name := range spec.required {
@@ -594,7 +595,7 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 		return ok(virtualmedia.UploadStart{AlreadyUploadedBytes: int64(len(file.data)), DataChannel: uploadID}), nil
 	case "getVideoEncoderParams", "setVideoEncoderParams":
 		if !srv.cfg.EncoderPatch {
-			return jsonrpc.NewErrorResponse(req.ID, -32601, "Method not found", nil), nil
+			return notFound(), nil
 		}
 		if req.Method == "setVideoEncoderParams" {
 			// Omitted fields keep their value; the merged result must be valid.
@@ -604,19 +605,45 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 			if err := json.Unmarshal(raw, &merged); err != nil {
 				return failed("params: " + err.Error()), nil
 			}
+			if !srv.cfg.RefreshRegions {
+				merged.AutoRefresh = st.EncoderParams.AutoRefresh // unknown before D13
+			}
 			if err := merged.validate(); err != nil {
 				return failed(err.Error()), nil
 			}
 			st.EncoderParams = merged
+			srv.appendInputLocked("rpc", "rpc.setVideoEncoderParams", fmt.Sprintf("%+v", merged))
 		}
 		return ok(st.EncoderParams), nil
+	case "getFirmwareFeatures":
+		if !srv.cfg.RefreshRegions {
+			return notFound(), nil
+		}
+		return ok([]string{client.FeatureHIDRPCWheel, client.FeatureRefreshRegions}), nil
+	case "refreshRegions":
+		if !srv.cfg.RefreshRegions {
+			return notFound(), nil
+		}
+		params, err := decodeParams[RefreshRequest](req.Params)
+		if err != nil {
+			return invalid("invalid refresh: " + err.Error()), nil
+		}
+		video := srv.videoInputStateLocked()
+		if err := params.validate(video.Width, video.Height); err != nil {
+			return failed(err.Error()), nil
+		}
+		srv.appendInputLocked("rpc", "rpc.refreshRegions", fmt.Sprintf("rects=%+v qp=%d frames=%d", params.Rects, params.QP, params.Frames))
+		if len(params.Rects) == 0 {
+			sess.requestKeyframe()
+		}
+		return ok(nil), nil
 	case "getLocalVersion":
 		return ok(client.LocalVersion{AppVersion: srv.cfg.DeviceVersion, SystemVersion: "0.2.8"}), nil
 	case "getUpdateStatus":
 		local := client.LocalVersion{AppVersion: srv.cfg.DeviceVersion, SystemVersion: "0.2.8"}
 		return ok(client.UpdateStatus{Local: local, Remote: local}), nil
 	default:
-		return jsonrpc.NewErrorResponse(req.ID, -32601, "Method not found", nil), nil
+		return notFound(), nil
 	}
 }
 
@@ -766,6 +793,7 @@ func (s *Server) applyKeypress(key byte, press bool) {
 			if existing == 0 {
 				keys[i] = key
 				s.state.KeysDown = keys
+				s.typed.Add(1)
 				return
 			}
 		}

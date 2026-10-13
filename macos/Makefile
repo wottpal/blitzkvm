@@ -6,6 +6,7 @@
 #   make firmware   bundle the firmware builds JetKVM Setup installs
 #   make selftest   end-to-end run against the in-repo emulator
 #   make selftest-stalls   the picture survives link stalls and hidden windows
+#   make selftest-refresh  still refreshes follow typing pauses (fork firmware D13)
 #   make run DEVICE=jetkvm.local
 #   make install    copy the app to /Applications
 #   make notarize   notarize (Xcode account) and staple, for use on other Macs
@@ -38,7 +39,7 @@ EMULATOR_ADDR ?= 127.0.0.1:18080
 # bin/jetkvm_app; JetKVM's own release is downloaded once at build time.
 FORK_BINARY ?= $(abspath ../../kvm/bin/jetkvm_app)
 
-.PHONY: app engine swift icon firmware test selftest selftest-extras selftest-stalls run install notarize clean
+.PHONY: app engine swift icon firmware test selftest selftest-extras selftest-stalls selftest-refresh run install notarize clean
 
 engine:
 	cd .. && GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o macos/build/blitzkvm-engine ./cmd/blitzkvm-engine
@@ -112,6 +113,30 @@ selftest-stalls: app
 		test $$status -eq 0 || { cat build/selftest-$$run.json; echo "selftest-stalls ($$run) failed"; exit 1; }; \
 	done
 	@echo "selftest-stalls passed: no freeze beyond a link stall, and the picture resumes when the window is shown"
+
+# Client-driven still refresh (fork firmware D13). Against an emulator that
+# offers refreshRegions and shows a still picture that typing changes, with
+# the fork's keyframe policy: the app turns the device's own refresh off,
+# asks for a region refresh after each typing pause (none while typing) and
+# for a full refresh after a long pause, and the emulator accepts each. A
+# view-only window leaves refreshes to the device.
+selftest-refresh: app
+	cd .. && go build -o macos/build/emulator-serve ./test/emulator-serve
+	@for run in typing view-only; do \
+		./build/emulator-serve serve --listen $(EMULATOR_ADDR) --width 1280 --height 720 --fps 30 --gop 3600 --keyframe-on-request \
+			--refresh-regions --still-screen --log-inputs > build/emulator-refresh-$$run.jsonl & pid=$$!; \
+		sleep 1; \
+		"$(APP)/Contents/MacOS/BlitzKVM" --device $(EMULATOR_ADDR) --h264 \
+			$$([ $$run = typing ] && echo --selftest 15 --type-pauses || echo --selftest 6 --view-only) > build/selftest-refresh-$$run.json; status=$$?; \
+		kill $$pid; \
+		test $$status -eq 0 || { cat build/selftest-refresh-$$run.json; echo "selftest-refresh ($$run) failed"; exit 1; }; \
+	done; \
+	log=build/emulator-refresh-typing.jsonl; \
+	grep -q '"Type":"rpc.setVideoEncoderParams".*AutoRefresh:false' $$log || { echo "the device's own refresh was not turned off"; exit 1; }; \
+	grep '"Type":"rpc.refreshRegions"' $$log | grep -qv 'rects=\[\]' || { echo "the emulator received no region refresh"; exit 1; }; \
+	grep -q '"Type":"rpc.refreshRegions","Data":"rects=\[\]' $$log || { echo "the emulator received no full refresh"; exit 1; }; \
+	! grep -q 'rpc.refreshRegions\|AutoRefresh:false' build/emulator-refresh-view-only.jsonl || { echo "a view-only window changed who refreshes"; exit 1; }
+	@echo "selftest-refresh passed: region refreshes after typing pauses, none while typing, a full refresh after a long pause; view-only leaves it to the device"
 
 install: app
 	rm -rf "/Applications/BlitzKVM.app"
