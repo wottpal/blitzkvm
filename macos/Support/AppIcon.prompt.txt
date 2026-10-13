@@ -1,6 +1,23 @@
+BlitzKVM — Soft Glow
+Generated with the built-in imagegen tool on October 11, 2026.
+Selected artwork: AppIcon.icon/Assets/BlitzKVM-Soft-Glow.png (1254 × 1254, RGBA PNG).
+
+Original generation prompt:
+
 Use case: logo-brand.
-Asset type: native macOS app icon concept, square 1024 × 1024 artwork.
-Primary request: an ultra-modern, minimalistic app icon with an agentic feeling, built around ONE fancy, unmistakable mouse pointer arrow pointing toward the upper left. Confident, intelligent, purposeful, beautifully balanced. The cursor is the hero and must remain recognizable at tiny Dock sizes.
-Composition: straight-on, centered macOS rounded-square tile filling approximately 90% of the canvas, transparent outside its silhouette; ample clean space within the tile. Strong, simple silhouette. Production-quality icon artwork.
-Constraints: no text at all, no letters, numbers, labels, watermark, device frames, screenshot, presentation board, grid, or multiple icons. No robot, brain, chat bubble, decorative stars, generic AI sparkle, busy circuitry, or extra objects. Render only ONE finished icon.
-Design direction: a translucent glass cursor on a clean frosted-glass rounded-square tile. The cursor has crisp readable edges, a bright solid inner silhouette, and very subtle spectral refraction at its beveled rim. The shape is minimal and intentional, resembling one beautifully engineered optical object. Modern native macOS material quality, restrained translucency, soft luminous neutral backdrop, no transparent see-through mush, strong Dock-size readability.
+Asset type: ultra-modern minimal native macOS app icon concept for BlitzKVM; the name is context only and MUST NOT appear.
+Primary request: ONE glossy glass mouse cursor with electric lightning-inspired COLORING ONLY, on a sophisticated dark-mode tile.
+Subject: a beautiful NORMAL mouse pointer, pointing upper left, with a conventional triangular arrowhead, familiar notch, and a completely STRAIGHT stem. The silhouette is the ordinary instantly recognizable cursor shape, without ANY lightning geometry.
+Materials: clear smoked optical glass with a smooth luminous electric-yellow inner face and warm amber refraction along the precision-cut beveled edges. Glossy broad clean reflections, rich transparent-looking depth rendered within the material, subtle three-dimensional lift. Make it feel like one finely engineered glass object, polished and intelligent. The warm yellow-to-amber color is the entire lightning reference.
+Backdrop/composition: one deep graphite-black glossy rounded-square macOS tile, centered on a square canvas with balanced transparent exterior margins. The conventional glass cursor is the large central hero, with calm negative space and excellent tiny-size readability. Front-on icon artwork, restrained lighting, minimal soft shadow.
+Critical constraints: NO bolt shape anywhere, NO zigzag, NO cutout, NO internal lightning mark or engraving, NO bolt tail, NO branching electricity, sparks, particles, star glints or decorations. No other objects, devices, robots, scenery, grid or mockup. Absolutely NO text, words, letters, numbers, labels, branding or watermark. Only ONE finished app icon.
+
+Selected variation edit prompt:
+
+Use case: precise-object-edit.
+Asset type: a variation of the supplied native macOS app icon for BlitzKVM.
+Input image: edit target and visual identity reference.
+Keep the same conventional upper-left mouse cursor silhouette, familiar notch and STRAIGHT stem, yellow/amber glass material family, dark rounded-square tile, centered composition, proportions and generous margins. This must look like a close sibling of the supplied icon, not a new concept.
+The main subject is one refined glossy glass cursor, with lightning suggested ONLY by electric yellow and amber COLOR. Preserve strong small-size readability, minimal visual complexity, modern native macOS character and polished optical materials.
+Constraints: NO bolt shapes or zigzags anywhere, NO lightning-shaped tail or cutout, NO extra symbols, electricity branches, sparks, particles, stars, text, lettering, numbers, logos, labels or watermark. No second icon, grid, scenery or mockup. Preserve genuine transparent exterior and clean antialiased tile boundaries. The tile interior is continuous and opaque. Produce one square app icon.
+Change only lighting and surface polish: keep the rich amber glass cursor but soften the reflections into broad quiet highlights. Reduce the bright gray glare across the tile so it reads as deep satin black, contrasting with the glossy cursor. Add a very subtle diffuse warm illumination immediately under the cursor, without a broad glow cloud. Keep the glass object's rich depth, outline, conventional straight stem and placement unchanged. The result is calmer, more minimal and less reflective while still clearly glossy glass.

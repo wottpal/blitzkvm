@@ -1,14 +1,14 @@
 {
   "fill" : {
-    "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
+    "automatic-gradient" : "extended-srgb:0.00000,0.00000,0.00000,1.00000"
   },
   "groups" : [
     {
       "layers" : [
         {
           "glass" : false,
-          "image-name" : "03-prism.png",
-          "name" : "03-prism"
+          "image-name" : "BlitzKVM-Soft-Glow.png",
+          "name" : "BlitzKVM Soft Glow"
         }
       ],
       "shadow" : {
