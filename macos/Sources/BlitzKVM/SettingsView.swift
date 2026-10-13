@@ -84,11 +84,10 @@ struct UpdatesSection: View {
         } header: {
             Text("Updates")
         } footer: {
-            Text("Every update is signed and notarized by Apple. BlitzKVM checks the signature before installing it.")
+            Text("Every update is notarized by Apple and verified before it installs.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .animation(.snappy(duration: 0.2), value: updater.lastCheck)

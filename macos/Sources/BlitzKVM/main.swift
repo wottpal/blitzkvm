@@ -118,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let model = DevicesModel(store: store)
         model.onConnect = { [weak self] device in self?.connect(device) }
         model.onSetUp = { [weak self] device in self?.setUp(device) }
+        model.onShowSettings = { [weak self] in self?.showSettings() }
         model.onSaved = { [weak self] device in
             self?.windows.first { $0.device.id == device.id }?.libraryEdited(device)
         }

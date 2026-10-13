@@ -31,7 +31,7 @@ Numbers and methods: [BENCHMARKS.md](BENCHMARKS.md).
 - **Download:** get `BlitzKVM.zip` from the [latest release](https://github.com/wottpal/blitzkvm/releases/latest), unzip it and move `BlitzKVM.app` to `/Applications`. From then on BlitzKVM updates itself.
 - **Build from source:** see [Development](#development); `make -C macos install` builds the app and copies it to `/Applications`.
 
-On first launch a welcome screen asks for **Local Network** access (required: JetKVMs answer on the local network) and **Accessibility** (recommended: ⌘Tab, ⌘Space and other system shortcuts then reach the remote computer). BlitzKVM › Settings… (⌘,) shows both later.
+On first launch a welcome screen asks for **Local Network** access (required: JetKVMs answer on the local network) and **Accessibility** (recommended: ⌘Tab, ⌘Space and other system shortcuts then reach the remote computer). BlitzKVM › Settings… (⌘,), also the gear in the Devices window, shows both later.
 
 **Updates:** BlitzKVM checks its GitHub releases once a day and offers each new version with its release notes; BlitzKVM › Check for Updates… checks now. In Settings you can turn the daily check off, or have updates download in the background and install when you quit BlitzKVM. Every update is notarized by Apple and signed with BlitzKVM's update key, and the app checks that signature, and that the new app carries the same Developer ID, before it installs anything (Sparkle).
 

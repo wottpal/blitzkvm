@@ -14,6 +14,7 @@ final class DevicesModel: ObservableObject {
     var onConnect: (Device) -> Void = { _ in }
     /// Connects and opens the JetKVM Setup sheet.
     var onSetUp: (Device) -> Void = { _ in }
+    var onShowSettings: () -> Void = {}
     /// A device was edited and saved (open windows take the preferences).
     var onSaved: (Device) -> Void = { _ in }
 
@@ -81,6 +82,10 @@ struct DevicesView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button(action: add) { Label("Add Device", systemImage: "plus") }
                     .help("Add a JetKVM")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: model.onShowSettings) { Label("Settings", systemImage: "gearshape") }
+                    .help("Updates and permissions")
             }
         }
         .sheet(item: $editing) { edit in
