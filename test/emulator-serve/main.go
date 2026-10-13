@@ -90,6 +90,9 @@ func main() {
 	serveCmd.Flags().BoolVar(&cfg.StillScreen, "still-screen", false, "Show a still H.264 test picture that key presses type into")
 	serveCmd.Flags().StringVar(&cfg.Tailscale, "tailscale", emulator.TailscaleRunning, "Tailscale state getTailscaleStatus reports: running, none or needs-login")
 	serveCmd.Flags().IntVar(&cfg.Faults.UploadBytesPerSecond, "upload-rate", 0, "Throttle storage uploads to this many bytes per second")
+	serveCmd.Flags().BoolVar(&cfg.AudioEnabled, "audio-enabled", false, "Start with the device's audio on (setAudioConfig; off by default, as on firmware)")
+	serveCmd.Flags().BoolVar(&cfg.AudioTone, "audio-tone", false, "Let the target play a 440 Hz tone for a second, then nothing for a second, again and again")
+	serveCmd.Flags().BoolVar(&cfg.OpusAudio, "opus-audio", false, "Like fork firmware D14: Opus audio where offered, getFirmwareFeatures lists opusAudio")
 	serveCmd.Flags().BoolVar(&logInputs, "log-inputs", false, "Print every received input as a JSON line on stdout")
 
 	rootCmd := &cobra.Command{

@@ -621,3 +621,27 @@ func TestEngineClientRefresh(t *testing.T) {
 		t.Fatalf("refreshRegions: %s", rpc.Error)
 	}
 }
+
+// Audio goes to the app as TypeAudio frames, one per RTP packet.
+func TestEngineForwardsAudio(t *testing.T) {
+	srv := startEmulatorWith(t, emulator.Config{AudioEnabled: true, AudioTone: true, OpusAudio: true})
+	h := startEngine(t)
+	h.send(engineipc.Command{ID: 1, Cmd: "connect", BaseURL: strings.TrimPrefix(srv.BaseURL(), "http://"), Password: "pw", Audio: true})
+	f := h.waitFor(10*time.Second, "audio", func(f frame) bool { return f.typ == engineipc.TypeAudio })
+	hdr, payload, err := engineipc.ParseAudio(f.payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if age := time.Since(time.Unix(0, hdr.ReceivedUnixNano)); hdr.Codec != 1 || hdr.Flags&engineipc.FlagMarker == 0 || len(payload) < 100 || age < 0 || age > 5*time.Second {
+		t.Fatalf("first audio packet: %+v, %d bytes, received %s ago", hdr, len(payload), age)
+	}
+	h.waitFor(5*time.Second, "audio stats", func(f frame) bool {
+		var evt engineipc.Event
+		var stats struct {
+			Stats        struct{ AudioCodec string }
+			DroppedAudio *uint64 `json:"engineDroppedAudio"`
+		}
+		return f.typ == engineipc.TypeEvent && json.Unmarshal(f.payload, &evt) == nil && evt.Type == "stats" &&
+			json.Unmarshal(evt.Stats, &stats) == nil && stats.Stats.AudioCodec == "opus" && stats.DroppedAudio != nil && *stats.DroppedAudio == 0
+	})
+}

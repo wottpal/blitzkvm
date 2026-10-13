@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -80,6 +81,15 @@ type Config struct {
 	// live turns the device's own still refresh off (autoRefresh). Only for
 	// clients that plan refreshes and send input.
 	ClientRefresh bool
+	// OnAudioPacket receives the device's audio while Audio is on (see
+	// client.Config.OnAudioPacket); nil never asks for it.
+	OnAudioPacket func(client.AudioPacket)
+	// Audio asks the device for its audio (SetAudio changes it).
+	Audio bool
+	// EnableDeviceAudio turns the device's audio on where it is off, once,
+	// and reconnects so the device attaches it. Only for clients that may
+	// change device settings.
+	EnableDeviceAudio bool
 }
 
 type Snapshot struct {
@@ -157,6 +167,12 @@ type Controller struct {
 	// takes live encoder parameters (patched firmware).
 	encoderParamsClient *client.Client
 	encoderParamsOK     bool
+
+	// audio is Config.Audio as SetAudio left it (read for every packet);
+	// audioTurnedOn is set once the controller tried to turn the device's
+	// audio on, which it does at most once.
+	audio         atomic.Bool
+	audioTurnedOn bool
 
 	pasteMu     sync.Mutex
 	pasteCancel context.CancelFunc
@@ -261,7 +277,7 @@ func New(cfg Config) *Controller {
 	if err != nil {
 		panic(fmt.Sprintf("auth client: %v", err))
 	}
-	return &Controller{
+	c := &Controller{
 		cfg:  cfg,
 		auth: authClient,
 		pin:  pin,
@@ -273,6 +289,8 @@ func New(cfg Config) *Controller {
 			AutoQuality: cfg.AutoQuality,
 		},
 	}
+	c.audio.Store(cfg.Audio)
+	return c
 }
 
 func (c *Controller) Snapshot() Snapshot {

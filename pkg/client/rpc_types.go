@@ -47,6 +47,11 @@ type BacklightSettings struct {
 	OffAfter      int `json:"off_after"`
 }
 
+// AudioConfig is getAudioConfig's result and setAudioConfig's parameter.
+type AudioConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
 type VideoSleepMode struct {
 	Enabled  bool `json:"enabled"`
 	Duration int  `json:"duration"`
@@ -382,6 +387,10 @@ type sendCustomCommandRequest struct {
 
 type SetBacklightSettingsRequest struct {
 	Params BacklightSettings `json:"params"`
+}
+
+type SetAudioConfigRequest struct {
+	Params AudioConfig `json:"params"`
 }
 
 type SetVideoSleepModeRequest struct {

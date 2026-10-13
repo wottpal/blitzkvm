@@ -4,6 +4,9 @@ import JetKVMCore
 protocol EngineProcessDelegate: AnyObject {
     /// Called on a background queue for every video access unit.
     func engine(_ engine: EngineProcess, didReceive header: AccessUnitHeader, data: Data)
+    /// Called on the same queue for every audio packet (AudioPacketHeader
+    /// and payload); must only hand it over.
+    func engine(_ engine: EngineProcess, didReceiveAudio frame: Data)
     /// Called on the main queue.
     func engine(_ engine: EngineProcess, didUpdate snapshot: SessionSnapshot)
     func engine(_ engine: EngineProcess, didUpdateStats stats: [String: Any])
@@ -198,6 +201,8 @@ final class EngineProcess {
                 if let (header, annexB) = AccessUnitHeader.parse(payload) {
                     delegate?.engine(self, didReceive: header, data: annexB)
                 }
+            case .audio:
+                delegate?.engine(self, didReceiveAudio: payload)
             case .event:
                 handleEvent(payload)
             case .commandDone, .rpcResult:
@@ -265,12 +270,14 @@ final class EngineProcess {
     static var offerH265 = true
 
     /// `clientRefresh`: the window refreshes still pictures itself
-    /// (StillRefresh) where the firmware offers it.
+    /// (StillRefresh) where the firmware offers it. `audio`: the device's
+    /// audio comes along; `enableDeviceAudio`: the session may turn it on.
     func connect(baseURL: String, password: String?, deviceID: String?, certSHA256: String?, autoQuality: Bool, qualityLevel: String?,
-                 clientRefresh: Bool) {
+                 clientRefresh: Bool, audio: Bool, enableDeviceAudio: Bool) {
         let command = EngineCommand(cmd: "connect", baseURL: baseURL, password: password, deviceID: deviceID,
                                     certSHA256: certSHA256, offerH265: Self.offerH265, autoQuality: autoQuality,
-                                    qualityLevel: autoQuality ? nil : qualityLevel, clientRefresh: clientRefresh)
+                                    qualityLevel: autoQuality ? nil : qualityLevel, clientRefresh: clientRefresh,
+                                    audio: audio, enableDeviceAudio: enableDeviceAudio)
         lastConnect = command
         send(command: command)
     }
@@ -297,6 +304,12 @@ final class EngineProcess {
         lastConnect?.autoQuality = false
         lastConnect?.qualityLevel = name
         send(command: EngineCommand(cmd: "setQualityLevel", qualityLevel: name))
+    }
+
+    /// Starts or stops the device's audio, also for a restarted helper.
+    func setAudio(_ on: Bool) {
+        lastConnect?.audio = on
+        send(command: EngineCommand(cmd: "setAudio", audio: on))
     }
 
     /// Stops the helper sending video while none is shown (the window is

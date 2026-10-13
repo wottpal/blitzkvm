@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wottpal/blitzkvm/pkg/client"
 	"github.com/wottpal/blitzkvm/pkg/engineipc"
 	"github.com/wottpal/blitzkvm/pkg/input"
 	"github.com/wottpal/blitzkvm/pkg/logging"
@@ -33,6 +34,10 @@ const (
 	// app that stopped reading overflows it; units are then dropped until a
 	// requested keyframe arrives rather than building latency.
 	videoQueueDepth = 60
+	// audioQueueDepth bounds audio packets waiting for the app: a second
+	// of 20 ms packets. Audio has its own queue and writer, so it never
+	// holds up video; past this it is dropped, and counted.
+	audioQueueDepth = 50
 	// defaultRPCWait bounds an app-initiated RPC. Some take long on the
 	// device: mountWithHTTP checks the URL (up to 10 s) before mounting.
 	defaultRPCWait = 30 * time.Second
@@ -50,6 +55,10 @@ type Engine struct {
 	video        chan []byte
 	needKeyframe atomic.Bool
 	droppedUnits atomic.Uint64
+	audio        chan []byte
+	droppedAudio atomic.Uint64
+	// audioDropping is set while the audio queue overflows (logged once).
+	audioDropping atomic.Bool
 	// videoPaused: the app shows no video (its window is hidden), so units
 	// are dropped here, without asking for keyframes. A hidden app may be
 	// throttled by the system; forwarding would fill the queue and turn
@@ -69,8 +78,10 @@ type Engine struct {
 func Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	e := &Engine{w: engineipc.NewWriter(out), ctx: ctx, video: make(chan []byte, videoQueueDepth), uploads: map[int64]context.CancelFunc{}}
+	e := &Engine{w: engineipc.NewWriter(out), ctx: ctx, video: make(chan []byte, videoQueueDepth),
+		audio: make(chan []byte, audioQueueDepth), uploads: map[int64]context.CancelFunc{}}
 	go e.videoWriter(ctx)
+	go e.audioWriter(ctx)
 	go e.snapshotLoop(ctx)
 	defer e.stopSession()
 
@@ -201,6 +212,11 @@ func (e *Engine) command(cmd engineipc.Command) error {
 		go e.withController(cmd, func(c *session.Controller) error { return c.SetSerialSettings(settings) })
 	case "setVideoPaused":
 		e.setVideoPaused(cmd.Paused)
+		e.reply(cmd.ID, nil, "")
+	case "setAudio":
+		if c := e.controller(); c != nil {
+			c.SetAudio(cmd.Audio)
+		}
 		e.reply(cmd.ID, nil, "")
 	case "setAutoQuality":
 		if c := e.controller(); c != nil {
@@ -344,17 +360,20 @@ func (e *Engine) onSerialText(text string) {
 func (e *Engine) startSession(baseURL string, cmd engineipc.Command) {
 	e.stopSession()
 	ctrl := session.New(session.Config{
-		BaseURL:          baseURL,
-		Password:         cmd.Password,
-		ExpectedDeviceID: cmd.DeviceID,
-		CertSHA256:       cmd.CertSHA256,
-		Reconnect:        true,
-		OfferH265:        cmd.OfferH265,
-		AutoQuality:      cmd.AutoQuality,
-		QualityLevel:     cmd.QualityLevel,
-		ClientRefresh:    cmd.ClientRefresh,
-		OnAccessUnit:     e.onAccessUnit,
-		OnSerialText:     e.onSerialText,
+		BaseURL:           baseURL,
+		Password:          cmd.Password,
+		ExpectedDeviceID:  cmd.DeviceID,
+		CertSHA256:        cmd.CertSHA256,
+		Reconnect:         true,
+		OfferH265:         cmd.OfferH265,
+		AutoQuality:       cmd.AutoQuality,
+		QualityLevel:      cmd.QualityLevel,
+		ClientRefresh:     cmd.ClientRefresh,
+		OnAccessUnit:      e.onAccessUnit,
+		OnSerialText:      e.onSerialText,
+		OnAudioPacket:     e.onAudioPacket,
+		Audio:             cmd.Audio,
+		EnableDeviceAudio: cmd.EnableDeviceAudio,
 	})
 	e.mu.Lock()
 	e.ctrl = ctrl
@@ -456,6 +475,51 @@ func (e *Engine) videoWriter(ctx context.Context) {
 	}
 }
 
+// onAudioPacket runs on the audio's RTP goroutine: it must not block.
+func (e *Engine) onAudioPacket(p client.AudioPacket) {
+	var flags byte
+	if p.Marker {
+		flags |= engineipc.FlagMarker
+	}
+	hdr := engineipc.AudioHeader{
+		Codec:            byte(p.Codec),
+		Flags:            flags,
+		SequenceNumber:   p.SequenceNumber,
+		RTPTimestamp:     p.Timestamp,
+		ReceivedUnixNano: p.ReceivedAt.UnixNano(),
+	}
+	frame := hdr.Append(make([]byte, 0, engineipc.AudioHeaderSize+len(p.Payload)))
+	frame = append(frame, p.Payload...)
+	select {
+	case e.audio <- frame:
+	default:
+		e.droppedAudio.Add(1)
+		if !e.audioDropping.Swap(true) {
+			log := logging.Subsystem("engine")
+			log.Error().Msg("audio queue full: dropping audio until the app reads it again")
+		}
+	}
+}
+
+// audioWriter sends audio to the app, apart from video: a full pipe
+// stalls only audio, which then drops at its queue.
+func (e *Engine) audioWriter(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case frame := <-e.audio:
+			if err := e.w.WriteFrame(engineipc.TypeAudio, frame); err != nil {
+				return
+			}
+			if len(e.audio) == 0 && e.audioDropping.Swap(false) {
+				log := logging.Subsystem("engine")
+				log.Error().Uint64("droppedTotal", e.droppedAudio.Load()).Msg("audio flows again")
+			}
+		}
+	}
+}
+
 // snapshotLoop publishes the session snapshot whenever it changes, and
 // transport statistics once a second.
 func (e *Engine) snapshotLoop(ctx context.Context) {
@@ -486,7 +550,8 @@ func (e *Engine) snapshotLoop(ctx context.Context) {
 				payload, err := json.Marshal(struct {
 					Stats        any    `json:"stats"`
 					DroppedUnits uint64 `json:"engineDroppedUnits"`
-				}{stats, e.droppedUnits.Load()})
+					DroppedAudio uint64 `json:"engineDroppedAudio"`
+				}{stats, e.droppedUnits.Load(), e.droppedAudio.Load()})
 				if err == nil {
 					_ = e.w.WriteJSON(engineipc.TypeEvent, engineipc.Event{Type: "stats", Stats: payload})
 				}

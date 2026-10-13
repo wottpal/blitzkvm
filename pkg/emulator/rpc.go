@@ -380,8 +380,22 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 			return invalid("missing devices"), nil
 		}
 		st.USBDevices = params.Devices
-		// Upstream persists the audio choice (config.AudioEnabled) too.
-		st.AudioEnabled = params.Devices.Audio
+		// Upstream turns audio off with the USB audio function, never on.
+		if !params.Devices.Audio {
+			st.AudioEnabled = false
+		}
+		return ok(nil), nil
+	case "getAudioConfig":
+		return ok(client.AudioConfig{Enabled: st.AudioEnabled && st.USBDevices.Audio}), nil
+	case "setAudioConfig":
+		params, err := decodeParams[client.SetAudioConfigRequest](req.Params)
+		if err != nil {
+			return invalid("invalid params"), nil
+		}
+		// Upstream keeps audio off without an error while the USB audio
+		// function is off. A new session gets the track (attachAudioTrack).
+		st.AudioEnabled = params.Params.Enabled && st.USBDevices.Audio
+		srv.appendInputLocked("rpc", "rpc.setAudioConfig", fmt.Sprintf("enabled=%t", st.AudioEnabled))
 		return ok(nil), nil
 	case "getDisplayRotation":
 		return ok(client.DisplayRotationState{Rotation: st.DisplayRotation}), nil
@@ -616,10 +630,17 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 		}
 		return ok(st.EncoderParams), nil
 	case "getFirmwareFeatures":
-		if !srv.cfg.RefreshRegions {
+		var features []string
+		if srv.cfg.RefreshRegions {
+			features = append(features, client.FeatureHIDRPCWheel, client.FeatureRefreshRegions)
+		}
+		if srv.cfg.OpusAudio {
+			features = append(features, client.FeatureOpusAudio)
+		}
+		if features == nil {
 			return notFound(), nil
 		}
-		return ok([]string{client.FeatureHIDRPCWheel, client.FeatureRefreshRegions}), nil
+		return ok(features), nil
 	case "refreshRegions":
 		if !srv.cfg.RefreshRegions {
 			return notFound(), nil

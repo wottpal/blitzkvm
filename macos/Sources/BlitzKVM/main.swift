@@ -50,6 +50,9 @@ struct Options {
     var wake = false
     /// Self-test: type with pauses and check the still refreshes (SelfTest.typePauses).
     var typePauses = false
+    /// Self-test: play the device's audio (silently) and expect this codec
+    /// ("opus", "pcmu") or none ("none"). Without it, self-tests play none.
+    var expectAudio: String?
 
     static func parse(_ args: [String]) -> Options {
         var o = Options()
@@ -92,6 +95,7 @@ struct Options {
             case "--setup-snapshot": o.setupSnapshot = next()
             case "--wake": o.wake = true
             case "--type-pauses": o.typePauses = true
+            case "--expect-audio": o.expectAudio = next()
             case "--window-size":
                 let parts = (next() ?? "").split(separator: "x").compactMap { Double($0) }
                 if parts.count == 2 { o.windowSize = (parts[0], parts[1]) }
@@ -271,6 +275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.input.viewOnly = options.viewOnly
         controller.scalingFilterOverride = options.scalingFilter
         controller.localPointerOverride = options.localPointer
+        if isSelfTest { controller.playsAudioOverride = options.expectAudio != nil }
         controller.reprobeAddresses = reprobe
         controller.showsSetupOnConnect = pendingSetup.remove(device.id) != nil || options.setup != nil
         if !isSelfTest {
@@ -310,6 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selfTest?.setupSnapshotPath = options.setupSnapshot
             selfTest?.wake = options.wake
             selfTest?.typePauses = options.typePauses
+            selfTest?.expectAudio = options.expectAudio
         }
         if let (w, h) = options.windowSize {
             controller.setContentSizeKeepingIt(NSSize(width: w, height: h))
@@ -543,6 +549,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let qualityItem = NSMenuItem(title: "Stream Quality", action: nil, keyEquivalent: "")
         qualityItem.submenu = quality
         view.addItem(qualityItem)
+        view.addItem(item("Play Audio", #selector(togglePlayAudio)))
         view.addItem(.separator())
         view.addItem(item("Show Status Bar", #selector(toggleStatusBar), key: "/"))
         let pointers = NSMenu(title: "Local Pointer")
@@ -613,6 +620,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleStatusBar() {
         DeviceWindowController.showsStatusBar.toggle()
         windows.forEach { $0.setStatusBarVisible(DeviceWindowController.showsStatusBar) }
+    }
+    @objc private func togglePlayAudio() {
+        DeviceWindowController.playsAudio.toggle()
+        windows.forEach { $0.setPlaysAudio(DeviceWindowController.playsAudio) }
     }
     @objc private func setLocalPointer(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let pointer = LocalPointer(rawValue: raw) else { return }
@@ -752,6 +763,9 @@ extension AppDelegate: NSMenuItemValidation {
             return c?.device.scaling == .matchWindow
         case #selector(toggleStatusBar):
             menuItem.state = DeviceWindowController.showsStatusBar ? .on : .off
+            return true
+        case #selector(togglePlayAudio):
+            menuItem.state = DeviceWindowController.playsAudio ? .on : .off
             return true
         case #selector(setLocalPointer(_:)):
             menuItem.state = DeviceWindowController.localPointer.rawValue == menuItem.representedObject as? String ? .on : .off

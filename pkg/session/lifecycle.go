@@ -233,8 +233,14 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 		})
 		go c.bootstrap(ctx, cl)
 		go c.autoQuality(ctx, cl)
+		forAudio := make(chan struct{})
+		go func() {
+			if c.audioRestart(ctx, cl) {
+				close(forAudio)
+			}
+		}()
 
-		reason := c.watch(ctx, cl)
+		reason := c.watch(ctx, cl, forAudio)
 		_ = cl.Close()
 		if ctx.Err() != nil {
 			return
@@ -258,6 +264,16 @@ func (c *Controller) run(ctx context.Context, gen uint64) {
 				s.HIDReady = false
 			})
 			settle = rebootSettle
+		case "audio":
+			// The device attaches its audio only while answering an offer.
+			c.setState(func(s *Snapshot) {
+				s.Phase = PhaseReconnecting
+				s.Status = "reconnecting for audio"
+				s.HIDReady = false
+			})
+			c.mu.Lock()
+			c.reconnectNow = true
+			c.mu.Unlock()
 		default:
 			c.setState(func(s *Snapshot) {
 				s.Phase = PhaseReconnecting
@@ -365,8 +381,10 @@ func serialSettingsFromClient(settings client.SerialSettings) SerialSettings {
 	}
 }
 
-// watch processes a connected client's events until it ends. It returns why.
-func (c *Controller) watch(ctx context.Context, cl *client.Client) string {
+// watch processes a connected client's events until it ends, or until
+// forAudio closes (the connection must be replaced to get audio). It
+// returns why.
+func (c *Controller) watch(ctx context.Context, cl *client.Client, forAudio <-chan struct{}) string {
 	events, serial, lifecycle := cl.Events(), cl.SerialEvents(), cl.Lifecycle()
 	for {
 		select {
@@ -374,6 +392,8 @@ func (c *Controller) watch(ctx context.Context, cl *client.Client) string {
 			return "stopped"
 		case <-cl.Done():
 			return "disconnected"
+		case <-forAudio:
+			return "audio"
 		case evt, ok := <-events:
 			if !ok {
 				return "disconnected"
@@ -570,6 +590,7 @@ func (c *Controller) newClient() (*client.Client, error) {
 		OfferH265:        c.cfg.OfferH265,
 		OnAccessUnit:     c.cfg.OnAccessUnit,
 		NewVideoSink:     c.cfg.NewVideoSink,
+		OnAudioPacket:    c.audioSink(),
 	}
 	c.mu.RUnlock()
 	return client.New(cfg)

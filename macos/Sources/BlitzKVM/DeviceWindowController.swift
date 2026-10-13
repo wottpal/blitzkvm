@@ -10,6 +10,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private(set) var address: String
     let engine: EngineProcess
     let decoder = VideoDecoder()
+    let audio = AudioPlayer()
     let input = InputController()
     /// Asks for still refreshes where the firmware leaves them to the app.
     let stillRefresh: StillRefresh
@@ -135,6 +136,22 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     static var localPointer: LocalPointer {
         get { UserDefaults.standard.string(forKey: "localPointer").flatMap(LocalPointer.init(rawValue:)) ?? .hidden }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "localPointer") }
+    }
+
+    /// View › Play Audio, for all device windows.
+    static var playsAudio: Bool {
+        get { UserDefaults.standard.object(forKey: "playAudio") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "playAudio") }
+    }
+
+    /// Self-tests: instead of the saved choice (set before start()).
+    var playsAudioOverride: Bool?
+    var playsAudio: Bool { playsAudioOverride ?? Self.playsAudio }
+
+    /// Plays the device's audio or stops it (View › Play Audio).
+    func setPlaysAudio(_ on: Bool) {
+        audio.setEnabled(on)
+        engine.setAudio(on)
     }
 
     /// --local-pointer (self-tests): instead of the saved choice.
@@ -483,6 +500,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func start() throws {
         try engine.start()
+        audio.setEnabled(playsAudio)
         connectEngine()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.input.ensureEventTap()
@@ -504,12 +522,13 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         connectEngine()
     }
 
-    /// View-only sessions change no device settings: no quality level, and
-    /// the device keeps refreshing still pictures itself.
+    /// View-only sessions change no device settings: no quality level, the
+    /// device keeps refreshing still pictures itself, and its audio stays
+    /// as it is (they play it where it is on: hearing is not input).
     private func connectEngine() {
         engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256,
                        autoQuality: device.adaptiveQuality && !input.viewOnly, qualityLevel: input.viewOnly ? nil : device.qualityLevel,
-                       clientRefresh: !input.viewOnly)
+                       clientRefresh: !input.viewOnly, audio: playsAudio, enableDeviceAudio: !input.viewOnly)
     }
 
     func showVirtualMedia() {
@@ -658,6 +677,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         isShutDown = true
         displayFollower.cancel()
         stillRefresh.stop()
+        audio.stop()
         input.setCaptured(false)
         statusTimer?.invalidate()
         stallTimer?.invalidate()
@@ -795,6 +815,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         decoder.decode(header, annexB: data)
     }
 
+    /// Called on the engine's I/O queue.
+    func engine(_ engine: EngineProcess, didReceiveAudio frame: Data) {
+        audio.receive(frame)
+    }
+
     func engine(_ engine: EngineProcess, didUpdate snapshot: SessionSnapshot) {
         if snapshot.Phase != self.snapshot.Phase {
             AppLog.log("\(device.name): \(snapshot.Phase) (\(snapshot.Status))")
@@ -828,6 +853,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.checkSetup() }
             }
         } else if snapshot.Phase != "connected" {
+            if wasConnected { audio.streamEnded() }
             wasConnected = false
         }
         // The ID loads in the background after connecting.
@@ -938,6 +964,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     func engineDidRestart(_ engine: EngineProcess, reason: String) {
         pendingPasteID = nil
         decoder.reset()
+        audio.streamEnded()
         onRestart?(reason)
         refreshStatus(extra: "engine restarted (\(reason))")
     }
@@ -975,6 +1002,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         codecLock.lock()
         parts.append(codecName)
         codecLock.unlock()
+        if let codec = audio.playingCodec { parts.append("audio \(codec)") }
         if let level = snapshot.QualityLevel, !level.isEmpty {
             parts.append(snapshot.AutoQuality == true ? "quality \(level) (auto)" : "quality \(level)")
         }

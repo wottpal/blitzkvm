@@ -57,3 +57,18 @@ func FuzzReadFrame(f *testing.F) {
 		}
 	})
 }
+
+func TestAudioHeaderRoundTrip(t *testing.T) {
+	hdr := AudioHeader{Codec: 1, Flags: FlagMarker, SequenceNumber: 65535, RTPTimestamp: 0xdeadbeef, ReceivedUnixNano: -5}
+	frame := append(hdr.Append(nil), 0xfc, 0xff)
+	if len(frame) != AudioHeaderSize+2 {
+		t.Fatalf("header is %d bytes, want %d", len(frame)-2, AudioHeaderSize)
+	}
+	got, payload, err := ParseAudio(frame)
+	if err != nil || got != hdr || !bytes.Equal(payload, []byte{0xfc, 0xff}) {
+		t.Fatalf("audio: %+v %x %v", got, payload, err)
+	}
+	if _, _, err := ParseAudio(frame[:AudioHeaderSize-1]); err == nil {
+		t.Fatal("a short audio frame parsed")
+	}
+}

@@ -25,6 +25,7 @@ const (
 	TypeAccessUnit  byte = 0x02 // AccessUnitHeader + Annex-B bytes
 	TypeRPCResult   byte = 0x03 // JSON RPCResult
 	TypeCommandDone byte = 0x04 // JSON CommandResult
+	TypeAudio       byte = 0x05 // AudioHeader + one RTP payload
 )
 
 // Message types, app → engine.
@@ -72,6 +73,45 @@ func ParseAccessUnit(payload []byte) (AccessUnitHeader, []byte, error) {
 	return h, payload[AccessUnitHeaderSize:], nil
 }
 
+// AudioHeaderSize is the fixed header preceding an audio payload.
+const AudioHeaderSize = 1 + 1 + 2 + 4 + 8
+
+// Audio flags.
+const (
+	FlagMarker byte = 1 << 0 // the RTP marker bit
+)
+
+// AudioHeader precedes each audio packet's payload (Opus, or G.711 µ-law).
+type AudioHeader struct {
+	Codec          byte // 1 = Opus, 2 = PCMU (client.AudioCodec values)
+	Flags          byte
+	SequenceNumber uint16
+	RTPTimestamp   uint32
+	// ReceivedUnixNano is when the engine received the packet.
+	ReceivedUnixNano int64
+}
+
+func (h AudioHeader) Append(dst []byte) []byte {
+	dst = append(dst, h.Codec, h.Flags)
+	dst = binary.BigEndian.AppendUint16(dst, h.SequenceNumber)
+	dst = binary.BigEndian.AppendUint32(dst, h.RTPTimestamp)
+	return binary.BigEndian.AppendUint64(dst, uint64(h.ReceivedUnixNano))
+}
+
+func ParseAudio(payload []byte) (AudioHeader, []byte, error) {
+	if len(payload) < AudioHeaderSize {
+		return AudioHeader{}, nil, fmt.Errorf("audio packet too short: %d", len(payload))
+	}
+	h := AudioHeader{
+		Codec:            payload[0],
+		Flags:            payload[1],
+		SequenceNumber:   binary.BigEndian.Uint16(payload[2:4]),
+		RTPTimestamp:     binary.BigEndian.Uint32(payload[4:8]),
+		ReceivedUnixNano: int64(binary.BigEndian.Uint64(payload[8:16])),
+	}
+	return h, payload[AudioHeaderSize:], nil
+}
+
 // Command is a JSON control message from the app.
 type Command struct {
 	ID int64 `json:"id,omitempty"`
@@ -83,7 +123,8 @@ type Command struct {
 	// (Paused), createPassword (Password: sets the device's first password
 	// and uses it from then on), changePassword (OldPassword, Password),
 	// removePassword (Password: the current one; the device then asks for none),
-	// reboot (restarts the JetKVM; the session reconnects once it is up).
+	// reboot (restarts the JetKVM; the session reconnects once it is up),
+	// setAudio (Audio).
 	Cmd      string `json:"cmd"`
 	BaseURL  string `json:"baseURL,omitempty"`
 	Password string `json:"password,omitempty"`
@@ -112,6 +153,11 @@ type Command struct {
 	// refreshRegions RPC where the firmware offers it (connect; see
 	// session.Config.ClientRefresh).
 	ClientRefresh bool `json:"clientRefresh,omitempty"`
+	// Audio forwards the device's audio as TypeAudio frames (connect,
+	// setAudio). EnableDeviceAudio turns the device's audio on if it is off
+	// (connect; see session.Config.EnableDeviceAudio).
+	Audio             bool `json:"audio,omitempty"`
+	EnableDeviceAudio bool `json:"enableDeviceAudio,omitempty"`
 }
 
 // Event is a JSON message from the engine. Type "snapshot" carries the

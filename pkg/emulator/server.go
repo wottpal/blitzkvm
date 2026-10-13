@@ -108,6 +108,18 @@ type Config struct {
 	// changes: each key press draws a glyph-sized block at a cursor, like an
 	// editor (no moving box and no timestamp barcode).
 	StillScreen bool
+	// AudioEnabled is the device's audio setting at start (setAudioConfig);
+	// off by default, as on firmware.
+	AudioEnabled bool
+	// AudioTone makes the target play a tone of about a second, then
+	// nothing for a second, again and again; otherwise it plays nothing
+	// and the device sends no audio packets.
+	AudioTone bool
+	// OpusAudio models fork firmware D14: an offer with Opus gets the audio
+	// as Opus (48 kHz stereo, the marker bit on the first packet of each
+	// tone, the RTP timestamp running through silence), and
+	// getFirmwareFeatures lists opusAudio.
+	OpusAudio bool
 }
 
 type FaultConfig struct {
@@ -303,6 +315,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.Faults.InitialVideoState != "" {
 		s.state.VideoState = cfg.Faults.InitialVideoState
 	}
+	s.state.AudioEnabled = cfg.AudioEnabled
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/device/status", s.handleDeviceStatus)
@@ -404,7 +417,6 @@ func defaultDeviceState() DeviceState {
 			MassStorage:   true,
 			Audio:         true,
 		},
-		AudioEnabled: true,
 		NetworkSettings: client.NetworkSettings{
 			DHCPClient:   "dhcpcd",
 			Hostname:     "jetkvm-emulator",
@@ -1259,6 +1271,24 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 		_ = pc.Close()
 		return nil, "", err
 	}
+	audioTrack, err := s.audioTrack(offer.SDP)
+	if err == nil && audioTrack != nil {
+		var audioSender *webrtc.RTPSender
+		if audioSender, err = pc.AddTrack(audioTrack); err == nil {
+			go func() {
+				for {
+					if _, _, err := audioSender.ReadRTCP(); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}
+	if err != nil {
+		cancel()
+		_ = pc.Close()
+		return nil, "", err
+	}
 	go func() {
 		// Read RTCP so interceptors (NACK responder, reports) see feedback.
 		// Like the stock device, PLI/FIR are otherwise ignored.
@@ -1343,6 +1373,17 @@ func (s *Server) exchangeOffer(encoded string, onCandidate func(webrtc.ICECandid
 			log.Warn().Err(err).Msg("video source failed")
 		}
 	}()
+	if audioTrack != nil && s.cfg.AudioTone {
+		go func() {
+			if !sess.waitConnected(ctx) {
+				return
+			}
+			if err := s.playTone(ctx, audioTrack); err != nil {
+				log := logging.Subsystem("emulator")
+				log.Warn().Err(err).Msg("audio source failed")
+			}
+		}()
+	}
 
 	rawAnswer, err := json.Marshal(pc.LocalDescription())
 	if err != nil {

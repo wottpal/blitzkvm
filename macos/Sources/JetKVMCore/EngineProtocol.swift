@@ -8,6 +8,7 @@ public enum FrameType: UInt8 {
     case accessUnit = 0x02
     case rpcResult = 0x03
     case commandDone = 0x04
+    case audio = 0x05
     // app → engine
     case command = 0x10
     case key = 0x11
@@ -129,12 +130,18 @@ public struct EngineCommand: Codable, Equatable {
     /// The app refreshes still pictures itself (refreshRegions) where the
     /// firmware offers it (connect).
     public var clientRefresh: Bool?
+    /// Forward the device's audio (connect, setAudio).
+    public var audio: Bool?
+    /// Turn the device's audio on if it is off, once (connect; sessions that
+    /// may change device settings).
+    public var enableDeviceAudio: Bool?
 
     public init(id: Int64? = nil, cmd: String, baseURL: String? = nil, password: String? = nil,
                 deviceID: String? = nil, certSHA256: String? = nil, offerH265: Bool? = nil, autoQuality: Bool? = nil,
                 qualityLevel: String? = nil, method: String? = nil,
                 params: JSONValue? = nil, text: String? = nil, delay: Int? = nil, path: String? = nil, target: Int64? = nil,
-                paused: Bool? = nil, oldPassword: String? = nil, clientRefresh: Bool? = nil) {
+                paused: Bool? = nil, oldPassword: String? = nil, clientRefresh: Bool? = nil,
+                audio: Bool? = nil, enableDeviceAudio: Bool? = nil) {
         self.id = id
         self.oldPassword = oldPassword
         self.cmd = cmd
@@ -153,6 +160,8 @@ public struct EngineCommand: Codable, Equatable {
         self.target = target
         self.paused = paused
         self.clientRefresh = clientRefresh
+        self.audio = audio
+        self.enableDeviceAudio = enableDeviceAudio
     }
 }
 
@@ -226,6 +235,47 @@ public struct AccessUnitHeader: Equatable {
         var nanos: UInt64 = 0
         for i in 6..<14 { nanos = nanos << 8 | UInt64(b[i]) }
         let header = AccessUnitHeader(codec: codec, keyframe: b[1] & 1 != 0, rtpTimestamp: ts, receivedUnixNano: Int64(bitPattern: nanos))
+        return (header, payload.subdata(in: (payload.startIndex + size)..<payload.endIndex))
+    }
+}
+
+/// Precedes each audio packet's payload (pkg/engineipc AudioHeader).
+public struct AudioPacketHeader: Equatable {
+    public static let size = 16
+    public enum Codec: UInt8 {
+        case opus = 1, pcmu = 2
+
+        /// RTP clock rate and the codec's name for the status bar.
+        public var clockRate: Int { self == .opus ? 48000 : 8000 }
+        public var name: String { self == .opus ? "Opus" : "PCMU" }
+    }
+
+    public var codec: Codec
+    /// The RTP marker bit: the first packet after silence (fork firmware;
+    /// stock firmware marks every packet).
+    public var marker: Bool
+    public var sequenceNumber: UInt16
+    public var rtpTimestamp: UInt32
+    public var receivedUnixNano: Int64
+
+    public init(codec: Codec, marker: Bool, sequenceNumber: UInt16, rtpTimestamp: UInt32, receivedUnixNano: Int64) {
+        self.codec = codec
+        self.marker = marker
+        self.sequenceNumber = sequenceNumber
+        self.rtpTimestamp = rtpTimestamp
+        self.receivedUnixNano = receivedUnixNano
+    }
+
+    /// Splits an audio frame payload into header and codec payload.
+    public static func parse(_ payload: Data) -> (AudioPacketHeader, Data)? {
+        guard payload.count >= size else { return nil }
+        let b = [UInt8](payload.prefix(size))
+        guard let codec = Codec(rawValue: b[0]) else { return nil }
+        let ts = UInt32(b[4]) << 24 | UInt32(b[5]) << 16 | UInt32(b[6]) << 8 | UInt32(b[7])
+        var nanos: UInt64 = 0
+        for i in 8..<16 { nanos = nanos << 8 | UInt64(b[i]) }
+        let header = AudioPacketHeader(codec: codec, marker: b[1] & 1 != 0, sequenceNumber: UInt16(b[2]) << 8 | UInt16(b[3]),
+                                       rtpTimestamp: ts, receivedUnixNano: Int64(bitPattern: nanos))
         return (header, payload.subdata(in: (payload.startIndex + size)..<payload.endIndex))
     }
 }

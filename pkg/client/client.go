@@ -87,6 +87,11 @@ type Config struct {
 	// codec; used when OnAccessUnit is nil. If both are nil, video is
 	// assembled and counted but not decoded.
 	NewVideoSink func(ctx context.Context, codec video.Codec) (video.Sink, error)
+	// OnAudioPacket, when set, offers to receive the device's audio and gets
+	// each of its packets, on the audio's own goroutine. It must not block.
+	// The device attaches its audio only while its audio is enabled
+	// (getAudioConfig).
+	OnAudioPacket func(AudioPacket)
 }
 
 //go:generate go tool github.com/dmarkham/enumer -type=SignalingMode -linecomment -text -output client_enums.go
@@ -136,6 +141,11 @@ type StatsSnapshot struct {
 	KeyframeWaits   uint64
 	LateRepairs     uint64 // keyframe waits cancelled by a late NACK repair
 	RoundTripMs     float64
+	// AudioCodec is the codec of the device's audio ("opus", "pcmu"), empty
+	// until its first packet; AudioPackets and AudioBytes count what arrived.
+	AudioCodec   string
+	AudioPackets uint64
+	AudioBytes   uint64
 	// Path is the network the selected candidate pair runs over (PathLAN,
 	// PathTailscale, ...); PathRemote is its remote address.
 	Path           string
@@ -217,6 +227,10 @@ type Client struct {
 
 	videoSSRC       atomic.Uint32
 	lastKeyframeReq atomic.Int64 // unix nanos
+
+	audioCodec   atomic.Uint32 // AudioCodec, 0 before the first packet
+	audioPackets atomic.Uint64
+	audioBytes   atomic.Uint64
 
 	statsMu      sync.Mutex
 	stats        StatsSnapshot
@@ -364,6 +378,13 @@ func (c *Client) newAPI(local []net.IP) (*webrtc.API, error) {
 	for _, codec := range codecs {
 		if err := m.RegisterCodec(codec, webrtc.RTPCodecTypeVideo); err != nil {
 			return nil, err
+		}
+	}
+	if c.AudioOffered() {
+		for _, codec := range audioCodecs {
+			if err := m.RegisterCodec(codec, webrtc.RTPCodecTypeAudio); err != nil {
+				return nil, err
+			}
 		}
 	}
 	registry := &interceptor.Registry{}
@@ -531,6 +552,13 @@ func (c *Client) connect(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	if c.AudioOffered() {
+		if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+			Direction: webrtc.RTPTransceiverDirectionRecvonly,
+		}); err != nil {
+			return err
+		}
+	}
 	if err := c.openDataChannels(pc); err != nil {
 		return err
 	}
@@ -574,6 +602,9 @@ func (c *Client) connect(ctx context.Context) error {
 			return err
 		}
 		c.flushQueuedCandidates(pc)
+		if c.AudioOffered() {
+			logAudioAnswer(answer)
+		}
 	}
 
 	select {
@@ -722,6 +753,10 @@ func (c *Client) flushQueuedCandidates(pc *webrtc.PeerConnection) {
 }
 
 func (c *Client) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+	if track.Kind() == webrtc.RTPCodecTypeAudio {
+		c.receiveAudio(track) // pion runs each OnTrack on its own goroutine
+		return
+	}
 	codec, err := video.CodecFromMime(track.Codec().MimeType)
 	if err != nil {
 		c.emitLifecycle(LifecycleEvent{Type: "video_error", Err: err.Error()})
@@ -1440,6 +1475,10 @@ func (c *Client) Stats() StatsSnapshot {
 	}
 	stats.VideoCodec = c.videoCodec
 	c.videoMu.RUnlock()
+	if codec := AudioCodec(c.audioCodec.Load()); codec != 0 {
+		stats.AudioCodec = codec.String()
+	}
+	stats.AudioPackets, stats.AudioBytes = c.audioPackets.Load(), c.audioBytes.Load()
 	if pc := c.peer(); pc != nil {
 		stats.RTCState = pc.ConnectionState()
 	}
@@ -1648,6 +1687,9 @@ const (
 	// FeatureRefreshRegions: the refreshRegions RPC and setVideoEncoderParams'
 	// autoRefresh, so the client plans still refreshes (D13).
 	FeatureRefreshRegions = "refreshRegions"
+	// FeatureOpusAudio: an offer with Opus gets the device's audio as Opus,
+	// 48 kHz stereo (D14).
+	FeatureOpusAudio = "opusAudio"
 )
 
 // probeFirmwareFeatures asks which protocol additions the firmware has (the

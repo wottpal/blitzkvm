@@ -7,6 +7,7 @@
 #   make selftest   end-to-end run against the in-repo emulator
 #   make selftest-stalls   the picture survives link stalls and hidden windows
 #   make selftest-refresh  still refreshes follow typing pauses (fork firmware D13)
+#   make selftest-audio    the device's audio plays (Opus, PCMU) and is turned on once
 #   make run DEVICE=jetkvm.local
 #   make install    copy the app to /Applications
 #   make notarize   notarize (Xcode account) and staple, for use on other Macs
@@ -39,7 +40,7 @@ EMULATOR_ADDR ?= 127.0.0.1:18080
 # bin/jetkvm_app; JetKVM's own release is downloaded once at build time.
 FORK_BINARY ?= $(abspath ../../kvm/bin/jetkvm_app)
 
-.PHONY: app engine swift icon firmware test selftest selftest-extras selftest-stalls selftest-refresh run install notarize clean
+.PHONY: app engine swift icon firmware test selftest selftest-extras selftest-stalls selftest-refresh selftest-audio run install notarize clean
 
 engine:
 	cd .. && GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o macos/build/blitzkvm-engine ./cmd/blitzkvm-engine
@@ -137,6 +138,29 @@ selftest-refresh: app
 	grep -q '"Type":"rpc.refreshRegions","Data":"rects=\[\]' $$log || { echo "the emulator received no full refresh"; exit 1; }; \
 	! grep -q 'rpc.refreshRegions\|AutoRefresh:false' build/emulator-refresh-view-only.jsonl || { echo "a view-only window changed who refreshes"; exit 1; }
 	@echo "selftest-refresh passed: region refreshes after typing pauses, none while typing, a full refresh after a long pause; view-only leaves it to the device"
+
+# The device's audio, against the emulator's tone, played at zero volume:
+# fork firmware's Opus in a window that may change settings, which turns the
+# device's audio on (off by default) once and reconnects for it; stock
+# firmware's PCMU in a view-only window, which plays it without touching the
+# setting; and a view-only window on a device whose audio is off: none.
+selftest-audio: app
+	cd .. && go build -o macos/build/emulator-serve ./test/emulator-serve
+	@for run in opus pcmu none; do \
+		case $$run in \
+			opus) emulator="--opus-audio"; app="--expect-audio opus";; \
+			pcmu) emulator="--audio-enabled"; app="--view-only --expect-audio pcmu";; \
+			none) emulator=""; app="--view-only --expect-audio none";; \
+		esac; \
+		./build/emulator-serve serve --listen $(EMULATOR_ADDR) --audio-tone $$emulator --log-inputs > build/emulator-audio-$$run.jsonl & pid=$$!; \
+		sleep 1; \
+		"$(APP)/Contents/MacOS/BlitzKVM" --device $(EMULATOR_ADDR) --h264 --selftest 8 $$app > build/selftest-audio-$$run.json; status=$$?; \
+		kill $$pid; \
+		test $$status -eq 0 || { cat build/selftest-audio-$$run.json; echo "selftest-audio ($$run) failed"; exit 1; }; \
+	done; \
+	test $$(grep -c '"Type":"rpc.setAudioConfig","Data":"enabled=true"' build/emulator-audio-opus.jsonl) -eq 1 || { echo "the device's audio was not turned on exactly once"; exit 1; }; \
+	! grep -q 'rpc.setAudioConfig' build/emulator-audio-pcmu.jsonl build/emulator-audio-none.jsonl || { echo "a view-only window changed the device's audio"; exit 1; }
+	@echo "selftest-audio passed: Opus and PCMU decoded and played, the device's audio turned on once, view-only left it alone"
 
 install: app
 	rm -rf "/Applications/BlitzKVM.app"

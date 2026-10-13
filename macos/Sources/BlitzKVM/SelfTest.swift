@@ -13,7 +13,9 @@ import JetKVMCore
 /// `--set-quality-after S:level,…` changes the stream quality during the run;
 /// `--toggle-status-bar-after S` shows or hides the status bar (not saved).
 /// `--type-pauses` checks the still refreshes the window asks for while
-/// typing (see typePauses).
+/// typing (see typePauses). `--expect-audio opus|pcmu|none` plays the
+/// device's audio at zero volume and fails unless it came in that codec,
+/// decoded and played (or, for none, nothing came).
 final class SelfTest {
     private weak var controller: DeviceWindowController?
     private let seconds: Double
@@ -48,6 +50,7 @@ final class SelfTest {
     /// typing, and the long pause at the end brought a full refresh (the
     /// emulator on this Mac is a LAN-like link).
     var typePauses = false
+    var expectAudio: String?
     private struct Burst {
         var first: Double
         var last: Double
@@ -89,6 +92,7 @@ final class SelfTest {
         self.crashEngineAfter = crashEngineAfter
         self.snapshotPath = snapshotPath
         controller.capturesOnRequest = false // only inject() sends input
+        controller.audio.setMuted(true) // self-tests play no sound
         // Hidden windows stop decoding: stay above other apps' windows.
         controller.window?.level = .floating
         controller.onFrameDecoded = { [weak self] buffer, header in self?.frameDecoded(buffer, header) }
@@ -579,6 +583,33 @@ final class SelfTest {
         if let setupSnapshotPath {
             report["setupSnapshotWritten"] = controller.writeSetupSnapshot(to: URL(fileURLWithPath: setupSnapshotPath))
         }
+        var audioOK = true
+        if let expectAudio {
+            let a = controller.audio.finishStats()
+            func percentile(_ sorted: [Double], _ p: Double) -> Double {
+                sorted.isEmpty ? -1 : (sorted[min(sorted.count - 1, Int(Double(sorted.count - 1) * p))] * 100).rounded() / 100
+            }
+            report["audioCodec"] = a.codec ?? "none"
+            report["audioPackets"] = a.packets
+            report["audioPlayedFrames"] = a.buffer.playedFrames
+            report["audio"] = [
+                "bytes": a.bytes, "lost": a.lost, "late": a.late, "decodeErrors": a.decodeErrors, "engineStarts": a.engineStarts,
+                "starts": a.buffer.starts, "stalls": a.buffer.stalls, "underruns": a.buffer.underruns,
+                "skippedFrames": a.buffer.skippedFrames, "repeatedFrames": a.buffer.repeatedFrames, "overflowFrames": a.buffer.overflowFrames,
+                "targetMs": (a.target * 1e4).rounded() / 10,
+                // A packet's arrival in the app to its sound at the output.
+                "latencyMsP50": percentile(a.delays.map { $0 * 1000 }, 0.5), "latencyMsP95": percentile(a.delays.map { $0 * 1000 }, 0.95),
+                "ipcMsP50": percentile(a.ipcMs, 0.5), "ipcMsP95": percentile(a.ipcMs, 0.95),
+                "decodeMicrosP50": percentile(a.decodeMicros, 0.5), "decodeMicrosP95": percentile(a.decodeMicros, 0.95),
+                "cpuPercent": (a.cpuShare * 1e4).rounded() / 100,
+            ] as [String: Any]
+            if expectAudio == "none" {
+                audioOK = a.packets == 0
+            } else {
+                audioOK = a.codec?.lowercased() == expectAudio && a.buffer.playedFrames > 0 && a.decodeErrors == 0
+            }
+            if !audioOK { FileHandle.standardError.write(Data("audio: expected \(expectAudio)\n".utf8)) }
+        }
         if let stats = controller.lastStats["stats"] as? [String: Any] ?? Optional(controller.lastStats), !stats.isEmpty {
             report["engineStats"] = stats
         }
@@ -591,6 +622,7 @@ final class SelfTest {
         if injectInput { ok = ok && doubleCommandCaptured }
         if setupAction != nil { ok = ok && setupOK }
         if typePauses { ok = ok && refreshProblems.isEmpty }
+        ok = ok && audioOK
         if let maxFreezeMs {
             // Hidden time says nothing about freezes; too much makes the run
             // inconclusive (the intended --hide-after pause aside).
