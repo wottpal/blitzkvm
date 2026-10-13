@@ -170,7 +170,9 @@ type Client struct {
 
 	pcMu sync.RWMutex
 	pc   *webrtc.PeerConnection
-	ch   atomic.Pointer[channels]
+	// getStatsMu keeps GetStats and Close apart: pion doesn't synchronize them.
+	getStatsMu sync.Mutex
+	ch         atomic.Pointer[channels]
 
 	events    *mailbox[jsonrpc.Event]
 	lifecycle *mailbox[LifecycleEvent]
@@ -849,7 +851,9 @@ func (c *Client) Close() error {
 		pc := c.pc
 		c.pcMu.Unlock()
 		if pc != nil {
+			c.getStatsMu.Lock()
 			err = pc.Close()
+			c.getStatsMu.Unlock()
 		}
 		if im := c.impair.Load(); im != nil {
 			im.stop()
@@ -1527,7 +1531,9 @@ func (c *Client) collectStats(now time.Time) {
 		return
 	}
 	c.watchInputChannels(now)
+	c.getStatsMu.Lock()
 	report := pc.GetStats()
+	c.getStatsMu.Unlock()
 	var snap StatsSnapshot
 	// RTT of the pair ICE actually uses; other succeeded pairs (other
 	// interfaces, VPNs) can differ by orders of magnitude.
