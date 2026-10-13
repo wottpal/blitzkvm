@@ -1478,6 +1478,7 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
 | R10 | Wheel steps went over JSON-RPC (a goroutine and JSON per step, no order) | **Wheel over HID-RPC (fork D12, `getFirmwareFeatures`)** | single steps: same latency (83 ms); order and device CPU |
 | R11 | The local pointer had to stay hidden (the target draws its own cursor) | **View › Local Pointer** (Hidden default, Dot, Arrow; hides after 150 ms at rest) | the local pointer moves without the stream's ~50–70 ms |
 | R12 | Slow links: duplicate NACKs, 300 ms gap deadline, no harness | **`BLITZKVM_IMPAIR` harness** (rate/trace, queue, delay, jitter, Gilbert–Elliott loss, outages; lte, lte-congested, wifi-hotel, derp) and **RTT-aware NACK pacing, progress-based gap deadline, late repairs** | emulator A/B: wifi-hotel dropped frames 283 → 20, PLIs 12 → 0; derp from no picture to working; LAN unchanged. Real device via the harness, key → screen: none 78, lte 122, wifi-hotel 186, derp 192 ms |
+| R13 | The quality ladder reacted to a once-a-second RTT sample (seconds of queue on congested links), climbed during idle, and one lost packet on a still screen read as 16 % loss | **Delay-based governor** (engine): per-frame queueing delay from RTP capture time and delivered rate from frame dispersion; a queue > 60 ms that isn't draining steps down within ~100 ms to the level the rate carries; step-up only on measured headroom; off a LAN the still refresh's keyframe may hold the link ≤ 200 ms; loss needs 100 packets | harness A/B, p95 frame delay: lte-congested scroll 899 → 285 ms, wifi-hotel scroll 204 → 90, derp 343 → 104, a 12→3→12 Mbit/s trace 1526 → 104; total freezes 2–9× lower; LAN identical. On the device: no level change on the LAN; through lte-congested it started at "balanced" |
 
 ### Results (2400×1012@60, fork.5 installed, median)
 
@@ -1508,7 +1509,8 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
 - Firmware changes went straight to the fork's `dev` (D11–D13) and `release/0.5.9-fork.5` was tagged locally; nothing was pushed.
 
 ### Open
-- A device-side pacer for keyframes on DERP/policed links (the harness shows the burst loss); receiver-side delay-based rate control (agent result pending at the time of writing).
+- A device-side pacer for keyframes on DERP/policed links (the harness shows the burst loss).
+- On the device through `lte-congested` the governor started at "balanced", not "low" as on the emulator: check its start rate on real cellular links.
 - Temporal SVC (TSVC2) so a lost top-layer frame needs no keyframe (VideoToolbox can't recover via intra refresh or recovery-point SEI).
 - The device send path (0.45 ms a packet) still bounds large frames.
 
