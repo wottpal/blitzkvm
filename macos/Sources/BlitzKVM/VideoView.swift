@@ -1245,7 +1245,10 @@ class VideoView: NSView {
         var bytes = [UInt8](repeating: 0, count: w * h * 4)
         for (i, v) in packed.enumerated() {
             // bgr10a2Unorm: blue in bits 0-9, green 10-19, red 20-29.
-            func eight(_ shift: UInt32) -> UInt8 { UInt8((((v >> shift) & 0x3FF) * 255 + 511) / 1023) }
+            func eight(_ shift: UInt32) -> UInt8 {
+                let ten: UInt32 = (v >> shift) & 0x3FF
+                return UInt8((ten * 255 + 511) / 1023)
+            }
             bytes[i * 4] = eight(0)
             bytes[i * 4 + 1] = eight(10)
             bytes[i * 4 + 2] = eight(20)
