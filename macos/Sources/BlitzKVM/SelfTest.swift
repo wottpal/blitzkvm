@@ -95,6 +95,8 @@ final class SelfTest {
         controller.audio.setMuted(true) // self-tests play no sound
         // Hidden windows stop decoding: stay above other apps' windows.
         controller.window?.level = .floating
+        // For screenshots of the window: `screencapture -l <number>`.
+        AppLog.log("selftest: window number \(controller.window?.windowNumber ?? 0)")
         controller.onFrameDecoded = { [weak self] buffer, header in self?.frameDecoded(buffer, header) }
         controller.onStallOverlay = { [weak self] content in
             guard let self else { return }
