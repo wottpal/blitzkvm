@@ -2,9 +2,9 @@
   "builds": [
     {
       "kind": "blitzkvm",
-      "tag": "release/0.5.9-fork.5",
-      "sha256": "0d2305b38e21597200b09cbd1c8ef63f557dbd9916c7726040737ac7c857e091",
-      "size": 31575784
+      "tag": "release/0.5.9-fork.6",
+      "sha256": "67f2a0f10cb632d9e1509846277d20bd7bc81be73561e97cd91724868e68f3ce",
+      "size": 31993648
     },
     {
       "kind": "stock",
