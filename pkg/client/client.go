@@ -188,6 +188,7 @@ type Client struct {
 	videoSink  video.Sink
 	frames     video.FrameSource
 	assembler  *video.Assembler
+	link       *video.LinkEstimator
 	videoCodec string
 
 	signalMu   sync.Mutex
@@ -742,16 +743,18 @@ func (c *Client) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 	frames, _ := sink.(video.FrameSource)
 	c.videoSSRC.Store(uint32(track.SSRC()))
 	asm := video.NewAssembler(codec, sink.Push, c.RequestKeyframe)
+	link := video.NewLinkEstimator()
 	c.videoMu.Lock()
 	c.videoSink = sink
 	c.frames = frames
 	c.assembler = asm
+	c.link = link
 	c.videoCodec = codec.String()
 	c.videoMu.Unlock()
 	c.emitLifecycle(LifecycleEvent{Type: "video_ready"})
 
 	go func() {
-		err := video.Receive(c.ctx, track, asm, c.rtt)
+		err := video.Receive(c.ctx, track, asm, link, c.rtt)
 		sink.Close()
 		if c.ctx.Err() == nil {
 			// The track ended while the session lives on: the picture
@@ -763,6 +766,18 @@ func (c *Client) onTrack(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 			c.emitLifecycle(LifecycleEvent{Type: "video_lost", Err: msg})
 		}
 	}()
+}
+
+// LinkEstimate is what the video's packet timing says about the link from
+// the device right now (zero before video).
+func (c *Client) LinkEstimate() video.LinkEstimate {
+	c.videoMu.RLock()
+	link := c.link
+	c.videoMu.RUnlock()
+	if link == nil {
+		return video.LinkEstimate{}
+	}
+	return link.Estimate(time.Now())
 }
 
 // rtt is the selected candidate pair's latest round-trip time (0 before the

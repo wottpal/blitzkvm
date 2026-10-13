@@ -1,25 +1,52 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/wottpal/blitzkvm/pkg/client"
 	"github.com/wottpal/blitzkvm/pkg/logging"
+	"github.com/wottpal/blitzkvm/pkg/video"
 )
 
 // Automatic stream quality.
 //
 // JetKVM has no congestion control: it sends whatever its VBR encoder
 // produces. On a link slower than the stream's peaks, packets queue up and
-// get lost, and the picture stalls while NACKs and keyframes repair it. The
-// governor watches the receive side (packet loss, round-trip time growing
-// over the link's baseline, frames the assembler had to drop) and walks a
-// quality ladder: down at once when the link struggles, up one step at a
-// time after a long clean stretch.
+// get lost, and the picture lags, then stalls while NACKs and keyframes
+// repair it. The governor walks a quality ladder from what the receive side
+// sees (video.LinkEstimator, the client's statistics):
+//
+//   - A queue: when every frame of the last video.QueueWindow waited more
+//     than queueHigh behind earlier traffic and the wait is not shrinking,
+//     the stream outruns the link. It steps down at once, to the level the
+//     link carries at the rate it delivers while the queue stands. A wait
+//     that shrinks is a burst draining (a keyframe or still refresh,
+//     110-140 ms through the device's own send path on a LAN), and a queue
+//     of NACK repairs (after an outage) drains once they are through: both
+//     are left alone.
+//   - The delivery rate (frame dispersion): a level whose bitrate target
+//     exceeds what the link delivers is left before scrolling overruns it,
+//     and a step up needs a measured rate that carries the next level with
+//     room to spare. A still screen sends single-packet frames, which
+//     measure nothing, so idle time never earns a step up.
+//   - Loss (more than 2 %, or a loss NACKs could not repair) remains as a
+//     backstop, on the client's once-a-second statistics. The round trip
+//     no longer counts: it shows a queue seconds after the one-way delay
+//     does, and a queue on the way to the device is not the video's.
+//
+// Steps up come one at a time after a stretch without congestion, which
+// doubles when the link flaps between two levels. Off a LAN, the still
+// refresh (the largest burst the device sends) is coded coarser, or not
+// sent, when the measured rate would take longer than refreshBudget to
+// deliver it. On a LAN (a round trip under lanRTT) the measured rate is the
+// device's send path, not a limit, so only a real queue or loss leaves
+// maximum.
 //
 // On firmware with the desktop encoder patch (setVideoEncoderParams) a level
 // is applied live, without restarting the encoder: bitrate, QP floor, encode
@@ -70,10 +97,47 @@ var qualityLadder = []QualityLevel{
 }
 
 const (
-	qualitySample = time.Second
-	downCooldown  = 4 * time.Second // between two steps down
-	// upAfterClean is the clean time before a step up. A step down soon
-	// after a step up (a link between two rungs) doubles it, up to
+	// qualityTick is how often the governor looks: often enough to answer a
+	// queue within 100-200 ms. The transport statistics behind the loss
+	// checks refresh once a second.
+	qualityTick = 100 * time.Millisecond
+	// queueHigh is the wait behind earlier traffic that steps down when all
+	// frames of a video.QueueWindow exceed it and it does not shrink. It is
+	// above a cellular link's jitter (10-30 ms) and the device's encode time
+	// variation, and well below the 150-300 ms where lag starts to show. In
+	// the harness, scrolling at maximum (8 Mbit/s) over 4 Mbit/s crosses it
+	// 200 ms into the scroll.
+	queueHigh = 60 * time.Millisecond
+	// queueCooldown separates two steps down for a queue, so what queued
+	// before the first can start to drain.
+	queueCooldown = time.Second
+	// repairShareHigh is the share of retransmissions in what arrives that
+	// makes a queue the repair's (in the harness 60-100 % after an outage,
+	// against a few percent from random loss).
+	repairShareHigh = 0.25
+	// linkUse is the share of the measured delivery rate a level's bitrate
+	// target may take for a step up to it: the encoder's peaks run at 1.5×
+	// the target, and on a jittery link small frames measure the rate up to
+	// 20 % low. A level is left once its target exceeds the whole rate.
+	linkUse = 0.8
+	// rateEvidence is the fewest bytes of multi-packet frames the delivery
+	// rate must rest on: one keyframe, or about a second of scrolling.
+	rateEvidence = 100_000
+	// lanRTT is the round trip below which the link is a LAN.
+	lanRTT = 8 * time.Millisecond
+	// refreshBudget is the longest the still refresh may hold the link off
+	// a LAN: the frames behind it (the echo of the next keystroke) wait as
+	// long. On a LAN the device's own send path takes 110-140 ms for it.
+	// keyframeBytesQP10 and qpStep model its size: 231 kB for a 1080p
+	// keyframe at QP 10, 5 % less for each QP step (fits the device's
+	// 123-350 kB at QP 24-1 within 10 %; plan §21, §23).
+	refreshBudget     = 200 * time.Millisecond
+	keyframeBytesQP10 = 231_000
+	qpStep            = 0.95
+	// downCooldown is the least time between two steps down for loss.
+	downCooldown = 4 * time.Second
+	// upAfterClean is the time without congestion before a step up. A step
+	// down soon after a step up (a link between two rungs) doubles it, up to
 	// maxUpDelay; a long stretch without steps down restores it. Stock
 	// firmware restarts its encoder on every change, so it waits longer.
 	upAfterClean        = 20 * time.Second
@@ -82,53 +146,122 @@ const (
 	flapWindow          = time.Minute
 	lossThreshold       = 0.02 // fraction of packets lost in a sample
 	severeLossThreshold = 0.10
-	rttSlack            = 40 * time.Millisecond
-	approxPacketBytes   = 1150 // RTP payloads are ~1200 bytes
+	// minLossSample is the fewest packets a sample's loss rate needs: a
+	// still screen sends a handful a second, where one loss would read as
+	// a severe 15 %.
+	minLossSample     = 100
+	approxPacketBytes = 1150 // RTP payloads are ~1200 bytes
 )
 
-// qualityGovernor decides level changes from periodic transport samples. It
-// holds no locks and does no I/O, so it is unit-testable with synthetic data.
+// qualityGovernor decides level changes from transport samples and link
+// estimates. It holds no locks and does no I/O, so it is unit-testable with
+// synthetic data.
 type qualityGovernor struct {
-	level      int
-	lastChange time.Time
-	lastUp     time.Time
-	lastDown   time.Time
-	baseUp     time.Duration
-	upDelay    time.Duration
-	cleanSince time.Time
-	baseRTT    time.Duration
-	baseAt     time.Time
-	congestedN int
-	prev       client.StatsSnapshot
-	havePrev   bool
+	level         int
+	stillQP       int // the level's still refresh QP on this link
+	width, height int // the video's, for the levels' bitrates and keyframes
+	lastChange    time.Time
+	lastUp        time.Time
+	lastDown      time.Time
+	baseUp        time.Duration
+	upDelay       time.Duration
+	cleanSince    time.Time
+	baseRTT       time.Duration
+	baseAt        time.Time
+	congestedN    int
+	prev          client.StatsSnapshot
+	havePrev      bool
 }
 
 func newQualityGovernor(now time.Time, rtt, baseUp time.Duration) *qualityGovernor {
 	// No change yet: the first step down may come at once.
-	g := &qualityGovernor{cleanSince: now, baseUp: baseUp, upDelay: baseUp}
-	// Start high on a LAN, balanced elsewhere; the ladder corrects quickly.
+	g := &qualityGovernor{cleanSince: now, baseUp: baseUp, upDelay: baseUp, baseRTT: rtt, baseAt: now}
+	// Until the link's rate is measured: maximum on a LAN, high on a short
+	// round trip, balanced elsewhere.
 	switch {
-	case rtt > 0 && rtt < 8*time.Millisecond:
+	case rtt > 0 && rtt < lanRTT:
 		g.level = len(qualityLadder) - 1
 	case rtt > 0 && rtt < 40*time.Millisecond:
 		g.level = len(qualityLadder) - 2
 	default:
 		g.level = 2
 	}
+	g.stillQP = qualityLadder[g.level].StillQP
 	return g
 }
 
-// observe takes one transport sample and returns the new level when it
-// should change.
-func (g *qualityGovernor) observe(now time.Time, s client.StatsSnapshot) (int, bool) {
+// params is the current level as applied: the ladder's, with the still
+// refresh QP for the link.
+func (g *qualityGovernor) params() QualityLevel {
+	l := qualityLadder[g.level]
+	l.StillQP = g.stillQP
+	return l
+}
+
+// observe takes the latest transport sample and link estimate and returns
+// the level, and why it changed ("" if it did not).
+func (g *qualityGovernor) observe(now time.Time, s client.StatsSnapshot, link video.LinkEstimate) (int, string) {
+	lossy, severe := g.transport(now, s)
+	queued := link.QueueFrames >= 2 && link.Queue > queueHigh && link.QueueGrowth >= 0 && link.RepairShare < repairShareHigh
+	if lossy || queued {
+		g.cleanSince = now
+	}
+	measured := link.RateBytes >= rateEvidence
+	carried := g.carried(link.Rate)
+	lan := g.onLAN()
+	switch {
+	case queued:
+		if now.Sub(g.lastChange) < queueCooldown {
+			break
+		}
+		// The link was busy for the whole window: what it delivered is its
+		// rate now.
+		to := g.level - 1
+		if link.Delivered > 0 {
+			to = min(to, g.carried(link.Delivered))
+		}
+		return g.down(now, to, link, "queue")
+	case measured && !lan && g.lastChange.IsZero():
+		// The session starts at the level the link carries, instead of the
+		// round trip's guess, with the still refresh it carries.
+		if carried > g.level {
+			return g.up(now, carried, link, "start")
+		}
+		g.level, g.lastChange = carried, now
+		g.stillQP = g.stillQPFor(carried, link)
+		return g.level, "start"
+	case measured && !lan && g.target(g.level) > link.Rate:
+		return g.down(now, carried, link, "rate")
+	case lossy && (severe || g.congestedN >= 2):
+		if now.Sub(g.lastChange) < downCooldown {
+			break
+		}
+		step := 1
+		if severe && g.level >= 2 {
+			step = 2
+		}
+		return g.down(now, g.level-step, link, "loss")
+	case !lossy && measured && carried > g.level && link.Queue < queueHigh/2 &&
+		now.Sub(g.cleanSince) >= g.upDelay && now.Sub(g.lastChange) >= g.upDelay:
+		if now.Sub(g.lastDown) >= maxUpDelay {
+			g.upDelay = g.baseUp
+		}
+		return g.up(now, g.level+1, link, "rate")
+	}
+	return g.level, ""
+}
+
+// transport reads a new statistics sample (the client takes one a second):
+// the loss since the previous one, and the round trip's baseline.
+func (g *qualityGovernor) transport(now time.Time, s client.StatsSnapshot) (congested, severe bool) {
 	if !g.havePrev {
 		g.prev, g.havePrev = s, true
-		return g.level, false
+		return false, false
 	}
 	// Statistics refresh on their own timer: the same sample read twice
 	// would look like a perfectly clean second.
 	if !s.SampledAt.IsZero() && !s.SampledAt.After(g.prev.SampledAt) {
-		return g.level, false
+		return false, false
 	}
 	prev := g.prev
 	g.prev = s
@@ -140,49 +273,78 @@ func (g *qualityGovernor) observe(now time.Time, s client.StatsSnapshot) (int, b
 	lost := float64(max(int64(s.PacketsLost)-int64(prev.PacketsLost), 0))
 	received := float64(s.BytesReceived-min(prev.BytesReceived, s.BytesReceived)) / approxPacketBytes
 	lossRate := 0.0
-	if lost+received > 0 {
+	if lost+received >= minLossSample {
 		lossRate = lost / (lost + received)
 	}
 	// A new keyframe wait means a loss NACKs could not repair. Frames the
 	// assembler drops while waiting (also before the first keyframe of a
 	// session) are not counted again.
 	unrepaired := s.KeyframeWaits > prev.KeyframeWaits
-	queued := g.baseRTT > 0 && rtt > 2*g.baseRTT+rttSlack
-
-	congested := lossRate > lossThreshold || unrepaired || queued
+	congested = lossRate > lossThreshold || unrepaired
 	if congested {
 		g.congestedN++
 	} else {
 		g.congestedN = 0
 	}
-	switch {
-	case congested && (lossRate > severeLossThreshold || g.congestedN >= 2):
-		g.cleanSince = now
-		if g.level == 0 || now.Sub(g.lastChange) < downCooldown {
-			return g.level, false
-		}
-		step := 1
-		if lossRate > severeLossThreshold && g.level >= 2 {
-			step = 2
-		}
-		if !g.lastUp.IsZero() && now.Sub(g.lastUp) < flapWindow {
-			g.upDelay = min(2*g.upDelay, maxUpDelay)
-		}
-		g.level -= step
-		g.lastChange, g.lastDown = now, now
-		return g.level, true
-	case congested:
-		g.cleanSince = now
-	case g.level < len(qualityLadder)-1 && now.Sub(g.cleanSince) >= g.upDelay && now.Sub(g.lastChange) >= g.upDelay:
-		if now.Sub(g.lastDown) >= maxUpDelay {
-			g.upDelay = g.baseUp
-		}
-		g.level++
-		g.lastChange, g.lastUp = now, now
-		g.cleanSince = now
-		return g.level, true
+	return congested, congested && lossRate > severeLossThreshold
+}
+
+// onLAN reports a round trip below lanRTT: the measured rate is then the
+// device's send path, not a limit to keep below.
+func (g *qualityGovernor) onLAN() bool { return g.baseRTT > 0 && g.baseRTT < lanRTT }
+
+// target is a level's bitrate target in bit/s at the video's size.
+func (g *qualityGovernor) target(level int) float64 {
+	return 1000 * float64(factorKbps(qualityLadder[level].Factor, g.width, g.height))
+}
+
+// carried is the highest level whose bitrate target fits a link of rate
+// (bit/s) with room to spare (linkUse), or the lowest.
+func (g *qualityGovernor) carried(rate float64) int {
+	level := len(qualityLadder) - 1
+	for level > 0 && g.target(level) > linkUse*rate {
+		level--
 	}
-	return g.level, false
+	return level
+}
+
+func (g *qualityGovernor) down(now time.Time, to int, link video.LinkEstimate, why string) (int, string) {
+	to = max(to, 0)
+	if to >= g.level {
+		return g.level, ""
+	}
+	if !g.lastUp.IsZero() && now.Sub(g.lastUp) < flapWindow {
+		g.upDelay = min(2*g.upDelay, maxUpDelay)
+	}
+	g.level, g.stillQP = to, g.stillQPFor(to, link)
+	g.lastChange, g.lastDown = now, now
+	return g.level, why
+}
+
+func (g *qualityGovernor) up(now time.Time, to int, link video.LinkEstimate, why string) (int, string) {
+	g.level, g.stillQP = to, g.stillQPFor(to, link)
+	g.lastChange, g.lastUp, g.cleanSince = now, now, now
+	return g.level, why
+}
+
+// stillQPFor is a level's still refresh QP on the link: the ladder's, or
+// coarser until the refresh keyframe takes no longer than refreshBudget at
+// the measured rate. At the level's QP floor there is no refresh. A LAN, or
+// a rate not yet measured, keeps the ladder's.
+func (g *qualityGovernor) stillQPFor(level int, link video.LinkEstimate) int {
+	l := qualityLadder[level]
+	if link.RateBytes < rateEvidence || g.onLAN() {
+		return l.StillQP
+	}
+	width, height := cmp.Or(g.width, 1920), cmp.Or(g.height, 1080)
+	budget := link.Rate / 8 * refreshBudget.Seconds() // bytes
+	qp := l.StillQP
+	for ; qp < l.MinQP; qp++ {
+		if keyframeBytesQP10*float64(width*height)/(1920*1080)*math.Pow(qpStep, float64(qp-10)) <= budget {
+			break
+		}
+	}
+	return qp
 }
 
 // SetAutoQuality turns automatic quality on or off for this session (and
@@ -220,7 +382,7 @@ func (c *Controller) SetQualityLevel(ctx context.Context, name string) error {
 	if cl == nil {
 		return nil // applied on connect
 	}
-	return c.applyLevel(ctx, cl, level)
+	return c.applyLevel(ctx, cl, qualityLadder[level])
 }
 
 func levelIndex(name string) int {
@@ -258,11 +420,10 @@ func (c *Controller) encoderParams(ctx context.Context, cl *client.Client) (bool
 	return err == nil, nil
 }
 
-// applyLevel sets a ladder level on the device: live on firmware with the
-// encoder patch, through the quality factor (an encoder restart) otherwise.
-func (c *Controller) applyLevel(ctx context.Context, cl *client.Client, level int) error {
+// applyLevel sets a level on the device: live on firmware with the encoder
+// patch, through the quality factor (an encoder restart) otherwise.
+func (c *Controller) applyLevel(ctx context.Context, cl *client.Client, l QualityLevel) error {
 	log := logging.Subsystem("quality")
-	l := qualityLadder[level]
 	live, err := c.encoderParams(ctx, cl)
 	if err != nil {
 		return err
@@ -321,7 +482,7 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 	if !auto {
 		c.mu.Unlock()
 		if level := levelIndex(manual); level >= 0 {
-			_ = c.applyLevel(ctx, cl, level)
+			_ = c.applyLevel(ctx, cl, qualityLadder[level])
 		}
 		return
 	}
@@ -355,16 +516,20 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 	if live, err := c.encoderParams(ctx, cl); err == nil && live {
 		baseUp = upAfterClean
 	}
-	gov := newQualityGovernor(time.Now(), time.Duration(cl.Stats().RoundTripMs*float64(time.Millisecond)), baseUp)
-	_ = c.applyLevel(ctx, cl, gov.level)
 	videoSize := func() [2]int {
 		c.mu.RLock()
 		defer c.mu.RUnlock()
 		return [2]int{c.snapshot.VideoWidth, c.snapshot.VideoHeight}
 	}
 	size := videoSize()
+	gov := newQualityGovernor(time.Now(), time.Duration(cl.Stats().RoundTripMs*float64(time.Millisecond)), baseUp)
+	gov.width, gov.height = size[0], size[1]
+	// The session's first keyframe has usually measured the link by now.
+	gov.observe(time.Now(), cl.Stats(), cl.LinkEstimate())
+	_ = c.applyLevel(ctx, cl, gov.params())
 
-	ticker := time.NewTicker(qualitySample)
+	log := logging.Subsystem("quality")
+	ticker := time.NewTicker(qualityTick)
 	defer ticker.Stop()
 	for {
 		select {
@@ -379,13 +544,21 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 			if !on {
 				return
 			}
-			level, changed := gov.observe(now, cl.Stats())
 			// The bitrate follows the resolution (the firmware's formula).
+			changed := false
 			if s := videoSize(); s != size {
 				size, changed = s, true
+				gov.width, gov.height = s[0], s[1]
+			}
+			link := cl.LinkEstimate()
+			level, why := gov.observe(now, cl.Stats(), link)
+			if why != "" {
+				log.Info().Str("why", why).Str("level", qualityLadder[level].Name).Dur("queue", link.Queue).
+					Float64("rateMbps", link.Rate/1e6).Msg("stream quality changes")
+				changed = true
 			}
 			if changed {
-				_ = c.applyLevel(ctx, cl, level)
+				_ = c.applyLevel(ctx, cl, gov.params())
 			}
 		}
 	}

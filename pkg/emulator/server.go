@@ -68,6 +68,9 @@ type Config struct {
 	// instead of a moving gradient: keyframes are large and the frames
 	// between them small, as in the device's stream.
 	Desktop bool
+	// Scroll makes the screen of text rest for 4 s and then scroll for 2 s,
+	// again and again, like reading a document.
+	Scroll bool
 	// ReplayH264 / ReplayH265 are Annex-B clips with access-unit delimiters.
 	// When set they replace the OpenH264 test pattern for that codec.
 	ReplayH264 string
@@ -93,7 +96,8 @@ type Config struct {
 	TLS bool
 	// EncoderPatch answers getVideoEncoderParams/setVideoEncoderParams like
 	// firmware with the desktop encoder patch (firmware/); stock firmware
-	// does not know them.
+	// does not know them. The test pattern's frames then follow the
+	// parameters (encoderModel), on a plain picture.
 	EncoderPatch bool
 	// RefreshRegions models fork firmware D13 (implies EncoderPatch):
 	// getFirmwareFeatures lists hidrpcWheel and refreshRegions,

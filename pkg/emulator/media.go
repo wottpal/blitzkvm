@@ -46,11 +46,7 @@ func (s *Server) startVideo(ctx context.Context, mimeType string, track *webrtc.
 		if s.cfg.ReplayH264 != "" {
 			return startReplay(ctx, s.cfg.ReplayH264, h264AUD, s.cfg.FPS, track)
 		}
-		var typed func() int64
-		if s.cfg.StillScreen {
-			typed = s.typed.Load
-		}
-		return startTestPattern(ctx, s.cfg.Width, s.cfg.Height, s.cfg.FPS, s.cfg.GOP, s.cfg.Desktop, typed, track, keyframeReq)
+		return s.startTestPattern(ctx, track, keyframeReq)
 	case webrtc.MimeTypeH265:
 		if s.cfg.ReplayH265 != "" {
 			return startReplay(ctx, s.cfg.ReplayH265, h265AUD, s.cfg.FPS, track)
@@ -64,76 +60,103 @@ func (s *Server) startVideo(ctx context.Context, mimeType string, track *webrtc.
 	}
 }
 
-// startTestPattern encodes a moving pattern with OpenH264 (Constrained
+// startTestPattern encodes the test pattern with OpenH264 (Constrained
 // Baseline; the OpenH264 encoder cannot produce the device's High profile).
 // Every frame carries a timestamp barcode (see BurnedTimestamp) so latency
-// harnesses can compare capture time against encode time. With typed set, the
-// pattern stands still instead and shows that many typed glyphs.
-func startTestPattern(ctx context.Context, width, height, fps, gop int, desktop bool, typed func() int64, track *webrtc.TrackLocalStaticSample, keyframeReq <-chan struct{}) error {
-	var background *image.YCbCr
-	if desktop {
-		background = desktopBackground(width, height)
-	}
+// harnesses can compare capture time against encode time. Source frame i
+// is captured at start + i/fps and its RTP timestamp says so, as on the
+// device: a frame that is not sent (the loop fell behind, or the encoder's
+// frame rate cap drops it) still advances the RTP clock. With the encoder
+// patch, the encoder model sets each frame's size (see encoderModel).
+func (s *Server) startTestPattern(ctx context.Context, track *webrtc.TrackLocalStaticSample, keyframeReq <-chan struct{}) error {
+	s.mu.Lock() // password changes write the config
+	cfg := s.cfg
+	s.mu.Unlock()
 	params := openh264.NewEncoderParams()
-	params.Width = width
-	params.Height = height
-	params.BitRate = width * height * 4
-	params.MaxFrameRate = float32(fps)
+	params.Width = cfg.Width
+	params.Height = cfg.Height
+	params.BitRate = cfg.Width * cfg.Height * 4
+	params.MaxFrameRate = float32(cfg.FPS)
 	params.UsageType = openh264.ScreenContentRealTime
 	params.EnableFrameSkip = false
-	params.IntraPeriod = uint(gop)
+	params.IntraPeriod = 0 // the loop decides every keyframe
 
 	encoder, err := openh264.NewEncoder(params)
 	if err != nil {
 		return err
 	}
-
-	ticker := time.NewTicker(time.Second / time.Duration(fps))
+	var model *encoderModel
+	if cfg.EncoderPatch {
+		model = newEncoderModel(cfg.Width, cfg.Height)
+	}
+	var typed func() int64
+	if cfg.StillScreen {
+		typed = s.typed.Load
+	}
+	pat := newPattern(cfg, model != nil, typed)
 	go func() {
-		defer ticker.Stop()
 		defer closeEncoder(encoder)
-
-		frameIndex := 0
-		var still *image.YCbCr
-		var drawn int64
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-keyframeReq:
-				_ = encoder.ForceKeyFrame()
-			case <-ticker.C:
-				if frameIndex%gop == 0 {
+		interval := time.Second / time.Duration(cfg.FPS)
+		skip := media.Sample{Duration: interval} // advances the RTP clock, sends nothing
+		timer := time.NewTimer(0)
+		defer timer.Stop()
+		start := time.Now()
+		key, change := false, 0.0
+		for i := 0; ; i++ {
+			at := start.Add(time.Duration(i) * interval)
+			timer.Reset(time.Until(at))
+		wait:
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-keyframeReq:
+					key = true
+				case <-timer.C:
+					break wait
+				}
+			}
+			img, c := pat.next(i)
+			key, change = key || i%cfg.GOP == 0, max(change, c)
+			coded := time.Since(at) < interval
+			size := 0
+			if coded && model != nil {
+				p, target, peak := s.encoderRates()
+				if coded = model.codes(at, p.MaxFPS); coded {
+					key, size = model.frame(at, p, target, peak, change, key)
+				}
+			}
+			sample := skip
+			if coded {
+				if key {
 					_ = encoder.ForceKeyFrame()
 				}
-				var img *image.YCbCr
-				if typed != nil {
-					if still == nil {
-						still = newPatternFrame(width, height, 0, background)
-					}
-					for n := typed(); drawn < n; drawn++ {
-						drawTypedGlyph(still, int(drawn))
-					}
-					img = still
-				} else {
-					img = newPatternFrame(width, height, frameIndex, background)
+				if typed == nil {
 					burnTimestamp(img, time.Now())
 				}
 				payload, err := encoder.Encode(img)
 				if err != nil {
 					return
 				}
-				frameIndex++
-				if len(payload) == 0 {
-					continue
-				}
-				if err := track.WriteSample(media.Sample{Data: payload, Duration: time.Second / time.Duration(fps)}); err != nil {
-					return
-				}
+				sample.Data = padAccessUnit(payload, size)
+				key, change = false, 0
+			}
+			if err := track.WriteSample(sample); err != nil {
+				return
 			}
 		}
 	}()
 	return nil
+}
+
+// encoderRates returns the encoder parameters and the bitrate target and
+// peak (kbit/s) they mean for the stream.
+func (s *Server) encoderRates() (p EncoderParams, target, peak int) {
+	s.mu.Lock()
+	p, factor := s.state.EncoderParams, s.state.StreamQualityFactor
+	s.mu.Unlock()
+	target, peak = p.rates(factor, s.cfg.Width, s.cfg.Height)
+	return p, target, peak
 }
 
 func closeEncoder(encoder *openh264.Encoder) {
@@ -145,31 +168,145 @@ func closeEncoder(encoder *openh264.Encoder) {
 	_ = encoder.Close()
 }
 
-// newPatternFrame draws frame frameIndex: a moving box over a moving
-// gradient, or over a copy of background if set.
-func newPatternFrame(width, height, frameIndex int, background *image.YCbCr) *image.YCbCr {
-	img := image.NewYCbCr(image.Rect(0, 0, width, height), image.YCbCrSubsampleRatio420)
-	phase := frameIndex % 255
-	if background != nil {
-		copy(img.Y, background.Y)
-		copy(img.Cb, background.Cb)
-		copy(img.Cr, background.Cr)
-	} else {
-		for y := 0; y < height; y++ {
-			row := img.Y[y*img.YStride:]
-			for x := 0; x < width; x++ {
-				row[x] = uint8((x + y + phase) % 256)
-			}
+// The test pattern's content (Config.Desktop, Config.Scroll): a box moving
+// over a gradient that moves too (everything changes every frame), over a
+// still screen of text (desktop), or a screen of text that rests for
+// scrollRest and then scrolls for scrollFor at a screen height a second,
+// again and again (reading a document; the box moves only while it
+// scrolls).
+const (
+	scrollRest = 4 * time.Second
+	scrollFor  = 2 * time.Second
+	boxWidth   = 100
+	boxHeight  = 60
+)
+
+// pattern draws the test pattern's frames.
+type pattern struct {
+	width, height int
+	desktop       bool
+	scrollFrames  int // a scroll's length in frames (0: never scrolls)
+	period        int // frames from one scroll's start to the next
+	scrollStep    int // pixels a frame scrolls
+	// text is the screen of text (desktop, scroll); nil draws the moving
+	// gradient. plain draws a flat screen instead of either, for the
+	// encoder model, whose frames must stay small.
+	text  *image.YCbCr
+	plain bool
+	steps int // changing frames so far: the box and the text move a step each
+	// typed (Config.StillScreen): a still light screen that shows this many
+	// typed glyphs instead (drawn so far: drawn, on still).
+	typed func() int64
+	drawn int64
+	still *image.YCbCr
+}
+
+func newPattern(cfg Config, plain bool, typed func() int64) *pattern {
+	p := &pattern{width: cfg.Width, height: cfg.Height, desktop: cfg.Desktop || cfg.Scroll, plain: plain, typed: typed}
+	if cfg.Scroll {
+		p.scrollFrames = int(scrollFor) * cfg.FPS / int(time.Second)
+		p.period = p.scrollFrames + int(scrollRest)*cfg.FPS/int(time.Second)
+		p.scrollStep = max(1, cfg.Height/cfg.FPS)
+	}
+	if p.desktop && !plain {
+		p.text = desktopBackground(cfg.Width, cfg.Height)
+	}
+	return p
+}
+
+// next draws source frame i and reports the share of the screen that
+// changed since frame i-1.
+func (p *pattern) next(i int) (*image.YCbCr, float64) {
+	if p.typed != nil {
+		return p.nextTyped()
+	}
+	change := 1.0
+	switch {
+	case p.scrollFrames > 0 && i%p.period < p.period-p.scrollFrames:
+		change = 0
+	case p.desktop && p.scrollFrames == 0:
+		change = min(1, 2*boxWidth*boxHeight/float64(p.width*p.height))
+	}
+	if change > 0 {
+		p.steps++
+	}
+	img := image.NewYCbCr(image.Rect(0, 0, p.width, p.height), image.YCbCrSubsampleRatio420)
+	switch {
+	case p.plain:
+		for j := range img.Y {
+			img.Y[j] = 128
 		}
-		for y := 0; y < height/2; y++ {
-			for x := 0; x < width/2; x++ {
-				img.Cb[y*img.CStride+x] = uint8((x*2 + phase*3) % 256)
-				img.Cr[y*img.CStride+x] = uint8((y*2 + phase*5) % 256)
-			}
+		for j := range img.Cb {
+			img.Cb[j], img.Cr[j] = 128, 128
+		}
+	case p.text != nil:
+		scroll := p.steps * p.scrollStep % p.height
+		for y := range p.height {
+			src := (y + scroll) % p.height
+			copy(img.Y[y*img.YStride:][:p.width], p.text.Y[src*p.text.YStride:][:p.width])
+		}
+		copy(img.Cb, p.text.Cb)
+		copy(img.Cr, p.text.Cr)
+	default:
+		drawGradient(img, i)
+	}
+	fillLuma(img, 20+(p.steps*7)%max(1, p.width-120), 20+(p.steps*5)%max(1, p.height-80), boxWidth, boxHeight, 235)
+	return img, change
+}
+
+// nextTyped draws the glyphs typed since the last frame onto the still
+// screen and reports their share of it.
+func (p *pattern) nextTyped() (*image.YCbCr, float64) {
+	if p.still == nil {
+		p.still = image.NewYCbCr(image.Rect(0, 0, p.width, p.height), image.YCbCrSubsampleRatio420)
+		for j := range p.still.Y {
+			p.still.Y[j] = 235
+		}
+		for j := range p.still.Cb {
+			p.still.Cb[j], p.still.Cr[j] = 128, 128
 		}
 	}
-	fillLuma(img, 20+(frameIndex*7)%max(1, width-120), 20+(frameIndex*5)%max(1, height-80), 100, 60, 235)
-	return img
+	n := p.typed()
+	added := n - p.drawn
+	for ; p.drawn < n; p.drawn++ {
+		drawTypedGlyph(p.still, int(p.drawn))
+	}
+	return p.still, min(1, float64(added*glyphWidth*glyphHeight)/float64(p.width*p.height))
+}
+
+// Typed glyphs on the still screen: dark blocks the size of a 1x glyph, in
+// lines from the top left, like text typed into an editor.
+const (
+	glyphWidth   = 8
+	glyphHeight  = 16
+	glyphAdvance = 10
+	glyphLine    = 24
+	glyphMargin  = 64
+)
+
+func drawTypedGlyph(img *image.YCbCr, index int) {
+	perLine := max(1, (img.Rect.Dx()-2*glyphMargin)/glyphAdvance)
+	x := glyphMargin + index%perLine*glyphAdvance
+	y := glyphMargin + index/perLine*glyphLine
+	fillLuma(img, x, y, glyphWidth, glyphHeight, 16)
+}
+
+// drawGradient fills img with a diagonal gradient that moves with phase.
+func drawGradient(img *image.YCbCr, phase int) {
+	phase %= 255
+	width, height := img.Rect.Dx(), img.Rect.Dy()
+	for y := 0; y < height; y++ {
+		row := img.Y[y*img.YStride:]
+		for x := 0; x < width; x++ {
+			row[x] = uint8((x + y + phase) % 256)
+		}
+	}
+	for y := 0; y < height/2; y++ {
+		for x := 0; x < width/2; x++ {
+			img.Cb[y*img.CStride+x] = uint8((x*2 + phase*3) % 256)
+			img.Cr[y*img.CStride+x] = uint8((y*2 + phase*5) % 256)
+		}
+	}
 }
 
 // desktopBackground is a still screen full of text: rows of 5×7 glyphs,
@@ -203,23 +340,6 @@ func desktopBackground(width, height int) *image.YCbCr {
 		}
 	}
 	return img
-}
-
-// Typed glyphs on the still screen: dark blocks the size of a 1x glyph, in
-// lines from the top left, like text typed into an editor.
-const (
-	glyphWidth   = 8
-	glyphHeight  = 16
-	glyphAdvance = 10
-	glyphLine    = 24
-	glyphMargin  = 64
-)
-
-func drawTypedGlyph(img *image.YCbCr, index int) {
-	perLine := max(1, (img.Rect.Dx()-2*glyphMargin)/glyphAdvance)
-	x := glyphMargin + index%perLine*glyphAdvance
-	y := glyphMargin + index/perLine*glyphLine
-	fillLuma(img, x, y, glyphWidth, glyphHeight, 16)
 }
 
 // Timestamp barcode: 48 bits of Unix milliseconds, MSB first, drawn as

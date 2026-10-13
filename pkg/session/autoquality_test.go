@@ -2,25 +2,42 @@ package session
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/wottpal/blitzkvm/pkg/client"
 	"github.com/wottpal/blitzkvm/pkg/emulator"
+	"github.com/wottpal/blitzkvm/pkg/video"
 )
 
-// feed runs the governor over n one-second samples produced by next.
+// feed runs the governor over n one-second samples produced by next, with
+// a link estimate that measures nothing.
 func feed(g *qualityGovernor, start time.Time, n int, next func(i int, prev client.StatsSnapshot) client.StatsSnapshot) (changes []int, now time.Time) {
+	return feedLink(g, start, n, time.Second, func(i int, prev client.StatsSnapshot) (client.StatsSnapshot, video.LinkEstimate) {
+		return next(i, prev), video.LinkEstimate{}
+	})
+}
+
+// feedLink runs the governor over n samples, every step, produced by next.
+func feedLink(g *qualityGovernor, start time.Time, n int, step time.Duration, next func(i int, prev client.StatsSnapshot) (client.StatsSnapshot, video.LinkEstimate)) (changes []int, now time.Time) {
 	var s client.StatsSnapshot
+	var link video.LinkEstimate
 	now = start
 	for i := 0; i < n; i++ {
-		now = now.Add(time.Second)
-		s = next(i, s)
-		if level, changed := g.observe(now, s); changed {
+		now = now.Add(step)
+		s, link = next(i, s)
+		if level, why := g.observe(now, s, link); why != "" {
 			changes = append(changes, level)
 		}
 	}
 	return changes, now
+}
+
+// measured is a link estimate that has measured rate (bit/s) on enough
+// frames, with no queue.
+func measured(rate float64) video.LinkEstimate {
+	return video.LinkEstimate{Rate: rate, RateBytes: 1_000_000, QueueFrames: 6}
 }
 
 // clean: 4 Mbit/s, 2 ms RTT, no loss.
@@ -57,40 +74,171 @@ func TestQualityStepsDownOnLossAndRecoversSlowly(t *testing.T) {
 		t.Fatalf("expected steps down from %d, got %v", top, changes)
 	}
 	low := g.level
-	// Clean again: no step up before upAfterClean, then one step at a time.
-	cleanAt30 := func(i int, prev client.StatsSnapshot) client.StatsSnapshot {
+	// Clean again on a link measured to carry every level: no step up
+	// before upAfterClean, then one step at a time.
+	cleanAt30 := func(i int, prev client.StatsSnapshot) (client.StatsSnapshot, video.LinkEstimate) {
 		prev.BytesReceived += 400_000
 		prev.RoundTripMs = 30
-		return prev
+		return prev, measured(50e6)
 	}
-	early, now := feed(g, now, int(upAfterClean/time.Second)-2, cleanAt30)
+	early, now := feedLink(g, now, int(upAfterClean/time.Second)-2, time.Second, cleanAt30)
 	if len(early) != 0 {
 		t.Fatalf("stepped up too early: %v", early)
 	}
-	later, _ := feed(g, now, 60, cleanAt30)
+	later, _ := feedLink(g, now, 60, time.Second, cleanAt30)
 	if len(later) == 0 || later[0] != low+1 {
 		t.Fatalf("expected a single step up to %d, got %v", low+1, later)
 	}
 }
 
-func TestQualityStepsDownOnQueueingDelay(t *testing.T) {
+// at1080p is a governor for 1080p video started at rtt.
+func at1080p(start time.Time, rtt time.Duration) *qualityGovernor {
+	g := newQualityGovernor(start, rtt, upAfterClean)
+	g.width, g.height = 1920, 1080
+	return g
+}
+
+// cleanStats is a clean second of transport statistics at rtt.
+func cleanStats(prev client.StatsSnapshot, rtt float64) client.StatsSnapshot {
+	prev.SampledAt = prev.SampledAt.Add(time.Second)
+	prev.BytesReceived += 400_000
+	prev.RoundTripMs = rtt
+	return prev
+}
+
+func TestQualityStepsDownAtOnceWhenAQueueGrows(t *testing.T) {
 	start := time.Unix(0, 0)
-	g := newQualityGovernor(start, 10*time.Millisecond, upAfterClean)
-	before := g.level
-	// Baseline 10 ms, then the queue builds to 120 ms without loss.
-	i := 0
-	bloated := func(_ int, prev client.StatsSnapshot) client.StatsSnapshot {
-		i++
-		prev.BytesReceived += 400_000
-		prev.RoundTripMs = 10
-		if i > 3 {
-			prev.RoundTripMs = 120
+	g := at1080p(start, 30*time.Millisecond) // high
+	g.lastChange = start                     // past the start
+	// 12 Mbit/s measured: high fits. Then the cell drops to 4 Mbit/s:
+	// frames queue up, the wait grows, and the rate median still reads
+	// 12. What arrives while the queue stands is the link's rate now: one
+	// step straight to low (2.3 Mbit/s). When the queue still grows a
+	// second later, at 2 Mbit/s, the next goes to minimal.
+	queue := func(i int) video.LinkEstimate {
+		link := measured(12e6)
+		if i >= 10 {
+			link.Queue, link.QueueGrowth, link.Delivered = time.Duration(i-5)*20*time.Millisecond, 20*time.Millisecond, 4e6
 		}
-		return prev
+		if i >= 15 {
+			link.Delivered = 2e6
+		}
+		return link
 	}
-	changes, _ := feed(g, start, 8, bloated)
-	if len(changes) == 0 || changes[0] != before-1 {
-		t.Fatalf("queueing delay did not lower quality: %v", changes)
+	changes, _ := feedLink(g, start, 30, qualityTick, func(i int, prev client.StatsSnapshot) (client.StatsSnapshot, video.LinkEstimate) {
+		if i%10 == 0 {
+			prev = cleanStats(prev, 30)
+		}
+		return prev, queue(i)
+	})
+	if want := []int{1, 0}; !slices.Equal(changes, want) {
+		t.Fatalf("changes %v, want %v", changes, want)
+	}
+}
+
+func TestQualityLeavesADrainingBurstAloneOnALAN(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 2*time.Millisecond) // maximum
+	// The rate measured is the device's send path, here below maximum's
+	// target, and every 6 s a still refresh drains through it: the frames
+	// behind it wait up to 120 ms, less and less.
+	changes, _ := feedLink(g, start, 600, qualityTick, func(i int, prev client.StatsSnapshot) (client.StatsSnapshot, video.LinkEstimate) {
+		if i%10 == 0 {
+			prev = cleanStats(prev, 2)
+		}
+		link := measured(10e6)
+		if i%60 == 1 {
+			link.Queue, link.QueueGrowth = 120*time.Millisecond, -110*time.Millisecond
+		}
+		return prev, link
+	})
+	if len(changes) != 0 {
+		t.Fatalf("a LAN left maximum: %v", changes)
+	}
+}
+
+func TestQualityLeavesAQueueOfRepairsAlone(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 60*time.Millisecond)
+	g.level, g.lastChange = 1, start // low, which 4 Mbit/s carries
+	// After an outage, NACK repairs and the keyframe asked for with them
+	// queue up for a moment.
+	changes, _ := feedLink(g, start, 10, qualityTick, func(i int, prev client.StatsSnapshot) (client.StatsSnapshot, video.LinkEstimate) {
+		link := measured(4e6)
+		link.Queue, link.QueueGrowth, link.RepairShare = time.Duration(80+20*i)*time.Millisecond, 20*time.Millisecond, 0.6
+		return prev, link
+	})
+	if len(changes) != 0 {
+		t.Fatalf("a queue of repairs changed quality: %v", changes)
+	}
+}
+
+func TestQualityLeavesALevelTheLinkDoesNotCarry(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 60*time.Millisecond) // balanced: 4 Mbit/s
+	g.lastChange = start                     // past the start
+	changes, _ := feedLink(g, start, 2, qualityTick, func(_ int, prev client.StatsSnapshot) (client.StatsSnapshot, video.LinkEstimate) {
+		return cleanStats(prev, 60), measured(3.5e6)
+	})
+	if want := []int{1}; !slices.Equal(changes, want) {
+		t.Fatalf("changes %v, want %v (low)", changes, want)
+	}
+}
+
+func TestQualityStartsAtTheLevelTheLinkCarries(t *testing.T) {
+	for _, c := range []struct {
+		rate float64
+		want int
+	}{{3.5e6, 1}, {4.7e6, 1}, {12e6, 3}, {21e6, 4}} {
+		start := time.Unix(0, 0)
+		g := at1080p(start, 60*time.Millisecond)
+		g.observe(start, cleanStats(client.StatsSnapshot{}, 60), measured(c.rate))
+		if g.level != c.want {
+			t.Errorf("%.1f Mbit/s: started at %d, want %d", c.rate/1e6, g.level, c.want)
+		}
+	}
+}
+
+func TestQualityStillRefreshFitsTheLink(t *testing.T) {
+	for _, c := range []struct {
+		rtt         time.Duration
+		rate        float64
+		level, qp   int
+		description string
+	}{
+		{60 * time.Millisecond, 3.8e6, 1, 21, "4 Mbit/s: low's 161 kB refresh would take 340 ms; none"},
+		{60 * time.Millisecond, 12e6, 3, 5, "12 Mbit/s: high's refresh one QP coarser, 298 kB in 200 ms"},
+		{60 * time.Millisecond, 50e6, 4, 1, "50 Mbit/s: maximum's as it is"},
+		{2 * time.Millisecond, 10e6, 4, 1, "a LAN keeps the ladder's"},
+	} {
+		start := time.Unix(0, 0)
+		g := at1080p(start, c.rtt)
+		g.observe(start, cleanStats(client.StatsSnapshot{}, c.rtt.Seconds()*1000), measured(c.rate))
+		if p := g.params(); g.level != c.level || p.StillQP != c.qp {
+			t.Errorf("%s: level %d still QP %d, want %d and %d", c.description, g.level, p.StillQP, c.level, c.qp)
+		}
+	}
+}
+
+func TestQualityStepsUpOnlyOnEvidence(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 60*time.Millisecond)
+	g.level, g.lastChange = 1, start // low, after a step down
+	idle := func(_ int, prev client.StatsSnapshot) (client.StatsSnapshot, video.LinkEstimate) {
+		return cleanStats(prev, 60), video.LinkEstimate{QueueFrames: 6}
+	}
+	// Five minutes of a still screen: single-packet frames measure no rate.
+	if changes, _ := feedLink(g, start, 300, time.Second, idle); len(changes) != 0 {
+		t.Fatalf("stepped up on idle time: %v", changes)
+	}
+	// Scrolling measures 12 Mbit/s: one step at once (the clean stretch is
+	// long past), the next after upAfterClean, and no further than high.
+	now := start.Add(300 * time.Second)
+	changes, _ := feedLink(g, now, 120, time.Second, func(_ int, prev client.StatsSnapshot) (client.StatsSnapshot, video.LinkEstimate) {
+		return cleanStats(prev, 60), measured(12e6)
+	})
+	if want := []int{2, 3}; !slices.Equal(changes, want) {
+		t.Fatalf("changes %v, want %v", changes, want)
 	}
 }
 
@@ -123,6 +271,21 @@ func TestQualityIgnoresASingleNoisySample(t *testing.T) {
 	}
 	if changes, _ := feed(g, start, 30, blip); len(changes) != 0 {
 		t.Fatalf("a single mild loss sample changed quality: %v", changes)
+	}
+}
+
+func TestQualityIgnoresALossOnAStillScreen(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := newQualityGovernor(start, 30*time.Millisecond, upAfterClean)
+	// A still screen: a handful of packets a second, one of them lost.
+	still := func(_ int, prev client.StatsSnapshot) client.StatsSnapshot {
+		prev.BytesReceived += 6_000
+		prev.PacketsLost++
+		prev.RoundTripMs = 30
+		return prev
+	}
+	if changes, _ := feed(g, start, 10, still); len(changes) != 0 {
+		t.Fatalf("single losses on a still screen changed quality: %v", changes)
 	}
 }
 
@@ -329,7 +492,7 @@ func TestQualitySkipsARepeatedSample(t *testing.T) {
 	start := time.Unix(0, 0)
 	g := newQualityGovernor(start, 2*time.Millisecond, upAfterClean)
 	s := client.StatsSnapshot{SampledAt: start, RoundTripMs: 2}
-	g.observe(start, s)
+	g.observe(start, s, video.LinkEstimate{})
 	lossy := func(at time.Time) client.StatsSnapshot {
 		s.SampledAt = at
 		s.BytesReceived += 400_000
@@ -340,9 +503,9 @@ func TestQualitySkipsARepeatedSample(t *testing.T) {
 	// twice in between. Read as a clean second, the repeat would reset the
 	// congestion count and the step down would never come.
 	first := lossy(start.Add(time.Second))
-	g.observe(start.Add(time.Second), first)
-	g.observe(start.Add(1500*time.Millisecond), first)
-	if _, changed := g.observe(start.Add(2*time.Second), lossy(start.Add(2*time.Second))); !changed {
+	g.observe(start.Add(time.Second), first, video.LinkEstimate{})
+	g.observe(start.Add(1500*time.Millisecond), first, video.LinkEstimate{})
+	if _, why := g.observe(start.Add(2*time.Second), lossy(start.Add(2*time.Second)), video.LinkEstimate{}); why == "" {
 		t.Fatal("sustained loss did not step down")
 	}
 }
@@ -356,16 +519,16 @@ func TestQualityFlappingBacksOffStepUps(t *testing.T) {
 		prev.RoundTripMs = 30
 		return prev
 	}
-	cleanAt30 := func(_ int, prev client.StatsSnapshot) client.StatsSnapshot {
+	cleanAt30 := func(_ int, prev client.StatsSnapshot) (client.StatsSnapshot, video.LinkEstimate) {
 		prev.BytesReceived += 400_000
 		prev.RoundTripMs = 30
-		return prev
+		return prev, measured(50e6)
 	}
-	_, now := feed(g, start, 3, lossy)        // down
-	ups, now := feed(g, now, 25, cleanAt30)   // up after 20 s
-	_, now = feed(g, now, 3, lossy)           // down again within a minute: flapping
-	early, now := feed(g, now, 30, cleanAt30) // 30 s clean: not enough now
-	later, _ := feed(g, now, 15, cleanAt30)   // 45 s: the doubled delay has passed
+	_, now := feed(g, start, 3, lossy)                         // down
+	ups, now := feedLink(g, now, 25, time.Second, cleanAt30)   // up after 20 s
+	_, now = feed(g, now, 3, lossy)                            // down again within a minute: flapping
+	early, now := feedLink(g, now, 30, time.Second, cleanAt30) // 30 s clean: not enough now
+	later, _ := feedLink(g, now, 15, time.Second, cleanAt30)   // 45 s: the doubled delay has passed
 	if len(ups) != 1 || len(early) != 0 || len(later) != 1 {
 		t.Fatalf("ups %v, early %v, later %v", ups, early, later)
 	}

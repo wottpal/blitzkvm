@@ -24,11 +24,11 @@ func CodecFromMime(mime string) (Codec, error) {
 	}
 }
 
-// Receive reads RTP from track into an Assembler until ctx ends or the track
-// closes for good. Transient read errors (malformed packets) are skipped
-// instead of ending the stream. rtt, if non-nil, is polled for the current
-// round-trip estimate.
-func Receive(ctx context.Context, track *webrtc.TrackRemote, asm *Assembler, rtt func() time.Duration) error {
+// Receive reads RTP from track into an Assembler and a LinkEstimator until
+// ctx ends or the track closes for good. Transient read errors (malformed
+// packets) are skipped instead of ending the stream. rtt, if non-nil, is
+// polled for the current round-trip estimate.
+func Receive(ctx context.Context, track *webrtc.TrackRemote, asm *Assembler, link *LinkEstimator, rtt func() time.Duration) error {
 	tickCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
@@ -66,7 +66,9 @@ func Receive(ctx context.Context, track *webrtc.TrackRemote, asm *Assembler, rtt
 			continue
 		}
 		consecutiveErrors = 0
-		asm.Push(pkt, time.Now())
+		now := time.Now()
+		link.Push(pkt, now)
+		asm.Push(pkt, now)
 	}
 }
 
