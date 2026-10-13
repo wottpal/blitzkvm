@@ -33,8 +33,12 @@ final class TextUpscalerTests: XCTestCase {
         let upscaler = try XCTUnwrap(TextUpscaler(device: gpu.device))
         let out = try gpu.upscale(tile, with: upscaler, scale: 2.5066667, size: (160, 120))
         XCTAssertEqual(out.count / 4, golden.count)
-        let luma = stride(from: 0, to: out.count, by: 4).map { 0.299 * Double(out[$0]) + 0.587 * Double(out[$0 + 1]) + 0.114 * Double(out[$0 + 2]) }
-        let mse = zip(luma, golden).map { ($0 - $1) * ($0 - $1) }.reduce(0, +) / Double(golden.count)
+        let luma: [Double] = stride(from: 0, to: out.count, by: 4).map { (i: Int) -> Double in
+            let r: Double = 0.299 * Double(out[i]), g: Double = 0.587 * Double(out[i + 1]), b: Double = 0.114 * Double(out[i + 2])
+            return r + g + b
+        }
+        let squaredErrors: [Double] = zip(luma, golden).map { (a: Double, b: Double) -> Double in (a - b) * (a - b) }
+        let mse = squaredErrors.reduce(0, +) / Double(golden.count)
         let psnr = 10 * log10(1 / mse)
         XCTAssertGreaterThan(psnr, 55, "luma PSNR against the reference")
     }
