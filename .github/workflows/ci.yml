@@ -1,9 +1,12 @@
-# Fork-only checks. Upstream's workflows stay untouched and disabled on this fork.
-# No push trigger: macOS runners bill 10x on private repos, so this runs on PRs
-# and on demand only. `make check` runs the same steps locally.
-name: Fork check
+# The same steps as `make check`. Pushes to main run it only while the
+# repository is public (macOS minutes are billed on private repositories);
+# pull requests and manual runs always do. macOS 26 provides the SDK the app
+# needs (Liquid Glass, Icon Composer).
+name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -11,13 +14,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: fork-check-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   check:
-    name: Go checks (macOS)
-    runs-on: macos-15
+    name: Checks (macOS)
+    if: github.event_name != 'push' || !github.event.repository.private
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -49,3 +53,7 @@ jobs:
 
       - name: Native app (Swift)
         run: make -C macos test
+
+      # Unsigned; JetKVM's own firmware is downloaded, the BlitzKVM build is left out.
+      - name: Native app (bundle)
+        run: make -C macos app SIGN_IDENTITY=- COPY_TO=
