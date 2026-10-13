@@ -1440,6 +1440,78 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
 - **Tailscale installs without restarting the JetKVM**, unlike JetKVM's script, so the target's display is not re-plugged.
 - **The password is a row of the sheet**, because a JetKVM on a shared tailnet is reachable by everyone the tailnet's ACLs allow.
 
+## 31. Latency and quality, round 3 (2026-10-12/13)
+
+**Ask (PM):** squeeze everything out of JetKVM firmware and BlitzKVM: minimise key, pointer and scroll latency, maximise sharp Retina text, also on slow links (cellular via Tailscale). Benchmark everything. The PM's setup: a 40" 5K2K display (3008×1269 points, 60 Hz, DELL U4021QW), the remote in Match Window at 2400×1012@60, so the picture is enlarged 2.507×.
+
+**Method:**
+- Five research agents (device encode/capture, HDMI bridge modes, cellular/congestion control, macOS client, any-scale upscaling), then implementation agents in detached worktrees; every hardware experiment on `.107` and the Mac mini by one session.
+- The latency probe (§24) at the PM's mode, 30–40 samples per cell. It had an off-by-one: it took the serial before `display()` numbered the changed frame, so a late present of the previous frame could be taken for it. Fixed; baselines re-measured.
+- An instrumented device build (`JETKVM_TIMING=1`, kept as part of D11): per frame V4L2 timestamp → DQBUF, frame start → bitstream, handoff, sizes, encode time by frame type. Go-side `WriteSample` timing and a localhost pprof in experiment builds.
+- A tear probe (`tools/latency-probe/tear.html`/`tear.py`): frame counters at the top, middle and bottom of a page that changes every frame; a decoded frame whose counters disagree was encoded before the capture finished writing it.
+- The link impairment harness (`BLITZKVM_IMPAIR`, below) for slow links, on the emulator and on the real device.
+
+### Where the time went (2400×1012@60, before)
+
+| Stage | Time |
+|---|---|
+| Target (Mac mini): key → change on HDMI | ~45 ms (Safari), pointer ~18 ms |
+| Capture: V4L2 timestamp → DQBUF | 16.68 ms (one period + 16 µs: the buffer completes at the next frame start) |
+| Encode (VEPU, 396 MHz) | P 15.19 ms, I 13.1 ms (≈160 Mpx/s, every CTU processed) |
+| Device send (Go: packetise, SRTP, sendto) | ≈0.45 ms CPU per 1200-byte packet |
+| Decode → screen | 8 ms full screen, 12.7 ms windowed (60 Hz client) |
+| **Key → screen** | **91.2 ms full screen, 96.0 ms windowed; pointer 57.4 / 65.0** |
+
+### Findings and changes
+
+| # | Finding | Change | Result |
+|---|---|---|---|
+| R1 | The encoder only started once a frame was captured, though it is faster than the HDMI scan-out | **Early submit (fork D11):** after DQBUF of frame k the buffer VICAP is writing (k+1, next in ping-pong order) goes to the encoder at its frame start + active time − fastest recent encode (I-frames ~2 ms faster) + 2 ms | frame start → bitstream 31.9 → 19.9 ms; key → screen 89.4 → 76.4, pointer 66.8 → 49.6 ms (full screen, A/B). Tear thresholds: P ~2 ms, I 3.5–4 ms below the offset at 2400×1012, 3–3.5 ms at 1280×720@120; 0 torn in >2,000 frames with a keyframe every 0.5 s, and with 30 fps frame dropping |
+| R2 | The bridge locks up to 120 Hz (upstream `feat/experimental-120hz-mode`), and its FIFO level counts 2-pixel entries: a line may end ~600 px behind the CSI output, not ~290 | **Match Window 75/90/120 Hz and full width on the fast link** (app): drift budget 550 px (sweep at 1904×1072@50: clean at 351/449/548/651 px, stripes at 755) | key → screen (full screen, early submit): 1280×720@120 47.0, 1664×700@120 50.0, 1920×800@90 55.9, 2160×908@75 67.7, 2400×1012@60 76.4, 3008×1268@40 110 ms (was 25 Hz). 720p120: capture 8.37, encode 5.4/6.0, frame start → bitstream 10.6 ms |
+| R3 | Both ends negotiated AES-256-GCM (pion's default); the device's ARMv7 core has no AES instructions | **AES-128-CM-HMAC-SHA1 SRTP** (engine) | device microbenchmark per packet: GCM-256 634 µs, CM 220 µs (AES 157, HMAC 35), sendto 98; send time of typing frames −~10 % |
+| R4 | pion drops SRTP packets >64 behind the newest as replays; retransmissions reuse sequence numbers | **Replay window 8192** (engine) | NACK repairs no longer discarded on slow links |
+| R5 | Big frames block everything behind them: the device spends 120–230 ms sending a 250–350 KB keyframe (wire: 20–28 ms) | (measurement) | a key 10/30/60 ms after a keyframe request: decoded 137/127/99 ms vs 76 (p90 up to 210) |
+| R6 | Every typing pause triggered a whole-frame near-lossless refresh keyframe (D07) | **Client-driven region refresh (fork D13 + app):** the app plans refreshes from the visibly changed blocks, its input timing and the link: changed regions (≤6 rects, forced intra at the P-frame floor) once the picture is still 250 ms and input idle 400 ms; a full refresh only on LAN-like links after 3 s without input | a typed key → one 2-rect region refresh ~0.35 s after the burst; an 880×224 text rect 50.2 → 55.3 dB in one 54 KB P-frame (full refresh: 355 KB, 59.1 dB); keys 0.45–0.8 s after a pause: no penalty (72–74 ms to decode) |
+| R7 | The device's encoder keeps re-coding a still picture by 3–5 code values (~2,500 px a frame) | **Visible-change detection:** 64×64 blocks count only above a luma delta of 32 | a still refresh changes 0 % of blocks visibly, scrolling 38–45 %, a window switch 90 % |
+| R8 | The FSR path recomputed the whole 15 MP output for any change | **Dirty-rect rendering** (app) | typing/pointer frame 5.04 → 0.7 ms GPU at 6016×2538; bit-exact GPU tests |
+| R9 | The 2× text upscaler never ran at the PM's 2.507× | **Any-scale text upscaler** (3×3 sub-pixel grid, trained at 2.5067×), Automatic for 1 < scale ≤ 3; frames changing >10 % of blocks visibly draw with FSR first and are sharpened ~110 ms later | +1.3–3.0 dB / +0.02–0.03 SSIM over FSR on every text region (real recordings, in the app); typing 0.8 ms GPU |
+| R10 | Wheel steps went over JSON-RPC (a goroutine and JSON per step, no order) | **Wheel over HID-RPC (fork D12, `getFirmwareFeatures`)** | single steps: same latency (83 ms); order and device CPU |
+| R11 | The local pointer had to stay hidden (the target draws its own cursor) | **View › Local Pointer** (Hidden default, Dot, Arrow; hides after 150 ms at rest) | the local pointer moves without the stream's ~50–70 ms |
+| R12 | Slow links: duplicate NACKs, 300 ms gap deadline, no harness | **`BLITZKVM_IMPAIR` harness** (rate/trace, queue, delay, jitter, Gilbert–Elliott loss, outages; lte, lte-congested, wifi-hotel, derp) and **RTT-aware NACK pacing, progress-based gap deadline, late repairs** | emulator A/B: wifi-hotel dropped frames 283 → 20, PLIs 12 → 0; derp from no picture to working; LAN unchanged. Real device via the harness, key → screen: none 78, lte 122, wifi-hotel 186, derp 192 ms |
+
+### Results (2400×1012@60, fork.5 installed, median)
+
+| | Before | After |
+|---|---|---|
+| Key → screen, full screen | 91.2 ms | **77.5 ms** |
+| Key → screen, window | 96.0 ms | **78.8 ms** |
+| Pointer → screen, full screen | 57.4 ms | **53.0 ms** |
+| Pointer → screen, window | 65.0 ms | **57.7 ms** |
+| Key → screen at 1280×720@120 | — | **47.0 ms** |
+| Text at 2.507× (vs FSR) | FSR | **+1.3–3.0 dB** |
+
+### Ruled out (measured)
+- Raising the VEPU clock: the MPP debug knob doesn't change the live clock; the core clock's only faster source (PVTPLL) is +6 % at most.
+- `GOGC=400` (no change), `GOMAXPROCS=2` (worse).
+- Hardware AES through `/dev/crypto` (`ctr-aes-rk`): correct but only 2× faster (74 vs 157 µs a packet, the engine runs at ~16 MB/s); about 15 % of the send path. Not worth vendoring pion/srtp.
+- The send path's rest (sendto ~20 %, allocations ~19 %) is inside pion. Bigger RTP packets need pion's `outboundMTU` constant changed.
+- Capture/encode overlap in hardware (ISP + DVBM wrap, rkcif line wake-up) needs device-tree changes outside the firmware.
+- Time to first picture: 0.27 s cold (the 4 s in §27 is gone).
+- The PM's display is 60 Hz, so the ~8 ms vsync wait stays.
+
+### Decisions (worth revisiting)
+- Automatic Match Window takes the highest rate that keeps the largest picture: small windows get 90/120 Hz, the 40" full screen 3008×1268@40. Rates offered: 120, 90, 75, 60, 50, 40, 30, 25, 24.
+- Early submit margin 2 ms above the I-frame threshold (≈1.3 ms of safety).
+- Region refreshes reach the P-frame floor (minQp, ~53–55 dB), the full refresh after 3 s idle the still QP (~59–60 dB).
+- Frames that change more than a tenth of the picture visibly draw with FSR first (latency), sharpened ~110 ms later.
+- Local pointer default stays Hidden.
+- Firmware changes went straight to the fork's `dev` (D11–D13) and `release/0.5.9-fork.5` was tagged locally; nothing was pushed.
+
+### Open
+- A device-side pacer for keyframes on DERP/policed links (the harness shows the burst loss); receiver-side delay-based rate control (agent result pending at the time of writing).
+- Temporal SVC (TSVC2) so a lost top-layer frame needs no keyframe (VideoToolbox can't recover via intra refresh or recovery-point SEI).
+- The device send path (0.45 ms a packet) still bounds large frames.
+
 ## Appendix A: Key sources
 
 - `jetkvm/kvm` (`dev` @ `8f6c300`, `release/0.5.9`): https://github.com/jetkvm/kvm. REMB revert: https://github.com/jetkvm/kvm/pull/1693
