@@ -1,6 +1,6 @@
-// Package openh264 decodes H.264 access units in software. It is used by the
-// Ebiten test client and tests; the native macOS app decodes with
-// VideoToolbox and never links this package.
+// Package openh264 decodes H.264 access units in software, for the emulator
+// and tests; the native macOS app decodes with VideoToolbox and never links
+// this package.
 package openh264
 
 import (
@@ -24,8 +24,8 @@ type DecodeStats struct {
 }
 
 // Stream decodes H.264 access units with OpenH264 on its own goroutine and
-// keeps the latest picture. It is the sink used by the Ebiten test client; the
-// native app decodes with VideoToolbox instead.
+// keeps the latest picture, for tests; the native app decodes with
+// VideoToolbox instead.
 type Stream struct {
 	mu      sync.RWMutex
 	latest  *video.Frame

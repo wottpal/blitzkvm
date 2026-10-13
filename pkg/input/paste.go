@@ -94,13 +94,6 @@ func BuildPasteMacro(layout, text string, delay uint16) ([]hidrpc.KeyboardMacroS
 	return steps, invalid
 }
 
-// LayoutSupportsRune reports whether r can be typed on layout.
-func LayoutSupportsRune(layout string, r rune) bool {
-	table := generatedLayouts[NormalizeKeyboardLayoutCode(layout)]
-	_, ok := table[r]
-	return ok
-}
-
 func InvalidRunesString(invalid []rune) string {
 	if len(invalid) == 0 {
 		return ""

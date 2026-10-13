@@ -31,12 +31,6 @@ func (c *Client) GetVirtualMediaState(ctx context.Context) (*virtualmedia.State,
 	return state, nil
 }
 
-func (c *Client) GetStorageSpace(ctx context.Context) (virtualmedia.StorageSpace, error) {
-	var space virtualmedia.StorageSpace
-	err := c.Call(ctx, "getStorageSpace", nil, &space)
-	return space, err
-}
-
 func (c *Client) ListStorageFiles(ctx context.Context) ([]virtualmedia.StorageFile, error) {
 	var payload StorageFilesResponse
 	if err := c.Call(ctx, "listStorageFiles", nil, &payload); err != nil {

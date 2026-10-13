@@ -4,9 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"runtime"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -70,55 +67,4 @@ func Subsystem(name string) zerolog.Logger {
 	logger := base.With().Str("component", name).Logger()
 	mu.RUnlock()
 	return logger
-}
-
-// StderrIsTerminal reports whether stderr is attached to a terminal. Apps
-// launched from Finder or by a parent process get a pipe or /dev/null.
-func StderrIsTerminal() bool {
-	info, err := os.Stderr.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
-}
-
-// DefaultLogDir returns ~/Library/Logs/BlitzKVM on macOS and a
-// per-user cache directory elsewhere.
-func DefaultLogDir() (string, error) {
-	if runtime.GOOS == "darwin" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(home, "Library", "Logs", "BlitzKVM"), nil
-	}
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(cache, "blitzkvm", "logs"), nil
-}
-
-// OpenLogFile opens (appending) <DefaultLogDir>/<name>.log, rotating it to
-// <name>.log.1 first when it has grown beyond maxLogFileSize.
-func OpenLogFile(name string) (*os.File, error) {
-	dir, err := DefaultLogDir()
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	path := filepath.Join(dir, name+".log")
-	if info, err := os.Stat(path); err == nil && info.Size() > maxLogFileSize {
-		_ = os.Rename(path, path+".1")
-	}
-	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-}
-
-// EnableCrashOutput makes the Go runtime write fatal-error and unrecovered
-// panic reports to f in addition to stderr, so crashes of processes without a
-// terminal leave a trace.
-func EnableCrashOutput(f *os.File) error {
-	return debug.SetCrashOutput(f, debug.CrashOptions{})
 }

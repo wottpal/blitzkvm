@@ -1074,12 +1074,6 @@ func (c *Client) keepAliveLoop() {
 	}
 }
 
-// SendKeypressKeepAlive is kept for callers that drive their own keepalive;
-// the client already sends keepalives while keys are held.
-func (c *Client) SendKeypressKeepAlive() error {
-	return c.sendHID(c.ch.Load().hid, hidrpc.KeypressKeepAlive{})
-}
-
 // ReleaseAllKeys releases every key the client believes is held, plus all
 // modifiers, with a single empty keyboard report.
 func (c *Client) ReleaseAllKeys() error {
@@ -1282,17 +1276,6 @@ func (c *Client) SendSerialText(text string) error {
 	return serial.SendText(string(data))
 }
 
-func (c *Client) SendSerialRaw(text string) error {
-	if text == "" {
-		return nil
-	}
-	serial := c.ch.Load().serial
-	if serial == nil {
-		return fmt.Errorf("serial channel not ready")
-	}
-	return serial.SendText(text)
-}
-
 func (c *Client) openDataChannels(pc *webrtc.PeerConnection) error {
 	set := &channels{}
 	var err error
@@ -1417,10 +1400,6 @@ func (c *Client) watchEssentialChannel(dc *webrtc.DataChannel) {
 
 func (c *Client) noteTransportDebug(msg string) {
 	c.transportDebug.Store(msg)
-}
-
-func (c *Client) HTTPClient() *http.Client {
-	return c.authClient.HTTPClient()
 }
 
 // LatestFrameInfo returns the newest decoded picture, if the video sink

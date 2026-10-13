@@ -1,10 +1,8 @@
 package jsonrpc
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 )
 
 const Version = "2.0"
@@ -105,19 +103,4 @@ func DecodeMessage(data []byte) (any, error) {
 	}
 
 	return nil, ErrUnknownMessage
-}
-
-func MustVersion(raw string) error {
-	if raw != Version {
-		return fmt.Errorf("unexpected JSON-RPC version %q", raw)
-	}
-	return nil
-}
-
-func Compact(data []byte) string {
-	var out bytes.Buffer
-	if err := json.Compact(&out, data); err != nil {
-		return string(data)
-	}
-	return out.String()
 }

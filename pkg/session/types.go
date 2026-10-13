@@ -39,13 +39,6 @@ type CloudState struct {
 	AppURL    string
 }
 
-type AccessState struct {
-	LocalAuthMode LocalAuthMode
-	LoopbackOnly  bool
-	Cloud         CloudState
-	TLS           TLSState
-}
-
 type USBConfig struct {
 	VendorID     string
 	ProductID    string
@@ -62,17 +55,6 @@ type USBDevices struct {
 	SerialConsole bool
 	Audio         bool
 	Network       bool
-}
-
-type HardwareState struct {
-	USBEmulation    *bool
-	USBConfig       USBConfig
-	USBDevices      USBDevices
-	USBNetwork      *USBNetworkConfig
-	USBDeviceCount  int
-	DisplayRotation DisplayRotation
-	Backlight       BacklightSettings
-	VideoSleepMode  *VideoSleepMode
 }
 
 type IPv4StaticConfig struct {
@@ -296,15 +278,6 @@ type MQTTStatus struct {
 type MQTTTestResult struct {
 	Success bool
 	Error   string
-}
-
-type AdvancedState struct {
-	DevMode      *bool
-	DevChannel   *bool
-	LoopbackOnly *bool
-	USBEmulation *bool
-	SSHKey       string
-	Version      VersionInfo
 }
 
 type KeyboardMacroStep struct {

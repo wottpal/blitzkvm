@@ -313,10 +313,6 @@ type NetworkSettingsRequest struct {
 	Settings NetworkSettings `json:"settings"`
 }
 
-type USBNetworkConfigRequest struct {
-	Config USBNetworkConfig `json:"config"`
-}
-
 type MQTTSettingsRequest struct {
 	Settings MQTTSettings `json:"settings"`
 }

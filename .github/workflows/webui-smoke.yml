@@ -11,9 +11,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Set up native environment
-        uses: ./.github/actions/setup-native-env
-
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
