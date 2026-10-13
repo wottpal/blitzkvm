@@ -4,6 +4,7 @@
 #   make test       Swift unit tests
 #   make icon       compile the Icon Composer source and standalone fallback
 #   make firmware   bundle the firmware builds JetKVM Setup installs
+#   make licenses   assemble the licenses the app shows (BlitzKVM › Licenses…)
 #   make selftest   end-to-end run against the in-repo emulator
 #   make selftest-stalls   the picture survives link stalls and hidden windows
 #   make selftest-refresh  still refreshes follow typing pauses (fork firmware D13)
@@ -40,7 +41,7 @@ EMULATOR_ADDR ?= 127.0.0.1:18080
 # bin/jetkvm_app; JetKVM's own release is downloaded once at build time.
 FORK_BINARY ?= $(abspath ../../kvm/bin/jetkvm_app)
 
-.PHONY: app engine swift icon firmware test selftest selftest-extras selftest-stalls selftest-refresh selftest-audio run install notarize clean
+.PHONY: app engine swift icon firmware licenses test selftest selftest-extras selftest-stalls selftest-refresh selftest-audio run install notarize clean
 
 engine:
 	cd .. && GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o macos/build/blitzkvm-engine ./cmd/blitzkvm-engine
@@ -54,7 +55,10 @@ icon:
 firmware:
 	sh scripts/bundle-firmware.sh "$(FORK_BINARY)" Support/Firmware.json build/firmware
 
-app: engine swift icon firmware
+licenses: engine
+	sh scripts/licenses.sh Support/Firmware.json build/licenses/Licenses.txt
+
+app: engine swift icon firmware licenses
 	rm -rf "$(APP)"
 	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Helpers" "$(APP)/Contents/Resources"
 	cp "$$(swift build -c release --arch arm64 --show-bin-path)/BlitzKVM" "$(APP)/Contents/MacOS/BlitzKVM"
@@ -64,6 +68,7 @@ app: engine swift icon firmware
 	cp build/icon/Assets.car "$(APP)/Contents/Resources/Assets.car"
 	mkdir -p "$(APP)/Contents/Resources/Firmware"
 	cp build/firmware/Firmware.json build/firmware/*.gz "$(APP)/Contents/Resources/Firmware/"
+	cp build/licenses/Licenses.txt "$(APP)/Contents/Resources/Licenses.txt"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.blitzkvm.engine "$(APP)/Contents/Helpers/blitzkvm-engine"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.blitzkvm "$(APP)"
 	codesign --verify --strict --deep "$(APP)"

@@ -53,6 +53,8 @@ struct Options {
     /// Self-test: play the device's audio (silently) and expect this codec
     /// ("opus", "pcmu") or none ("none"). Without it, self-tests play none.
     var expectAudio: String?
+    /// Opens BlitzKVM › Licenses… at launch.
+    var showLicenses = false
 
     static func parse(_ args: [String]) -> Options {
         var o = Options()
@@ -96,6 +98,7 @@ struct Options {
             case "--wake": o.wake = true
             case "--type-pauses": o.typePauses = true
             case "--expect-audio": o.expectAudio = next()
+            case "--show-licenses": o.showLicenses = true
             case "--window-size":
                 let parts = (next() ?? "").split(separator: "x").compactMap { Double($0) }
                 if parts.count == 2 { o.windowSize = (parts[0], parts[1]) }
@@ -120,6 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return model
     }()
     private var devicesWindow: DevicesWindowController?
+    private var licensesWindow: LicensesWindowController?
     private lazy var permissions = MainActor.assumeIsolated { PermissionsModel() }
     /// Open device windows (including minimized ones). Removed only when a
     /// window closes, which also stops its engine.
@@ -152,6 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             showDevices()
         }
+        if options.showLicenses { showLicenses() }
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -428,6 +433,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let appMenu = NSMenu()
+        appMenu.addItem(item("About BlitzKVM", #selector(showAbout)))
+        appMenu.addItem(item("Licenses…", #selector(showLicenses)))
+        appMenu.addItem(.separator())
         appMenu.addItem(item("Permissions…", #selector(showPermissions)))
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide BlitzKVM", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
@@ -668,6 +676,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showSetup() { current?.showSetup() }
 
     /// The welcome screen, to check or grant the app's permissions.
+    @objc private func showAbout() {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: style]
+        let credits = NSMutableAttributedString(string: "A native macOS client for JetKVM.\nStarted from jetkvm-desktop by Lars Karlslund.\n", attributes: attributes)
+        let repo = "https://github.com/wottpal/blitzkvm"
+        credits.append(NSAttributedString(string: "github.com/wottpal/blitzkvm", attributes: attributes.merging([.link: URL(string: repo) as Any]) { $1 }))
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func showLicenses() {
+        if licensesWindow == nil { licensesWindow = LicensesWindowController() }
+        licensesWindow?.showWindow(nil)
+        licensesWindow?.window?.makeKeyAndOrderFront(nil)
+    }
+
     @objc private func showPermissions() {
         MainActor.assumeIsolated { permissions.showOnboarding() }
         showDevices()
