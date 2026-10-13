@@ -6,9 +6,9 @@ This is a JetKVM app built from the fork [wottpal/kvm](https://github.com/wottpa
 
 | | |
 |---|---|
-| Binary | `bin/jetkvm_app` of `wottpal/kvm` at tag `release/0.5.9-fork.4` (`make build_release VERSION=0.5.9`) |
-| SHA-256 | `9052cccccf3dd4355a4292728574f8d2ef21a1e2596d27dbce9923acfdc05d65` (the build tested and installed on the device on 2026-10-11; your build may differ) |
-| Size | 31,547,016 bytes |
+| Binary | `bin/jetkvm_app` of `wottpal/kvm` at tag `release/0.5.9-fork.5` (`make build_release VERSION=0.5.9`) |
+| SHA-256 | `0d2305b38e21597200b09cbd1c8ef63f557dbd9916c7726040737ac7c857e091` (the build tested and installed on the device on 2026-10-13; your build may differ) |
+| Size | 31,575,784 bytes |
 | Type | ELF 32-bit ARM EABI5, dynamically linked, interpreter `/lib/ld-uClibc.so.0`; NEEDED `librockit.so`, `librockchip_mpp.so.1`, `librga.so` (from `/oem/usr/lib` on the device) |
 | Reported version | `0.5.9` (`make build_release`, not a `-dev` build) |
 | Toolchain | `kvm-native-buildkit` from `jetkvm/rv1106-system` release `v0.2.8` (the "latest" asset at build time) |
