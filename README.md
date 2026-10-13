@@ -94,7 +94,7 @@ View modes (View menu ⌘1–⌘5, or the menu in the status bar), saved per dev
 | Mode | Shows the remote screen | Notes |
 |---|---|---|
 | Actual Size (default) | One remote pixel per point: the size a monitor of that resolution would show it | 2× on Retina, enlarged by the text upscaler (below). The remote resolution stays as it is; the window sizes itself to it, and a smaller window pans with the pointer. |
-| Scale to Fit | As large as the window allows | FSR when enlarging, a widened Catmull-Rom when shrinking |
+| Scale to Fit | As large as the window allows | The text upscaler when enlarging up to 3×, FSR beyond; a widened Catmull-Rom when shrinking |
 | Pixel for Pixel | One remote pixel per physical pixel | Tiny on Retina; for pixel inspection |
 | Largest Whole Multiple | The largest whole multiple that fits | Always exact (nearest-neighbor) pixels |
 | Match Window (opt-in) | The remote display takes the window's size, one remote pixel per point | Resize the window (or go full screen) and the target switches its resolution to match within a few seconds. Only for targets where the JetKVM is the only display; details below. |
@@ -103,9 +103,9 @@ View modes (View menu ⌘1–⌘5, or the menu in the status bar), saved per dev
 
 Full screen: the menu bar, and with it the window's title bar and buttons, slides in when the pointer rests at the top edge, so you can leave full screen with the mouse. The Dock stays hidden because the bottom edge belongs to the remote.
 
-**Enlarging, exactly 2× (Actual Size on Retina):** a small neural network trained on macOS text (`TextUpscaler.swift`, `tools/text-upscaler`). It learned from CoreText drawing the same layouts at 1× and natively at 2×. Glyphs come out closer to how a Retina screen draws them: SSIM against a native 2× rendering is 0.972 on text, against 0.955 for FSR. There are no stair steps and no blur. The smallest text (9–12 px) gains structure (SSIM 0.940 vs 0.934) but loses 0.5 dB PSNR against FSR (`tools/text-upscaler/README.md`). While the picture is unchanged it costs nothing extra; a GPU too slow for it falls back to FSR.
+**Enlarging up to 3× (Actual Size on Retina, Scale to Fit, full screen):** a small neural network trained on macOS text (`TextUpscaler.swift`). It learned from CoreText drawing the same layouts at 1× and at the target scale, with the glyphs where the 1× renderer put them, and predicts a 3×3 grid of sub-pixel detail per remote pixel, which the compose pass resamples to any scale. JetKVM recordings of the test pattern, replayed through the app at 2.5× (a 2400×1012 remote in full screen on a 40" 6016×2538 display), score 1.3–3.0 dB PSNR and 0.02–0.03 SSIM above FSR on every text region against the pattern drawn at that scale (light text 24.8 dB / 0.975 against 22.7 / 0.953). There are no stair steps and no blur. At that size typing costs 0.8 ms of GPU per frame (FSR 0.7). A frame that changes much of the picture (a window switch, scrolling) is drawn with FSR first, so it comes as soon as before, and the network sharpens the picture a tenth of a second after large changes stop. A GPU too slow for it falls back to FSR.
 
-**Enlarging at any other scale:** AMD FSR 1 (EASU edge-adaptive upscaling plus RCAS sharpening, `FSR.swift`).
+**Enlarging beyond 3×:** AMD FSR 1 (EASU edge-adaptive upscaling plus RCAS sharpening, `FSR.swift`).
 
 View › Exact Pixels at Whole-Number Scales switches to nearest-neighbor where the scale is a whole number. View › Scaling Filter swaps the enlargement filter for experiments (Automatic stays the default): FSR 1 with light, strong or no sharpening, Lanczos‑3, Catmull‑Rom, sharp bilinear, bilinear or nearest neighbor. Shrinking stays antialiased with any of them. View › Show Status Bar (⌘/) hides the status line in every window. A window keeps its picture size; in full screen the picture gains the line, and Match Window follows.
 

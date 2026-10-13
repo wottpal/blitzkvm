@@ -17,7 +17,7 @@ let package = Package(
         ),
         .testTarget(name: "JetKVMCoreTests", dependencies: ["JetKVMCore"]),
         // The renderer on the GPU (skipped without Metal).
-        .testTarget(name: "BlitzKVMTests", dependencies: ["BlitzKVM"]),
+        .testTarget(name: "BlitzKVMTests", dependencies: ["BlitzKVM"], resources: [.copy("Fixtures")]),
     ],
     swiftLanguageModes: [.v5]
 )

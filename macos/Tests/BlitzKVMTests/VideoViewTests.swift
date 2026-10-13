@@ -9,8 +9,7 @@ import XCTest
 final class VideoViewTests: XCTestCase {
     private struct Case {
         var name: String
-        /// Cycled per frame: switching filters (and the text upscaler at
-        /// exactly 2×) must redraw everything.
+        /// Cycled per frame: switching filters must redraw everything.
         var filters: [ScalingFilter]
         var mode: ScalingMode = .fit
         var drawable: (Int, Int)
@@ -42,16 +41,27 @@ final class VideoViewTests: XCTestCase {
             Case(name: "panned", filters: [.catmullRom, .catmullRom, .fsr], mode: .actualSize, drawable: (700, 300),
                  pans: [(0.3, 0.8), (0.3, 0.8), (0.3, 0.8), (0.6, 0.2)]),
             Case(name: "unguided chroma", filters: [.fsr], drawable: (1204, 600), chromaLocation: kCVImageBufferChromaLocation_TopLeft),
+            // The text upscaler (Automatic up to 3×): the 2400×1012 full
+            // screen on 6016×2538, Actual Size on Retina, and in between,
+            // letterboxed.
+            Case(name: "text upscaler at 2.5×", filters: [.automatic], drawable: (1204, 600)),
+            Case(name: "text upscaler at 2×", filters: [.automatic], drawable: (960, 404)),
+            Case(name: "text upscaler at 1.5×", filters: [.automatic], drawable: (760, 303)),
+            Case(name: "text upscaler, panned", filters: [.automatic], mode: .actualSize, drawable: (700, 300),
+                 pans: [(0.3, 0.8), (0.3, 0.8), (0.3, 0.8), (0.6, 0.2)]),
             // FSR's canvas must not build on a frame older than the upscaler's.
             Case(name: "text upscaler and FSR", filters: [.automatic, .fsr, .fsr, .automatic, .fsr, .easu], drawable: (960, 404)),
         ]
         var random = SplitMix64(seed: 0x5EED)
-        var partial = 0
+        var partial = 0, fsrFirst = 0
         let steps = 24
         for c in cases {
             var frame = try makeFrame(c, random: &random)
             let view = try makeView(c)
-            view.display(frame)
+            // Frames arrive at 60 Hz (large changes and the frames right
+            // after them are drawn with FSR).
+            var time: CFTimeInterval = 0
+            view.display(frame, at: time)
             _ = view.renderOffscreen(width: c.drawable.0, height: c.drawable.1)
             for step in 0..<steps {
                 view.scalingFilter = c.filters[step % c.filters.count]
@@ -59,20 +69,23 @@ final class VideoViewTests: XCTestCase {
                 // Sometimes two frames before a render: their changes add up.
                 for _ in 0..<(step % 3 == 2 ? 2 : 1) {
                     frame = try changed(frame, random: &random)
-                    view.display(frame)
+                    time += 1.0 / 60
+                    view.display(frame, at: time)
                 }
                 try assertRendersLikeAWholeFrame(view, c, frame, "\(c.name), frame \(step)")
                 if view.redrawnShare < 1 { partial += 1 }
+                if view.sharpenPending { fsrFirst += 1 }
             }
         }
         // Many frames drew only part of the canvas. The others drew all of
-        // it: after a change of filter, pan or path (the text upscaler), and
-        // for changes that reach everything (all new content, or changes far
-        // apart, which are drawn as one rectangle).
+        // it: after a change of filter, pan or path (FSR first for the text
+        // upscaler), and for changes that reach everything (all new content,
+        // or changes far apart, which are drawn as one rectangle).
         XCTAssertGreaterThan(partial, cases.count * steps / 4)
+        XCTAssertGreaterThan(fsrFirst, 0, "large changes drawn with FSR first")
     }
 
-    /// Frames drawn without the canvas (the text upscaler at exactly 2×)
+    /// Frames drawn straight into the target (after a change of filter)
     /// still count: the canvas must not just add the next change.
     func testCanvasCatchesUpWithFramesItDidNotDraw() throws {
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
@@ -97,12 +110,52 @@ final class VideoViewTests: XCTestCase {
         }
     }
 
+    /// A large change, and the frames shortly after it, are drawn with FSR;
+    /// a redraw of the same frame, small changes after a pause, and a still
+    /// refresh (every pixel a little) go through the text upscaler.
+    func testLargeChangesAreDrawnWithFSRFirst() throws {
+        guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("no Metal device") }
+        var random = SplitMix64(seed: 11)
+        let c = Case(name: "", filters: [.automatic], drawable: (1203, 507))
+        let view = try makeView(c)
+        var frame = try makeFrame(c, random: &random)
+        let all = PixelRect(width: width, height: height), word = PixelRect(x0: 200, y0: 90, x1: 230, y1: 100)
+        // Arrival time, change and its size per pixel (nil: a redraw
+        // without a new frame).
+        let steps: [(time: CFTimeInterval, change: (rect: PixelRect, by: Int)?, fsr: Bool)] = [
+            (0, (all, 100), true),            // the first frame
+            (0, nil, false),                  // drawn again: sharpened
+            (0.2, (all, 3), false),           // a still refresh: every pixel, a little
+            (0.2 + 1.0 / 60, (all, 100), true), // scrolling
+            (0.2 + 2.0 / 60, (all, 100), true),
+            (0.2 + 3.0 / 60, (word, 100), true), // typing right after a large change
+            (0.2 + 3.0 / 60, nil, false),
+            (0.7, (word, 100), false),        // typing
+            (0.7 + 1.0 / 60, (word, 100), false),
+            (1.2, (all, 100), true),          // a window switch
+            (1.2 + 1.0 / 60, (word, 100), true),
+            (1.4, (word, 100), false),
+        ]
+        for (step, (time, change, fsr)) in steps.enumerated() {
+            if let change {
+                frame = try copy(frame)
+                edit(frame, plane: 0, rect: change.rect, by: change.by)
+                view.display(frame, at: time)
+            }
+            try assertRendersLikeAWholeFrame(view, c, frame, "step \(step)")
+            XCTAssertEqual(view.sharpenPending, fsr, "step \(step)")
+        }
+    }
+
     private func assertRendersLikeAWholeFrame(_ view: VideoView, _ c: Case, _ frame: CVPixelBuffer, _ label: String) throws {
+        let got = try XCTUnwrap(view.renderOffscreen(width: c.drawable.0, height: c.drawable.1))
         let reference = try makeView(c)
-        reference.scalingFilter = view.scalingFilter
+        // Large changes are drawn with FSR first.
+        reference.scalingFilter = view.sharpenPending ? .fsr : view.scalingFilter
         reference.pan = view.pan
         reference.display(frame)
-        let got = try XCTUnwrap(view.renderOffscreen(width: c.drawable.0, height: c.drawable.1))
+        // A first frame is a large change: drawn again, it is sharpened.
+        _ = reference.renderOffscreen(width: c.drawable.0, height: c.drawable.1)
         let want = try XCTUnwrap(reference.renderOffscreen(width: c.drawable.0, height: c.drawable.1))
         guard memcmp(got, want, got.count * 4) != 0 else { return }
         let first = got.indices.first { got[$0] != want[$0] } ?? 0
@@ -129,6 +182,33 @@ final class VideoViewTests: XCTestCase {
         let tagged = try copy(frame)
         CVBufferSetAttachment(tagged, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4, .shouldPropagate)
         XCTAssertEqual(VideoView.changedRect(frame, tagged), PixelRect(width: width, height: height))
+    }
+
+    func testChangedShareCountsVisiblyChangedBlocks() throws {
+        var random = SplitMix64(seed: 13)
+        let c = Case(name: "", filters: [.fsr], drawable: (1, 1))
+        let frame = try makeFrame(c, random: &random)
+        let share = { (next: CVPixelBuffer) in VideoView.changedShare(frame, next, in: VideoView.changedRect(frame, next)) }
+        // 480×202 in 64×64 blocks: 8 × 4.
+        for (rect, blocks) in [(PixelRect(x0: 0, y0: 0, x1: 1, y1: 1), 1), (PixelRect(x0: 63, y0: 100, x1: 65, y1: 101), 2),
+                               (PixelRect(x0: 470, y0: 195, x1: 480, y1: 202), 1), (PixelRect(width: width, height: height), 32)] {
+            let next = try copy(frame)
+            edit(next, plane: 0, rect: rect, by: Int(VideoView.visibleDelta) + 1)
+            XCTAssertEqual(share(next), Double(blocks) / 32, "\(rect)")
+        }
+        // Two corners: their rectangle spans the frame, two blocks changed.
+        let corners = try copy(frame)
+        edit(corners, plane: 0, rect: PixelRect(x0: 0, y0: 0, x1: 4, y1: 4), by: 100)
+        edit(corners, plane: 0, rect: PixelRect(x0: 476, y0: 198, x1: 480, y1: 202), by: 100)
+        XCTAssertEqual(share(corners), 2.0 / 32)
+        // A still refresh: every pixel changed, none visibly.
+        let refreshed = try copy(frame)
+        edit(refreshed, plane: 0, rect: PixelRect(width: width, height: height), by: Int(VideoView.visibleDelta))
+        XCTAssertEqual(share(refreshed), 0)
+        // Luma only: a change of color alone is no large change.
+        let colored = try copy(frame)
+        edit(colored, plane: 1, rect: PixelRect(x0: 0, y0: 0, x1: 240, y1: 101), random: &random)
+        XCTAssertEqual(share(colored), 0)
     }
 
     private func makeView(_ c: Case) throws -> VideoView {
@@ -207,6 +287,21 @@ final class VideoViewTests: XCTestCase {
         return next
     }
 
+    /// Changes every sample of `rect` (in the plane's own samples) by
+    /// `delta`, towards the middle of the range.
+    private func edit(_ frame: CVPixelBuffer, plane: Int, rect: PixelRect, by delta: Int) {
+        CVPixelBufferLockBaseAddress(frame, [])
+        defer { CVPixelBufferUnlockBaseAddress(frame, []) }
+        let base = CVPixelBufferGetBaseAddressOfPlane(frame, plane)!.assumingMemoryBound(to: UInt8.self)
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(frame, plane), bytes = plane + 1
+        for y in rect.y0..<rect.y1 {
+            for i in rect.x0 * bytes..<rect.x1 * bytes {
+                let v = Int(base[y * stride + i])
+                base[y * stride + i] = UInt8(v < 128 ? v + delta : v - delta)
+            }
+        }
+    }
+
     /// Sets every sample of `rect` (in the plane's own samples) to `flat`,
     /// or changes each one by a random amount.
     private func edit(_ frame: CVPixelBuffer, plane: Int, rect: PixelRect, flat: UInt8? = nil, random: inout SplitMix64) {
@@ -232,7 +327,7 @@ final class VideoViewTests: XCTestCase {
 }
 
 /// A seeded generator: the same frames on every run.
-private struct SplitMix64: RandomNumberGenerator {
+struct SplitMix64: RandomNumberGenerator {
     var state: UInt64
 
     init(seed: UInt64) { state = seed }

@@ -258,4 +258,22 @@ final class RefreshPlannerTests: XCTestCase {
         XCTAssertFalse(RefreshPlanner.isLANLike(path: "internet", rttMs: 0))
         XCTAssertFalse(RefreshPlanner.isLANLike(path: nil, rttMs: 0))
     }
+
+    /// A key that changes two distant places (a page's square and its
+    /// counter): one region refresh with both, not a deferral because their
+    /// bounding box would cover most of the frame (seen on a JetKVM).
+    func testDistantChangesStayRegions() {
+        var p = planner()
+        let square = PixelRect(x0: 112, y0: 320, x1: 720, y1: 928), counter = PixelRect(x0: 1808, y0: 1008, x1: 1872, y1: 1040)
+        var sent: [RefreshPlanner.Refresh] = []
+        for i in 0...120 {
+            let t = 2 + Double(i) / 60
+            if i == 0 { p.input(at: t) }
+            p.frame(at: t, width: 1920, height: 1080, changed: i == 5 ? [square, counter] : [], keyframe: false)
+            if let r = p.decide(at: t) { sent.append(r) }
+        }
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent.first?.rects.count, 2)
+        XCTAssertFalse(sent.first?.isFull ?? true)
+    }
 }

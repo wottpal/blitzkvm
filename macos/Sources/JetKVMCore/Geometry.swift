@@ -26,7 +26,7 @@ public enum ScalingMode: String, CaseIterable {
 /// Shrinking always averages (antialiased); the choice matters for
 /// enlarging.
 public enum ScalingFilter: String, CaseIterable {
-    /// The learned text upscaler at exactly 2×, FSR 1 at other enlargements.
+    /// The learned text upscaler up to 3×, FSR 1 at larger enlargements.
     case automatic
     /// AMD FSR 1: edge-adaptive upscaling (EASU) plus light sharpening (RCAS).
     case fsr
@@ -48,7 +48,7 @@ public enum ScalingFilter: String, CaseIterable {
 
     public var menuTitle: String {
         switch self {
-        case .automatic: return "Automatic (Text Upscaler at 2×, FSR 1 Otherwise)"
+        case .automatic: return "Automatic (Text Upscaler up to 3×, FSR 1 Above)"
         case .fsr: return "FSR 1 (Edge-Adaptive, Light Sharpening)"
         case .fsrSharp: return "FSR 1, Strong Sharpening"
         case .easu: return "FSR 1, No Sharpening"

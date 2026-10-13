@@ -11,13 +11,19 @@ import simd
 ///
 /// The frame is converted to RGB at its own resolution (chroma reconstructed
 /// guided by luma, Catmull-Rom where that does not fit), then scaled into a 10-bit
-/// drawable at physical (Retina) resolution. Enlarged by exactly 2× (Actual
-/// Size on Retina), the picture goes through the learned text upscaler
-/// (TextUpscaler.swift); other enlargements use AMD FSR 1 (EASU edge-adaptive
-/// upscaling, then RCAS sharpening), which keeps 1× remote text crisp without
+/// drawable at physical (Retina) resolution. Enlarged by more than 1× and up
+/// to 3× (Actual Size on Retina, a full-screen window on a large display),
+/// the picture goes through the learned text upscaler (TextUpscaler.swift);
+/// larger enlargements use AMD FSR 1 (EASU edge-adaptive upscaling, then
+/// RCAS sharpening), which keeps 1× remote text crisp without
 /// nearest-neighbor stair steps or bilinear blur. Shrinking uses a widened
 /// Catmull-Rom (antialiased). "Exact Pixels" uses nearest-neighbor at
 /// whole-number scales instead.
+///
+/// A frame that changes much of the picture (a window switch, scrolling) is
+/// drawn with FSR first, at half the text upscaler's cost for a whole
+/// picture, and so are the frames that follow it closely; once large
+/// changes stop, the next frame or a redraw goes through the text upscaler.
 ///
 /// Typing or a moving pointer changes a few dozen pixels of the remote
 /// screen. Every pass keeps its output between frames and redraws only the
@@ -78,6 +84,10 @@ class VideoView: NSView {
         var frameSerial: UInt64 = 0
         /// Where the latest frames changed (luma pixels), oldest first.
         var changes: [(serial: UInt64, rect: PixelRect)] = []
+        /// `frame` changed much of the picture, or came less than
+        /// `sharpenDelay` after a frame that did (when the last one came).
+        var largeChange = false
+        var lastLargeChange: CFTimeInterval?
         var renderPending = false
         var presented = 0
         var unchanged = 0
@@ -106,8 +116,17 @@ class VideoView: NSView {
     private var scalePipeline: MTLRenderPipelineState!
     private var easuPipeline: MTLRenderPipelineState!
     private var rcasPipeline: MTLRenderPipelineState!
-    private var compose2xPipeline: MTLRenderPipelineState!
-    private lazy var textUpscaler = TextUpscaler(device: device)
+    private var quadVertex: MTLFunction!
+    /// The text upscaler and its compose pass (our quad vertex, its fragment),
+    /// made on first use; nil where they do not build.
+    private lazy var textUpscaler: (upscaler: TextUpscaler, compose: MTLRenderPipelineState)? = {
+        guard let upscaler = TextUpscaler(device: device) else { return nil }
+        let d = MTLRenderPipelineDescriptor()
+        d.vertexFunction = quadVertex
+        d.fragmentFunction = upscaler.composeFunction
+        d.colorAttachments[0].pixelFormat = metalLayer.pixelFormat
+        return (try? device.makeRenderPipelineState(descriptor: d)).map { (upscaler, $0) }
+    }()
     private var chromaSitedPipeline: MTLComputePipelineState!
     private var chromaFitPipeline: MTLComputePipelineState!
     private var chromaFitMeanPipeline: MTLComputePipelineState!
@@ -125,6 +144,9 @@ class VideoView: NSView {
     /// VideoToolbox recycles buffers.)
     private var convertedSerial: UInt64 = 0
     private var convertedParams: ColorParams?
+    /// The pixels converted since the text upscaler's network last ran
+    /// (nil: any): only those can differ from what it saw.
+    private var upscalerStale: PixelRect?
     /// EASU output, sized to the visible part of the scaled video.
     private var easuTexture: MTLTexture?
     /// The scaled picture (the visible part of the video), kept between
@@ -137,6 +159,9 @@ class VideoView: NSView {
     /// The share of the canvas the last render drew (GPU timing and tests;
     /// 1 for pictures drawn without it).
     private(set) var redrawnShare = 1.0
+    /// The last render drew a large change with FSR instead of the text
+    /// upscaler (`render` redraws it once large changes stop).
+    private(set) var sharpenPending = false
 
     /// How the canvas was drawn: any difference redraws all of it.
     private struct CanvasKey: Equatable {
@@ -152,6 +177,8 @@ class VideoView: NSView {
         case fsr(Float)
         /// EASU alone: its output is the canvas.
         case easu
+        /// The text upscaler's network, then its compose pass.
+        case textUpscaler
         /// scale_fragment's filter.
         case filter(Int32)
     }
@@ -159,10 +186,21 @@ class VideoView: NSView {
     /// without a dark rim around light text on dark backgrounds.
     /// BLITZKVM_RCAS_STOPS overrides it (A/B checks).
     private static let rcasStops = Float(ProcessInfo.processInfo.environment["BLITZKVM_RCAS_STOPS"] ?? "") ?? 0.5
-    /// BLITZKVM_UPSCALER=fsr uses FSR at 2× too, =catmull enlarges with
-    /// Catmull-Rom instead of FSR (A/B checks).
+    /// BLITZKVM_UPSCALER=fsr uses FSR instead of the text upscaler,
+    /// =catmull enlarges with Catmull-Rom instead of either (A/B checks).
     private static let fsrUpscaling = ProcessInfo.processInfo.environment["BLITZKVM_UPSCALER"] != "catmull"
     private static let textUpscaling = fsrUpscaling && ProcessInfo.processInfo.environment["BLITZKVM_UPSCALER"] != "fsr"
+    /// A frame whose luma changed visibly in more than this share of the
+    /// picture's 64×64-pixel blocks (`changedShare`), and the frames less
+    /// than `sharpenDelay` after it, are drawn with FSR, and the text
+    /// upscaler redraws the picture once no large change came for that long.
+    /// Through the network, a whole new picture costs an M4 Max 11 ms of GPU
+    /// at 6016×2538, FSR 5, and scrolling 7.8 ms a frame, close to the
+    /// slow-GPU fallback's budget; a change of a seventh of the picture added
+    /// 3 ms to decode-to-screen. So anything above a tenth comes sooner
+    /// through FSR; typing and the pointer go through the upscaler directly.
+    private static let largeChangeShare = 0.1
+    private static let sharpenDelay: CFTimeInterval = 0.1
 
     private static let shaderSource = """
     #include <metal_stdlib>
@@ -360,23 +398,6 @@ class VideoView: NSView {
         return float4(saturate(rgb), 1.0);
     }
 
-    struct ComposeParams { float2 origin; int2 regionOrigin; };
-
-    // Exactly 2x with the text upscaler (TextUpscaler.swift): bilinear RGB
-    // plus the network's sub-pixel luma detail on every channel (luma
-    // changes, chroma stays).
-    fragment float4 compose2x_fragment(VOut in [[stage_in]],
-                                       texture2d<float> rgb [[texture(0)]],
-                                       texture2d<half, access::read> detail [[texture(1)]],
-                                       sampler s [[sampler(0)]],
-                                       constant ComposeParams &p [[buffer(0)]]) {
-        float2 d = in.position.xy - p.origin;
-        float3 c = rgb.sample(s, d * 0.5 / float2(rgb.get_width(), rgb.get_height())).rgb;
-        int2 sub = int2(floor(d)) & 1;
-        float r = float(detail.read(uint2(int2(floor(d * 0.5)) - p.regionOrigin))[sub.y * 2 + sub.x]);
-        return float4(saturate(c + r), 1.0);
-    }
-
     // filter: 0 nearest, 1 Catmull-Rom, 2 Lanczos-3, 3 bilinear, 4 sharp
     // bilinear (area-weighted nearest).
     struct ScaleParams { float2 origin; float2 scale; int filter; };
@@ -504,9 +525,10 @@ class VideoView: NSView {
 
     private func buildPipelines() throws {
         let library = try device.makeLibrary(source: Self.shaderSource, options: nil)
+        quadVertex = library.makeFunction(name: "quad_vertex")
         func pipeline(_ fragment: String, _ format: MTLPixelFormat) throws -> MTLRenderPipelineState {
             let d = MTLRenderPipelineDescriptor()
-            d.vertexFunction = library.makeFunction(name: "quad_vertex")
+            d.vertexFunction = quadVertex
             d.fragmentFunction = library.makeFunction(name: fragment)
             d.colorAttachments[0].pixelFormat = format
             return try device.makeRenderPipelineState(descriptor: d)
@@ -520,7 +542,6 @@ class VideoView: NSView {
         chromaFitMeanPipeline = try kernel("chroma_fit_mean")
         chromaResidualPipeline = try kernel("chroma_residual")
         scalePipeline = try pipeline("scale_fragment", metalLayer.pixelFormat)
-        compose2xPipeline = try pipeline("compose2x_fragment", metalLayer.pixelFormat)
         // FSR keeps upstream's code in a library of its own; exact resolve
         // keeps flat areas exactly flat (upstream darkens white by 0.2%).
         let options = MTLCompileOptions()
@@ -585,25 +606,39 @@ class VideoView: NSView {
     /// to the current one is not drawn: a still screen streams 60 frames a
     /// second, and each would cost a full upscale and a composite (a third
     /// of an M4 Max GPU in a 6016×2538 window), and a changed one redraws
-    /// only where it changed. Called on one thread. Returns where the frame
-    /// differs from the one before, in its pixels.
+    /// only where it changed. Called on one thread, `time` being when the
+    /// frame arrived. Returns where the frame differs from the one before
+    /// (in its pixels) and which part of that is visible: the device's
+    /// encoder keeps re-coding a still picture by a few code values (about
+    /// 2,500 pixels a frame on a desktop), which is no change to act on.
     @discardableResult
-    func display(_ pixelBuffer: CVPixelBuffer) -> PixelRect {
+    func display(_ pixelBuffer: CVPixelBuffer, at time: CFTimeInterval = CACurrentMediaTime()) -> Shown {
         let current = state.withLock { $0.frame }
         let changed = current.map { Self.changedRect($0, pixelBuffer) }
             ?? PixelRect(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
         if changed.isEmpty {
             state.withLock { $0.unchanged += 1 }
-            return changed
+            return Shown(changed: changed, visible: [])
         }
+        let visible = current.map { Self.visibleChange($0, pixelBuffer, in: changed) } ?? (share: 1, rects: [changed])
+        let large = visible.share > Self.largeChangeShare
         state.withLock {
             $0.frame = pixelBuffer
             $0.frameSerial &+= 1
             $0.changes.append(($0.frameSerial, changed))
             if $0.changes.count > Self.changeHistory { $0.changes.removeFirst() }
+            if large { $0.lastLargeChange = time }
+            $0.largeChange = $0.lastLargeChange.map { time - $0 < Self.sharpenDelay } == true
         }
         redraw()
-        return changed
+        return Shown(changed: changed, visible: visible.rects)
+    }
+
+    /// What `display` found: the changed pixels, and the 64×64 blocks among
+    /// them that changed visibly (more than `visibleDelta`).
+    struct Shown {
+        var changed: PixelRect
+        var visible: [PixelRect]
     }
 
     /// Where two decoded NV12 frames differ, in luma pixels of `b`: empty
@@ -615,15 +650,7 @@ class VideoView: NSView {
     static func changedRect(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> PixelRect {
         let all = PixelRect(width: CVPixelBufferGetWidth(b), height: CVPixelBufferGetHeight(b))
         if a === b { return .empty }
-        let format = CVPixelBufferGetPixelFormatType(a)
-        guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-              CVPixelBufferGetPixelFormatType(b) == format,
-              CVPixelBufferGetWidth(a) == all.width, CVPixelBufferGetHeight(a) == all.height,
-              CVPixelBufferGetPlaneCount(a) == 2, CVPixelBufferGetPlaneCount(b) == 2 else { return all }
-        for key in [kCVImageBufferYCbCrMatrixKey, kCVImageBufferChromaLocationTopFieldKey] {
-            guard CVBufferCopyAttachment(a, key, nil) as? String == CVBufferCopyAttachment(b, key, nil) as? String else { return all }
-        }
-        guard CVPixelBufferLockBaseAddress(a, .readOnly) == kCVReturnSuccess else { return all }
+        guard comparable(a, b), CVPixelBufferLockBaseAddress(a, .readOnly) == kCVReturnSuccess else { return all }
         defer { CVPixelBufferUnlockBaseAddress(a, .readOnly) }
         guard CVPixelBufferLockBaseAddress(b, .readOnly) == kCVReturnSuccess else { return all }
         defer { CVPixelBufferUnlockBaseAddress(b, .readOnly) }
@@ -650,6 +677,81 @@ class VideoView: NSView {
                                                : PixelRect(x0: lo / 2 * 2, y0: top * 2, x1: (hi + 1) / 2 * 2, y1: (bottom + 1) * 2))
         }
         return changed.intersection(all)
+    }
+
+    /// The share of `b`'s 64×64-pixel blocks in which some pixel's luma
+    /// changed visibly since `a` (by more than `visibleDelta`), looking only
+    /// inside `rect` (where `changedRect` found the change); 1 for frames
+    /// that cannot be compared. A block stops at its first visible change,
+    /// so a whole-frame change costs about one row per block.
+    static func changedShare(_ a: CVPixelBuffer, _ b: CVPixelBuffer, in rect: PixelRect) -> Double {
+        visibleChange(a, b, in: rect).share
+    }
+
+    /// The share as above, and the blocks that changed visibly (runs of
+    /// neighbours in a row joined).
+    static func visibleChange(_ a: CVPixelBuffer, _ b: CVPixelBuffer, in rect: PixelRect) -> (share: Double, rects: [PixelRect]) {
+        let size = 64
+        let all = PixelRect(width: CVPixelBufferGetWidth(b), height: CVPixelBufferGetHeight(b))
+        guard comparable(a, b), CVPixelBufferLockBaseAddress(a, .readOnly) == kCVReturnSuccess else { return (1, [all]) }
+        defer { CVPixelBufferUnlockBaseAddress(a, .readOnly) }
+        guard CVPixelBufferLockBaseAddress(b, .readOnly) == kCVReturnSuccess else { return (1, [all]) }
+        defer { CVPixelBufferUnlockBaseAddress(b, .readOnly) }
+        guard let pa = CVPixelBufferGetBaseAddressOfPlane(a, 0), let pb = CVPixelBufferGetBaseAddressOfPlane(b, 0) else { return (1, [all]) }
+        let strideA = CVPixelBufferGetBytesPerRowOfPlane(a, 0), strideB = CVPixelBufferGetBytesPerRowOfPlane(b, 0)
+        let area = rect.intersection(all), cells = area.cells(of: size)
+        var changed = 0, rects: [PixelRect] = []
+        for y in cells.y0..<cells.y1 {
+            var run = PixelRect.empty
+            for x in cells.x0..<cells.x1 {
+                let block = PixelRect(x0: x * size, y0: y * size, x1: (x + 1) * size, y1: (y + 1) * size).intersection(area)
+                let visible = (block.y0..<block.y1).contains {
+                    changesVisibly(pa + $0 * strideA + block.x0, pb + $0 * strideB + block.x0, count: block.width)
+                }
+                if visible {
+                    changed += 1
+                    run = run.union(block)
+                } else if !run.isEmpty {
+                    rects.append(run)
+                    run = .empty
+                }
+            }
+            if !run.isEmpty { rects.append(run) }
+        }
+        let blocks = all.cells(of: size)
+        return (Double(changed) / Double(blocks.width * blocks.height), rects)
+    }
+
+    /// The still refresh re-encodes the same picture: in JetKVM recordings,
+    /// 90% of the blocks it changes change by 2–21 code values, against 220
+    /// for scrolling or a window switch, which move edges.
+    static let visibleDelta: UInt8 = 32
+
+    /// Whether some byte of two rows differs by more than `visibleDelta`.
+    private static func changesVisibly(_ a: UnsafeRawPointer, _ b: UnsafeRawPointer, count: Int) -> Bool {
+        let limit = SIMD16<UInt8>(repeating: visibleDelta)
+        var i = 0
+        while i + 16 <= count {
+            let x = a.loadUnaligned(fromByteOffset: i, as: SIMD16<UInt8>.self), y = b.loadUnaligned(fromByteOffset: i, as: SIMD16<UInt8>.self)
+            if any(pointwiseMax(x, y) &- pointwiseMin(x, y) .> limit) { return true }
+            i += 16
+        }
+        return (i..<count).contains {
+            abs(Int(a.load(fromByteOffset: $0, as: UInt8.self)) - Int(b.load(fromByteOffset: $0, as: UInt8.self))) > Int(visibleDelta)
+        }
+    }
+
+    /// Whether two decoded frames can be compared byte for byte: NV12 of the
+    /// same size and colorimetry.
+    private static func comparable(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> Bool {
+        let format = CVPixelBufferGetPixelFormatType(a)
+        guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+              CVPixelBufferGetPixelFormatType(b) == format,
+              CVPixelBufferGetWidth(a) == CVPixelBufferGetWidth(b), CVPixelBufferGetHeight(a) == CVPixelBufferGetHeight(b),
+              CVPixelBufferGetPlaneCount(a) == 2, CVPixelBufferGetPlaneCount(b) == 2 else { return false }
+        return [kCVImageBufferYCbCrMatrixKey, kCVImageBufferChromaLocationTopFieldKey].allSatisfy {
+            CVBufferCopyAttachment(a, $0, nil) as? String == CVBufferCopyAttachment(b, $0, nil) as? String
+        }
     }
 
     /// The first byte offset in `range` where the two rows differ.
@@ -725,6 +827,14 @@ class VideoView: NSView {
             if let layout { $0.layout = layout }
             if s.frame != nil { $0.presented += 1 }
         }
+        // A large change that stays on screen is drawn again, sharp: no later
+        // frame may come (a still screen repeats the same picture).
+        if sharpenPending {
+            renderQueue.asyncAfter(deadline: .now() + Self.sharpenDelay) { [weak self, serial = s.frameSerial] in
+                guard let self, self.state.withLock({ $0.frameSerial == serial }) else { return }
+                self.redraw()
+            }
+        }
     }
 
     /// BLITZKVM_GPU_TIMING=1 logs the average GPU time per rendered frame,
@@ -733,10 +843,11 @@ class VideoView: NSView {
     private let gpuTimes = Locked((total: 0.0, count: 0, redrawn: 0.0, upscaledTotal: 0.0, upscaledCount: 0, slowWindows: 0))
     /// Set when frames with the text upscaler take too long on this GPU.
     private let textUpscalerTooSlow = Locked(false)
-    /// The text upscaler costs about 2 ms per frame on an M4 Max for a
-    /// 3000×2000 view. A GPU that needs more than this for whole frames that
-    /// ran it, over three windows of 120 frames in a row (not a moment of
-    /// contention), falls back to FSR for the rest of the session.
+    /// Frames through the text upscaler cost an M4 Max 0.8 ms GPU for typing
+    /// and 11 ms when everything changed (6016×2538 from 2400×1012). A GPU
+    /// that needs more than this for whole frames that ran it, over three
+    /// windows of 120 frames in a row (not a moment of contention), falls
+    /// back to FSR for the rest of the session.
     private static let frameBudget = 0.008
 
     private func recordGPUTime(_ seconds: Double, upscaled: Bool, redrawn: Double) {
@@ -770,6 +881,9 @@ class VideoView: NSView {
         let size = CGSize(width: target.width, height: target.height)
         // The canvas can build on the frame converted before this one.
         let previousSerial = convertedSerial
+        // A large change is drawn with FSR once; a redraw of the same frame
+        // sharpens it.
+        let largeChange = s.largeChange && s.frameSerial != convertedSerial
         var source: MTLTexture?
         var converted = PixelRect.empty
         if let frame = s.frame {
@@ -779,9 +893,11 @@ class VideoView: NSView {
                       let region = convert(s, luma: luma, chroma: chroma, commandBuffer: commandBuffer) {
                 source = rgbTexture
                 converted = region
+                upscalerStale = upscalerStale?.union(region)
             }
         }
         redrawnShare = 1
+        sharpenPending = false
         var layout: VideoLayout?
         // The final pass: the visible rect, drawn by `draw`.
         var rect = SIMD4<Float>()
@@ -801,42 +917,32 @@ class VideoView: NSView {
                 // Whole-multiple mode exists for exact pixels; elsewhere it is a preference.
                 let exactNearest = l.nearest && (s.exactPixels || s.mode == .integer)
                 let fsrFilter = [.automatic, .fsr, .fsrSharp, .easu].contains(s.filter)
-                let upscale = s.filter == .automatic && Self.textUpscaling && abs(scale - 2) < 0.0001 && !exactNearest
-                    && !textUpscalerTooSlow.withLock({ $0 })
-                state.withLock { $0.textUpscaling = upscale }
-                if upscale, let upscaler = textUpscaler,
-                   let (detail, regionOrigin) = enlarge2x(upscaler, source: source, layout: l, visible: visible,
-                                                          commandBuffer: commandBuffer) {
-                    var params = ComposeParams(origin: SIMD2(Float(l.x), Float(l.y)), regionOrigin: regionOrigin)
-                    draw = { encoder in
-                        encoder.setRenderPipelineState(self.compose2xPipeline)
-                        encoder.setFragmentTexture(source, index: 0)
-                        encoder.setFragmentTexture(detail, index: 1)
-                        encoder.setFragmentSamplerState(self.linearClampSampler, index: 0)
-                        encoder.setFragmentBytes(&params, length: MemoryLayout<ComposeParams>.stride, index: 0)
-                    }
+                let upscale = s.filter == .automatic && Self.textUpscaling && !identity && scale > 1 && scale <= TextUpscaler.maxScale
+                    && !exactNearest && !textUpscalerTooSlow.withLock({ $0 }) && textUpscaler != nil
+                sharpenPending = upscale && largeChange
+                state.withLock { $0.textUpscaling = upscale && !largeChange }
+                let resample: Resample
+                if upscale {
+                    resample = largeChange ? .fsr(Self.rcasStops) : .textUpscaler
+                } else if fsrFilter, Self.fsrUpscaling || s.filter != .automatic, scale >= 1 && !identity && !exactNearest {
+                    resample = s.filter == .easu ? .easu : .fsr(s.filter == .fsrSharp ? 0 : Self.rcasStops)
                 } else {
-                    let resample: Resample
-                    if fsrFilter, Self.fsrUpscaling || s.filter != .automatic, scale >= 1 && !identity && !exactNearest {
-                        resample = s.filter == .easu ? .easu : .fsr(s.filter == .fsrSharp ? 0 : Self.rcasStops)
-                    } else {
-                        // Exact pixels and FSR's identity case use nearest; the
-                        // chosen kernel otherwise (FSR filters shrink with
-                        // Catmull-Rom).
-                        switch s.filter {
-                        case _ where exactNearest || (identity && fsrFilter): resample = .filter(0)
-                        case .automatic where !Self.fsrUpscaling: resample = .filter(1)
-                        case .automatic, .fsr, .fsrSharp, .easu: resample = .filter(scale >= 1 ? 0 : 1)
-                        case .nearest: resample = .filter(0)
-                        case .catmullRom: resample = .filter(1)
-                        case .lanczos: resample = .filter(2)
-                        case .bilinear: resample = .filter(3)
-                        case .sharpBilinear: resample = .filter(4)
-                        }
+                    // Exact pixels and FSR's identity case use nearest; the
+                    // chosen kernel otherwise (FSR filters shrink with
+                    // Catmull-Rom).
+                    switch s.filter {
+                    case _ where exactNearest || (identity && fsrFilter): resample = .filter(0)
+                    case .automatic where !Self.fsrUpscaling: resample = .filter(1)
+                    case .automatic, .fsr, .fsrSharp, .easu: resample = .filter(scale >= 1 ? 0 : 1)
+                    case .nearest: resample = .filter(0)
+                    case .catmullRom: resample = .filter(1)
+                    case .lanczos: resample = .filter(2)
+                    case .bilinear: resample = .filter(3)
+                    case .sharpBilinear: resample = .filter(4)
                     }
-                    let key = CanvasKey(layout: l, visible: visible, sourceWidth: source.width, sourceHeight: source.height, resample: resample)
-                    draw = self.scale(source: source, key: key, changed: converted, since: previousSerial, commandBuffer: commandBuffer)
                 }
+                let key = CanvasKey(layout: l, visible: visible, sourceWidth: source.width, sourceHeight: source.height, resample: resample)
+                draw = self.scale(source: source, key: key, changed: converted, since: previousSerial, commandBuffer: commandBuffer)
             }
         }
         let pass = MTLRenderPassDescriptor()
@@ -858,18 +964,20 @@ class VideoView: NSView {
     private typealias Draw = (MTLRenderCommandEncoder) -> Void
 
     /// Runs the text upscaler over the source pixels behind the visible part
-    /// of a 2× layout (plus the network's margin); returns its detail texture
-    /// and the source pixel its texel (0, 0) belongs to.
-    private func enlarge2x(_ upscaler: TextUpscaler, source: MTLTexture, layout l: VideoLayout, visible: PixelRect,
-                           commandBuffer: MTLCommandBuffer) -> (MTLTexture, SIMD2<Int32>)? {
-        let (x0, y0, x1, y1) = (Double(visible.x0), Double(visible.y0), Double(visible.x1), Double(visible.y1))
-        let m = TextUpscaler.margin
-        let sx0 = max(Int(((x0 - l.x) / 2).rounded(.down)) - m, 0), sy0 = max(Int(((y0 - l.y) / 2).rounded(.down)) - m, 0)
-        let sx1 = min(Int(((x1 - l.x) / 2).rounded(.up)) + m, source.width), sy1 = min(Int(((y1 - l.y) / 2).rounded(.up)) + m, source.height)
+    /// of the layout (plus the network's margin); returns its detail texture
+    /// and the source pixel its first sub-pixel block belongs to.
+    private func enlarge(_ upscaler: TextUpscaler, source: MTLTexture, key: CanvasKey,
+                         commandBuffer: MTLCommandBuffer) -> (MTLTexture, SIMD2<Int32>)? {
+        let l = key.layout, v = key.visible, m = TextUpscaler.margin
+        let sx = l.width / Double(source.width), sy = l.height / Double(source.height)
+        let sx0 = max(Int(((Double(v.x0) - l.x) / sx).rounded(.down)) - m, 0), sy0 = max(Int(((Double(v.y0) - l.y) / sy).rounded(.down)) - m, 0)
+        let sx1 = min(Int(((Double(v.x1) - l.x) / sx).rounded(.up)) + m, source.width)
+        let sy1 = min(Int(((Double(v.y1) - l.y) / sy).rounded(.up)) + m, source.height)
         guard sx1 > sx0, sy1 > sy0 else { return nil }
         let origin = SIMD2<Int32>(Int32(sx0), Int32(sy0))
-        guard let detail = upscaler.encode(rgb: source, origin: origin, width: sx1 - sx0, height: sy1 - sy0,
+        guard let detail = upscaler.encode(rgb: source, origin: origin, width: sx1 - sx0, height: sy1 - sy0, dirty: upscalerStale,
                                            commandBuffer: commandBuffer) else { return nil }
+        upscalerStale = .empty
         return (detail, origin)
     }
 
@@ -887,9 +995,11 @@ class VideoView: NSView {
         let l = key.layout
         let scale = l.width / Double(key.sourceWidth)
         // The widest taps (Lanczos-3, EASU's 4×4) reach 3 source pixels,
-        // widened by 1/scale when shrinking (at most 12), plus one to spare;
-        // then two canvas pixels for RCAS's neighbors and rounding.
-        let reach = min(3 / min(scale, 1), 12) + 1
+        // widened by 1/scale when shrinking (at most 12), the text upscaler
+        // its margin (the network's receptive field, then the footprint),
+        // plus one to spare; then two canvas pixels for RCAS's neighbors and
+        // rounding.
+        let reach = (key.resample == .textUpscaler ? Double(TextUpscaler.margin) : min(3 / min(scale, 1), 12)) + 1
         let reached = l.destinationRect(of: changed, videoWidth: key.sourceWidth, videoHeight: key.sourceHeight, reach: reach)
             .offsetBy(dx: -key.visible.x0, dy: -key.visible.y0).outset(by: 2).intersection(all)
         let direct = key.resample != .easu && (reached == all || key != previousKey)
@@ -898,8 +1008,10 @@ class VideoView: NSView {
         previousKey = key
         canvasContent = nil
         redrawnShare = Double(region.width * region.height) / Double(w * h)
-        // The target pixel that canvas pixel (0, 0) stands for.
+        // The target pixel that canvas pixel (0, 0) stands for, and where the
+        // video's top-left corner lies in the pass's target.
         let corner = direct ? (x: key.visible.x0, y: key.visible.y0) : (x: 0, y: 0)
+        let origin = SIMD2(Float(l.x - Double(key.visible.x0 - corner.x)), Float(l.y - Double(key.visible.y0 - corner.y)))
         let draw: Draw
         switch key.resample {
         case .fsr(let stops):
@@ -917,9 +1029,21 @@ class VideoView: NSView {
                   easuPass(source: source, key: key, into: easu, region: region, commandBuffer: commandBuffer) else { return nil }
             canvasContent = (convertedSerial, key)
             return copy(easu, to: key.visible)
+        case .textUpscaler:
+            guard let (upscaler, compose) = textUpscaler,
+                  let (detail, regionOrigin) = enlarge(upscaler, source: source, key: key, commandBuffer: commandBuffer) else { return nil }
+            var params = TextUpscaler.ComposeParams(origin: origin, regionOrigin: regionOrigin,
+                                                    frame: SIMD2(Int32(source.width), Int32(source.height)),
+                                                    scale: SIMD2(l.width / Double(source.width), l.height / Double(source.height)), n: upscaler.n)
+            draw = { encoder in
+                encoder.setRenderPipelineState(compose)
+                encoder.setFragmentTexture(source, index: 0)
+                encoder.setFragmentTexture(detail, index: 1)
+                encoder.setFragmentSamplerState(self.linearClampSampler, index: 0)
+                encoder.setFragmentBytes(&params, length: MemoryLayout<TextUpscaler.ComposeParams>.stride, index: 0)
+            }
         case .filter(let filter):
-            var params = ScaleParams(origin: SIMD2(Float(l.x - Double(key.visible.x0 - corner.x)), Float(l.y - Double(key.visible.y0 - corner.y))),
-                                     scale: SIMD2(repeating: Float(scale)), filter: filter)
+            var params = ScaleParams(origin: origin, scale: SIMD2(repeating: Float(scale)), filter: filter)
             draw = { encoder in
                 encoder.setRenderPipelineState(self.scalePipeline)
                 encoder.setFragmentTexture(source, index: 0)
@@ -1185,11 +1309,6 @@ class VideoView: NSView {
         var origin: SIMD2<Float>
         var scale: SIMD2<Float>
         var filter: Int32
-    }
-
-    struct ComposeParams {
-        var origin: SIMD2<Float>
-        var regionOrigin: SIMD2<Int32>
     }
 
     /// Video-range YCbCr → RGB, and where chroma sits relative to luma:

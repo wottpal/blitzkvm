@@ -178,7 +178,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             }
             guard !held else { return }
             let shown = self.videoView.display(buffer)
-            self.stillRefresh.frameShown(width: Int(size.width), height: Int(size.height), changed: shown, keyframe: header.keyframe)
+            // The encoder's re-coding of a still picture is no change to refresh.
+            self.stillRefresh.frameShown(width: Int(size.width), height: Int(size.height),
+                                         changed: shown.visible, keyframe: header.keyframe)
             self.shownAt.withLock { $0 = now }
             let changed = self.videoSize.withLock { current -> Bool in
                 guard current != size else { return false }

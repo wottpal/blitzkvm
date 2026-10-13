@@ -167,6 +167,12 @@ public struct RefreshPlanner {
     /// A frame was shown: `changed` is where it differs from the one before
     /// (empty: the same picture).
     public mutating func frame(at time: TimeInterval, width: Int, height: Int, changed: PixelRect, keyframe: Bool) {
+        frame(at: time, width: width, height: height, changed: changed.isEmpty ? [] : [changed], keyframe: keyframe)
+    }
+
+    /// A frame was shown: `changed` are the places it differs from the one
+    /// before (none: the same picture).
+    public mutating func frame(at time: TimeInterval, width: Int, height: Int, changed rects: [PixelRect], keyframe: Bool) {
         let whole = PixelRect(width: width, height: height)
         guard whole == frame else {
             frame = whole
@@ -181,12 +187,13 @@ public struct RefreshPlanner {
             return
         }
         // Any other keyframe (session start, loss repair) re-encodes it all.
-        let change = keyframe ? frame : changed.intersection(frame)
+        let parts = keyframe ? [frame] : rects.map { $0.intersection(frame) }.filter { !$0.isEmpty }
+        let change = parts.reduce(PixelRect.empty) { $0.union($1) }
         guard !change.isEmpty else { return }
         if !keyframe, let e = echo, !inputHeld, lastInput < e.issued, e.area.contains(change) { return }
         let followsInput = inputHeld || time - lastInput < tuning.inputEcho
-        if !keyframe && !followsInput && change.area < tuning.minorArea { return }
-        Self.add(aligned(change), to: &dirty)
+        if !keyframe && !followsInput && parts.reduce(0, { $0 + $1.area }) < tuning.minorArea { return }
+        for part in parts { Self.add(aligned(part), to: &dirty) }
         fullDirty = true
         lastChange = time
     }

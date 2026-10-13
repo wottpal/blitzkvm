@@ -81,7 +81,7 @@ final class StillRefresh {
 
     /// A frame reached the view; `changed` is where it differs from the one
     /// before (decoder thread).
-    func frameShown(width: Int, height: Int, changed: PixelRect, keyframe: Bool) {
+    func frameShown(width: Int, height: Int, changed: [PixelRect], keyframe: Bool) {
         let refresh = state.withLock { s -> RefreshPlanner.Refresh? in
             guard s.active else { return nil }
             let now = Self.now
@@ -102,3 +102,4 @@ final class StillRefresh {
         }
     }
 }
+

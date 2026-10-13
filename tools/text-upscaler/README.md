@@ -2,6 +2,8 @@
 
 The app enlarges the remote picture exactly 2× (Actual Size on a Retina screen) with a small convolutional network instead of FSR: `macos/Sources/BlitzKVM/TextUpscaler.swift`, weights in `TextUpscalerWeights.swift`. These two scripts make the weights.
 
+**Superseded:** these scripts train the earlier 2× network (2×2 sub-pixels per remote pixel). The app now enlarges any scale up to 3× with a 3×3 sub-pixel grid and area resampling (`TextUpscalerWeights.n = 3`), trained by a pipeline that is not in this directory yet. Its weights must not be replaced with this trainer's output; with `TextUpscaler.Weights(n: 2, …)` the app's code reproduces the earlier 2× upscaler bit for bit.
+
 | File | Purpose |
 |---|---|
 | `gen.swift` | Random desktop-like scenes (fonts, sizes 9–28 px, light, dark and colored backgrounds, buttons, lines, gradients), drawn by CoreText at 1× and natively at 2× with the same layout |
