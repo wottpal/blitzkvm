@@ -1190,6 +1190,18 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         [.fullScreen, .hideDock, .autoHideMenuBar]
     }
 
+    /// Full screen can't be resized, but a resizable window still takes a
+    /// press on its last point or two as the start of a resize, so a press
+    /// at the screen's edge never reached the remote (a window's resize edge
+    /// there, a hot corner). The window is resizable only outside full screen.
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        window?.styleMask.remove(.resizable)
+    }
+
+    func windowWillExitFullScreen(_ notification: Notification) {
+        window?.styleMask.insert(.resizable)
+    }
+
     func windowWillClose(_ notification: Notification) {
         shutdown()
         onClose?(self)

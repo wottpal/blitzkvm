@@ -25,7 +25,8 @@ final class InputController {
     private var pressedUsages = Set<UInt8>()
     /// Keys are down on the remote (its own key repeat may be typing).
     var keysHeld: Bool { !pressedUsages.isEmpty }
-    private var lastButtons: UInt8 = 0
+    /// The last pointer report sent: x, y, buttons.
+    private var lastPointer: (Int32, Int32, UInt8)?
     private var scroll = ScrollAccumulator()
     private var eventTap: CFMachPort?
     private var tapSource: CFRunLoopSource?
@@ -246,7 +247,7 @@ final class InputController {
             send(EngineProtocol.key(hid: usage, pressed: false))
         }
         pressedUsages.removeAll()
-        lastButtons = 0
+        lastPointer = nil
         buttonState = 0
         scroll.reset()
         chordArmed = false
@@ -273,11 +274,15 @@ final class InputController {
         mouse(at: point, in: layout, buttons: buttonState)
     }
 
+    /// Outside the video (the margin beside it, or past it while dragging)
+    /// the remote pointer stays on the video's nearest edge, as at a screen's
+    /// edge: after a fast move the last event inside the video can be a few
+    /// pixels short of it. A report the same as the last one is skipped
+    /// (AppKit delivers each move twice: tracking area and window).
     func mouse(at point: (Double, Double), in layout: VideoLayout, buttons: UInt8) {
         guard !viewOnly, let (x, y) = layout.absolutePosition(px: point.0, py: point.1) else { return }
-        // Moves outside the video only matter while a button is held (drags).
-        if !layout.contains(px: point.0, py: point.1) && buttons == 0 && lastButtons == 0 { return }
-        lastButtons = buttons
+        if let last = lastPointer, last == (x, y, buttons) { return }
+        lastPointer = (x, y, buttons)
         send(EngineProtocol.absolutePointer(x: x, y: y, buttons: buttons))
     }
 

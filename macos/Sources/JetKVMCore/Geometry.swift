@@ -136,10 +136,6 @@ public struct VideoLayout: Equatable {
         return (Int32((nx * 32767).rounded()), Int32((ny * 32767).rounded()))
     }
 
-    public func contains(px: Double, py: Double) -> Bool {
-        px >= x && px < x + width && py >= y && py < y + height
-    }
-
     /// The whole drawable pixels the video covers, clipped to a drawable of
     /// the given size (layout edges are whole pixels).
     public func visibleRect(drawableWidth: Double, drawableHeight: Double) -> PixelRect {
