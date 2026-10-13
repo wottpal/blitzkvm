@@ -768,14 +768,14 @@ private extension View {
     }
 }
 
-private extension Locale {
+extension Locale {
     /// English, the app's language, in the user's region: "4 hours ago" in
     /// the English UI, while dates keep the local conventions.
     static let englishInUserRegion = Locale(languageCode: .english, languageRegion: Locale.current.region)
 }
 
 /// The Devices window's content: the welcome screen while permissions are
-/// missing (first launch, BlitzKVM › Permissions…, Local Network turned off),
+/// missing (first launch, Local Network turned off; Settings shows them later),
 /// the devices otherwise.
 struct DevicesRootView: View {
     @ObservedObject var model: DevicesModel

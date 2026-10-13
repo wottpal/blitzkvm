@@ -45,6 +45,22 @@
 	<array>
 		<string>_blitzkvm._tcp</string>
 	</array>
+	<!-- Updates (Sparkle, Updater.swift): the latest GitHub release's appcast,
+	     signed like every archive with the EdDSA key below (its private half
+	     stays in the maintainer's keychain). Checks are daily and on by
+	     default; installing without asking is the user's choice. -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/wottpal/blitzkvm/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>qsg1mGWFhaDco6waZOAbNspZTrZyzwOnzPOcwDlIhE8=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 </dict>

@@ -53,8 +53,9 @@ struct Options {
     /// Self-test: play the device's audio (silently) and expect this codec
     /// ("opus", "pcmu") or none ("none"). Without it, self-tests play none.
     var expectAudio: String?
-    /// Opens BlitzKVM › Licenses… at launch.
-    var showLicenses = false
+    /// `--open settings|licenses|devices`: opens that window at launch (and
+    /// logs its window number, for `screencapture -l`).
+    var openWindow: String?
 
     static func parse(_ args: [String]) -> Options {
         var o = Options()
@@ -98,7 +99,7 @@ struct Options {
             case "--wake": o.wake = true
             case "--type-pauses": o.typePauses = true
             case "--expect-audio": o.expectAudio = next()
-            case "--show-licenses": o.showLicenses = true
+            case "--open": o.openWindow = next()
             case "--window-size":
                 let parts = (next() ?? "").split(separator: "x").compactMap { Double($0) }
                 if parts.count == 2 { o.windowSize = (parts[0], parts[1]) }
@@ -124,6 +125,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }()
     private var devicesWindow: DevicesWindowController?
     private var licensesWindow: LicensesWindowController?
+    private var settingsWindow: SettingsWindowController?
+    /// Created at launch; self-tests don't check for updates (unless given a
+    /// test feed).
+    private var updater: Updater!
     private lazy var permissions = MainActor.assumeIsolated { PermissionsModel() }
     /// Open device windows (including minimized ones). Removed only when a
     /// window closes, which also stops its engine.
@@ -150,13 +155,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isSelfTest: Bool { options.selfTestSeconds != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        updater = MainActor.assumeIsolated { Updater(start: !isSelfTest || Updater.feedOverride != nil) }
         NSApp.mainMenu = buildMenu()
         if let address = options.device {
             connectAdHoc(address)
         } else {
             showDevices()
         }
-        if options.showLicenses { showLicenses() }
+        switch options.openWindow {
+        case "settings":
+            showSettings()
+            AppLog.log("opened settings: window number \(settingsWindow?.window?.windowNumber ?? 0)")
+        case "licenses":
+            showLicenses()
+            AppLog.log("opened licenses: window number \(licensesWindow?.window?.windowNumber ?? 0)")
+        case "devices":
+            showDevices()
+            AppLog.log("opened devices: window number \(devicesWindow?.window?.windowNumber ?? 0)")
+        default: break
+        }
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -434,9 +451,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let appMenu = NSMenu()
         appMenu.addItem(item("About BlitzKVM", #selector(showAbout)))
+        appMenu.addItem(item("Check for Updates…", #selector(Updater.checkForUpdates(_:)), target: updater))
         appMenu.addItem(item("Licenses…", #selector(showLicenses)))
         appMenu.addItem(.separator())
-        appMenu.addItem(item("Permissions…", #selector(showPermissions)))
+        appMenu.addItem(item("Settings…", #selector(showSettings), key: ","))
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide BlitzKVM", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
@@ -693,9 +711,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         licensesWindow?.window?.makeKeyAndOrderFront(nil)
     }
 
-    @objc private func showPermissions() {
-        MainActor.assumeIsolated { permissions.showOnboarding() }
-        showDevices()
+    @objc private func showSettings() {
+        if settingsWindow == nil {
+            settingsWindow = MainActor.assumeIsolated { SettingsWindowController(updater: updater, permissions: permissions) }
+        }
+        settingsWindow?.showWindow(nil)
+        settingsWindow?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func openWebUI() {

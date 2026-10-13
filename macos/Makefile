@@ -9,9 +9,11 @@
 #   make selftest-stalls   the picture survives link stalls and hidden windows
 #   make selftest-refresh  still refreshes follow typing pauses (fork firmware D13)
 #   make selftest-audio    the device's audio plays (Opus, PCMU) and is turned on once
+#   make selftest-update   an update installs from a signed appcast; a changed archive doesn't
 #   make run DEVICE=jetkvm.local
 #   make install    copy the app to /Applications
 #   make notarize   notarize (Xcode account) and staple, for use on other Macs
+#   make release NOTES=notes.md   notarize HEAD and publish it for the updater
 #
 # Signing: the keychain's first "Developer ID Application" identity, with the
 # hardened runtime and a secure timestamp (both required for notarization).
@@ -34,6 +36,8 @@ define copy_signed
 	fi
 endef
 APP := build/BlitzKVM.app
+# Sparkle's helpers, signed inside-out with the app's identity.
+SPARKLE := $(APP)/Contents/Frameworks/Sparkle.framework/Versions/B
 BUILD_NUMBER := $(shell git -C .. rev-list --count HEAD 2>/dev/null || echo 0)
 EMULATOR_ADDR ?= 127.0.0.1:18080
 # The firmware builds JetKVM Setup installs, pinned by Support/Firmware.json:
@@ -41,7 +45,7 @@ EMULATOR_ADDR ?= 127.0.0.1:18080
 # bin/jetkvm_app; JetKVM's own release is downloaded once at build time.
 FORK_BINARY ?= $(abspath ../../kvm/bin/jetkvm_app)
 
-.PHONY: app engine swift icon firmware licenses test selftest selftest-extras selftest-stalls selftest-refresh selftest-audio run install notarize clean
+.PHONY: app engine swift icon firmware licenses release test selftest selftest-extras selftest-stalls selftest-refresh selftest-audio selftest-update run install notarize clean
 
 engine:
 	cd .. && GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o macos/build/blitzkvm-engine ./cmd/blitzkvm-engine
@@ -55,13 +59,17 @@ icon:
 firmware:
 	sh scripts/bundle-firmware.sh "$(FORK_BINARY)" Support/Firmware.json build/firmware
 
-licenses: engine
+licenses: engine swift
 	sh scripts/licenses.sh Support/Firmware.json build/licenses/Licenses.txt
 
 app: engine swift icon firmware licenses
 	rm -rf "$(APP)"
-	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Helpers" "$(APP)/Contents/Resources"
+	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Helpers" "$(APP)/Contents/Resources" "$(APP)/Contents/Frameworks"
 	cp "$$(swift build -c release --arch arm64 --show-bin-path)/BlitzKVM" "$(APP)/Contents/MacOS/BlitzKVM"
+	install_name_tool -add_rpath @executable_path/../Frameworks "$(APP)/Contents/MacOS/BlitzKVM"
+	ditto "$$(swift build -c release --arch arm64 --show-bin-path)/Sparkle.framework" "$(APP)/Contents/Frameworks/Sparkle.framework"
+	# Not sandboxed: Sparkle's XPC services are unused.
+	rm -rf "$(SPARKLE)/XPCServices"
 	cp build/blitzkvm-engine "$(APP)/Contents/Helpers/blitzkvm-engine"
 	sed "s/@BUILD@/$(BUILD_NUMBER)/" Support/Info.plist.in > "$(APP)/Contents/Info.plist"
 	cp Support/AppIcon.icns "$(APP)/Contents/Resources/AppIcon.icns"
@@ -70,6 +78,9 @@ app: engine swift icon firmware licenses
 	cp build/firmware/Firmware.json build/firmware/*.gz "$(APP)/Contents/Resources/Firmware/"
 	cp build/licenses/Licenses.txt "$(APP)/Contents/Resources/Licenses.txt"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.blitzkvm.engine "$(APP)/Contents/Helpers/blitzkvm-engine"
+	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" "$(SPARKLE)/Autoupdate"
+	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" "$(SPARKLE)/Updater.app"
+	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" "$(APP)/Contents/Frameworks/Sparkle.framework"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.blitzkvm "$(APP)"
 	codesign --verify --strict --deep "$(APP)"
 	@echo "built $(APP), signed by $(SIGN_IDENTITY)"
@@ -185,6 +196,20 @@ notarize: app
 	$(copy_signed)
 	@if [ -n "$(COPY_TO)" ]; then cp build/BlitzKVM.zip "$(COPY_TO)/BlitzKVM.zip" && echo "copied to $(COPY_TO)/BlitzKVM.zip"; fi
 	@echo "notarized: build/BlitzKVM.zip"
+
+# The updater end to end (scripts/update-test.sh). Maintainers only: it signs
+# the test appcast with the update key from the login keychain.
+selftest-update: app
+	cd .. && go build -o macos/build/emulator-serve ./test/emulator-serve
+	@./build/emulator-serve serve --listen $(EMULATOR_ADDR) > build/emulator-update.log 2>&1 & pid=$$!; \
+	sleep 1; \
+	bash scripts/update-test.sh $(EMULATOR_ADDR) "$(SIGN_IDENTITY)"; status=$$?; \
+	kill $$pid; exit $$status
+
+# Notarizes HEAD and publishes it as the latest GitHub release with a signed
+# appcast, which installed apps pick up (scripts/release.sh).
+release: notarize
+	sh scripts/release.sh "$(NOTES)"
 
 # Virtual media, serial console and address probing through the app, over
 # http and over https (self-signed device CA, pinned on first use).

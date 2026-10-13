@@ -1,14 +1,15 @@
 import SwiftUI
 
 /// A row of a setup screen: an icon tile, a title (with an optional tag),
-/// the state on one line, a one-line paragraph on what it means, and an
-/// accessory: the action that moves it forward, or a badge once done.
+/// the state on one line (left out where the accessory already says it), a
+/// one-line paragraph on what it means, and an accessory: the action that
+/// moves it forward, or a badge once done.
 struct StatusRow<Accessory: View>: View {
     let symbol: String
     let tint: Color
     let title: String
     var tag: String?
-    let state: String
+    var state: String?
     /// Shown in red, and allowed to wrap so nothing of it is cut off.
     var isError = false
     /// The second paragraph, Markdown (for a link).
@@ -36,18 +37,20 @@ struct StatusRow<Accessory: View>: View {
                             .background(.quaternary, in: Capsule())
                     }
                 }
-                Text(state)
-                    .font(.callout)
-                    .foregroundStyle(isError ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-                    .textSelection(.enabled)
-                    .lineLimit(isError ? nil : 1)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let state {
+                    Text(state)
+                        .font(.callout)
+                        .foregroundStyle(isError ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                        .textSelection(.enabled)
+                        .lineLimit(isError ? nil : 1)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let note, let markdown = try? AttributedString(markdown: note) {
                     Text(markdown)
                         .font(.callout)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
-                        .padding(.top, 4)
+                        .padding(.top, state == nil ? 0 : 4)
                 }
             }
             .accessibilityElement(children: .combine)

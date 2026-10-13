@@ -1,10 +1,10 @@
 #!/bin/sh
 # Assembles the licenses the app shows (BlitzKVM › Licenses…): BlitzKVM's
-# own, the code compiled into the app and its helper, and the firmware builds
-# JetKVM Setup installs (GPL-2.0, with where their source is). Go modules are
-# taken from what the helper links, with their license files from the module
-# cache, so the list follows go.mod. Lines starting with "# " and "## " are
-# headings.
+# own, the code compiled into the app (FSR, Sparkle) and its helper, and the
+# firmware builds JetKVM Setup installs (GPL-2.0, with where their source
+# is). Go modules are taken from what the helper links, with their license
+# files from the module cache, so the list follows go.mod. Lines starting
+# with "# " and "## " are headings.
 #
 #   scripts/licenses.sh <Firmware.json> <output file>
 set -eu
@@ -23,6 +23,10 @@ section() { printf '\n## %s\n\n' "$1"; }
 	printf '\n# Open-source software in BlitzKVM\n'
 	section "AMD FidelityFX Super Resolution 1 (upscaling, ported to Metal in FSR.swift)"
 	cat "$macos/Support/Licenses/FidelityFX-FSR1.txt"
+
+	sparkle="$macos/.build/artifacts/sparkle/Sparkle"
+	section "Sparkle $(plutil -extract CFBundleShortVersionString raw "$sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework/Versions/B/Resources/Info.plist") (updates)"
+	cat "$sparkle/LICENSE"
 
 	goroot=$(cd "$root" && go env GOROOT)
 	section "Go standard library and runtime $(cd "$root" && go env GOVERSION) (in the helper)"

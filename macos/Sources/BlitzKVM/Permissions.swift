@@ -1,7 +1,8 @@
 import AppKit
 import Network
 
-/// The macOS permissions BlitzKVM needs, asked for on the welcome screen:
+/// The macOS permissions BlitzKVM needs, asked for on the welcome screen and
+/// shown in Settings:
 /// Local Network (required: JetKVMs answer on the local network) and
 /// Accessibility (system shortcuts such as ⌘Tab reach the remote computer).
 @MainActor
@@ -16,8 +17,8 @@ final class PermissionsModel: ObservableObject {
 
     @Published private(set) var localNetwork = LocalNetwork.notAsked
     @Published private(set) var accessibility = InputController.accessibilityTrusted(prompt: false)
-    /// The welcome screen shows: on first launch, from BlitzKVM › Permissions…,
-    /// and whenever Local Network access is off.
+    /// The welcome screen shows: on first launch, and whenever Local Network
+    /// access is off.
     @Published private(set) var showsOnboarding: Bool
 
     private static let doneKey = "onboardingDone"
@@ -26,6 +27,9 @@ final class PermissionsModel: ObservableObject {
     /// Local Network was checked since launch (it rarely changes once allowed).
     private var checkedLocalNetwork = false
     private var poll: Timer?
+    /// Open views that show the permissions besides the welcome screen
+    /// (Settings).
+    private var watchers = 0
     private var activation: NSObjectProtocol?
 
     init() {
@@ -46,7 +50,7 @@ final class PermissionsModel: ObservableObject {
     func refresh() {
         accessibility = InputController.accessibilityTrusted(prompt: false)
         guard UserDefaults.standard.bool(forKey: Self.localNetworkAskedKey), localNetwork != .asking,
-              !checkedLocalNetwork || localNetwork != .allowed || showsOnboarding else { return }
+              !checkedLocalNetwork || localNetwork != .allowed || showsOnboarding || watchers > 0 else { return }
         checkLocalNetwork(timeout: 3)
     }
 
@@ -97,9 +101,15 @@ final class PermissionsModel: ObservableObject {
 
     // MARK: Welcome screen
 
-    func showOnboarding() {
-        showsOnboarding = true
+    /// Settings shows the permissions: keep them current while it is open.
+    func startWatching() {
+        watchers += 1
         refresh()
+        updatePolling()
+    }
+
+    func stopWatching() {
+        watchers = max(0, watchers - 1)
         updatePolling()
     }
 
@@ -110,9 +120,9 @@ final class PermissionsModel: ObservableObject {
     }
 
     /// Accessibility has no change notification: read it every second
-    /// while the welcome screen shows.
+    /// while the welcome screen or Settings shows.
     private func updatePolling() {
-        guard showsOnboarding else {
+        guard showsOnboarding || watchers > 0 else {
             poll?.invalidate()
             poll = nil
             return
