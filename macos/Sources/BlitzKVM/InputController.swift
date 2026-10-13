@@ -29,13 +29,8 @@ final class InputController {
     private var scroll = ScrollAccumulator()
     private var eventTap: CFMachPort?
     private var tapSource: CFRunLoopSource?
-    private let isISO: Bool
     private var chordArmed = false
     private var doubleCommand = DoubleCommandPress()
-
-    init() {
-        isISO = KBGetLayoutType(Int16(LMGetKbdType())) == kKeyboardISO
-    }
 
     // MARK: Capture
 
@@ -127,12 +122,13 @@ final class InputController {
         }
         guard captured, NSApp.isActive else { return Unmanaged.passUnretained(event) }
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let keyboardType = event.getIntegerValueField(.keyboardEventKeyboardType)
         switch type {
         case .keyDown:
             if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return nil }
-            key(keyCode: keyCode, down: true)
+            key(keyCode: keyCode, keyboardType: keyboardType, down: true)
         case .keyUp:
-            key(keyCode: keyCode, down: false)
+            key(keyCode: keyCode, keyboardType: keyboardType, down: false)
         case .flagsChanged:
             flagsChanged(keyCode: keyCode, rawFlags: event.flags.rawValue)
         default:
@@ -166,12 +162,13 @@ final class InputController {
         // sees them; anything that still arrives here bypassed the tap
         // (Secure Event Input, tap briefly disabled) and must be forwarded.
         guard captured else { return false }
+        let keyboardType = event.cgEvent?.getIntegerValueField(.keyboardEventKeyboardType) ?? 0
         switch event.type {
         case .keyDown:
-            if !event.isARepeat { key(keyCode: event.keyCode, down: true) }
+            if !event.isARepeat { key(keyCode: event.keyCode, keyboardType: keyboardType, down: true) }
             return true
         case .keyUp:
-            key(keyCode: event.keyCode, down: false)
+            key(keyCode: event.keyCode, keyboardType: keyboardType, down: false)
             return true
         case .flagsChanged:
             flagsChanged(keyCode: event.keyCode, rawFlags: UInt64(event.modifierFlags.rawValue))
@@ -181,18 +178,34 @@ final class InputController {
         }
     }
 
-    private func key(keyCode: UInt16, down: Bool) {
+    private func key(keyCode: UInt16, keyboardType: Int64, down: Bool) {
         // ⌃⌘ followed by a key is a shortcut (⌃⌘Q, ⌃⌘F), not the release chord.
         if down { chordArmed = false }
-        guard let usage = KeyMap.hidUsage(keyCode: keyCode, isISO: isISO) else { return }
+        let isISO = Self.isISO(keyboardType: keyboardType)
+        guard let usage = KeyMap.hidUsage(keyCode: keyCode, isISO: isISO, remote: modifierProfile) else { return }
         sendKey(usage, down: down)
     }
+
+    /// Whether a key came from an ISO keyboard (a Mac can have several;
+    /// synthetic events carry no type, so the one used last counts).
+    private static func isISO(keyboardType: Int64) -> Bool {
+        let type = keyboardType != 0 ? Int16(truncatingIfNeeded: keyboardType) : Int16(LMGetKbdType())
+        return KBGetLayoutType(type) == kKeyboardISO
+    }
+
+    /// How long a Caps Lock press is held on the remote. A Mac ignores
+    /// presses shorter than about 80 ms, so one released at once never
+    /// toggles it there.
+    private static let capsLockHold: TimeInterval = 0.2
 
     private func flagsChanged(keyCode: UInt16, rawFlags: UInt64) {
         if keyCode == KeyMap.capsLockKeyCode {
             // Caps Lock is a toggle locally; the remote needs a key press.
             sendKey(KeyMap.capsLockUsage, down: true)
-            sendKey(KeyMap.capsLockUsage, down: false)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.capsLockHold) { [weak self] in
+                guard let self, pressedUsages.contains(KeyMap.capsLockUsage) else { return }
+                sendKey(KeyMap.capsLockUsage, down: false)
+            }
             return
         }
         guard let usage = KeyMap.modifierUsage[keyCode], let mask = KeyMap.modifierDeviceMask[keyCode] else { return }

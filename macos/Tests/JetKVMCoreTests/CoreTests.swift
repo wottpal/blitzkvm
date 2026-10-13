@@ -96,17 +96,26 @@ final class AnnexBTests: XCTestCase {
 
 final class KeyMapTests: XCTestCase {
     func testLettersAndModifiers() {
-        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x00, isISO: false), 0x04) // A
-        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x24, isISO: false), 0x28) // Return
+        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x00, isISO: false, remote: .mac), 0x04) // A
+        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x24, isISO: true, remote: .pc), 0x28) // Return
         XCTAssertEqual(KeyMap.modifierUsage[0x37], 0xE3) // left ⌘ → left GUI
         XCTAssertEqual(KeyMap.modifierUsage[0x3D], 0xE6) // right ⌥ → AltGr
     }
 
-    func testISOKeyboardSwapsSectionAndGrave() {
+    func testISOKeyboardSwapsSectionAndGraveForPCs() {
         // Top-left key (§ / ^) must be the PC grave position on ISO boards.
-        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x0A, isISO: true), 0x35)
-        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x32, isISO: true), 0x64)
-        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x32, isISO: false), 0x35)
+        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x0A, isISO: true, remote: .pc), 0x35)
+        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x32, isISO: true, remote: .pc), 0x64)
+        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x32, isISO: false, remote: .pc), 0x35)
+    }
+
+    func testMacRemoteGetsKeyCodesUnchanged() {
+        // A Mac maps 0x35 back to kVK_ANSI_Grave and 0x64 to kVK_ISO_Section
+        // (verified: on a German Mac, 0x64 types ^ and 0x35 types <).
+        for isISO in [false, true] {
+            XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x32, isISO: isISO, remote: .mac), 0x35)
+            XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x0A, isISO: isISO, remote: .mac), 0x64)
+        }
     }
 
     func testPCProfileSwapsCommandAndControl() {

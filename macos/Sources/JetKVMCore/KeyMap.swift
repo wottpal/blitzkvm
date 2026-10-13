@@ -91,12 +91,18 @@ public enum KeyMap {
     public static let capsLockKeyCode: UInt16 = 0x39
     public static let capsLockUsage: UInt8 = 0x39
 
-    /// HID usage for a key code. On ISO keyboards macOS reports the key left
-    /// of "1" (§ / ^) as kVK_ISO_Section and the key right of left Shift
-    /// (` / <) as kVK_ANSI_Grave — the opposite of their PC positions — so
-    /// they are swapped back to what a PC ISO keyboard would send.
-    public static func hidUsage(keyCode: UInt16, isISO: Bool) -> UInt8? {
-        if isISO {
+    /// HID usage for a key code from an ISO or ANSI keyboard, for a remote
+    /// running `remote`.
+    ///
+    /// A Mac can't identify the JetKVM's keyboard and treats it as ANSI,
+    /// turning each usage straight back into its key code, so key codes pass
+    /// through unchanged and the same layout types the same characters. A PC
+    /// types by physical position: on ISO keyboards macOS reports the key
+    /// left of "1" (§ / ^) as kVK_ISO_Section and the key right of left Shift
+    /// (` / <) as kVK_ANSI_Grave, the opposite of their PC positions, so they
+    /// are swapped back to what a PC ISO keyboard sends.
+    public static func hidUsage(keyCode: UInt16, isISO: Bool, remote: ModifierProfile) -> UInt8? {
+        if isISO && remote == .pc {
             if keyCode == 0x0A { return 0x35 }
             if keyCode == 0x32 { return 0x64 }
         }
@@ -104,7 +110,8 @@ public enum KeyMap {
     }
 }
 
-/// How Mac modifiers map onto the remote's.
+/// The remote's operating system: how Mac modifiers, and the two ISO keys
+/// (KeyMap.hidUsage), map onto it.
 public enum ModifierProfile: String, CaseIterable {
     /// Remote is a Mac: ⌘ stays GUI (⌘), ⌥ stays Alt (⌥).
     case mac
