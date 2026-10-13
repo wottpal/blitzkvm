@@ -15,6 +15,7 @@ In scope: the macOS app, its helper (`blitzkvm-engine`), and the BlitzKVM firmwa
 - input reaching a device whose identity was not confirmed;
 - a password or session cookie sent to a host other than the pinned device, or over a changed certificate;
 - JetKVM Setup installing a firmware or Tailscale build that doesn't match its pinned SHA-256;
+- the updater installing an update that isn't signed with BlitzKVM's update key, or that comes from somewhere other than the release feed;
 - the helper or app executing data received from a device.
 
 How the app protects sessions is described in the README under [Privacy and security](README.md#privacy-and-security) and [Architecture](README.md#architecture).

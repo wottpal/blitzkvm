@@ -17,6 +17,7 @@ BlitzKVM started from [lkarlslund/jetkvm-desktop](https://github.com/lkarlslund/
 - **Slow links.** Automatic quality follows each frame's queueing delay, so cellular and relayed Tailscale links stay usable.
 - **Everything a KVM needs.** Keyboard capture including system shortcuts, an absolute pointer that goes where you hover, paste as keystrokes, virtual media, serial console, ATX/DC power, Wake Computer, several devices as tabs.
 - **JetKVM Setup.** Firmware, password and Tailscale on the device, each with one button.
+- **Updates itself.** From signed, notarized GitHub releases, after asking or on its own when you quit.
 
 Numbers and methods: [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -27,10 +28,12 @@ Numbers and methods: [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Install
 
-- **Download:** notarized builds are published under [Releases](https://github.com/wottpal/blitzkvm/releases): unzip `BlitzKVM.zip` and move `BlitzKVM.app` to `/Applications`.
+- **Download:** get `BlitzKVM.zip` from the [latest release](https://github.com/wottpal/blitzkvm/releases/latest), unzip it and move `BlitzKVM.app` to `/Applications`. From then on BlitzKVM updates itself.
 - **Build from source:** see [Development](#development); `make -C macos install` builds the app and copies it to `/Applications`.
 
-On first launch a welcome screen asks for **Local Network** access (required: JetKVMs answer on the local network) and **Accessibility** (recommended: ⌘Tab, ⌘Space and other system shortcuts then reach the remote computer).
+On first launch a welcome screen asks for **Local Network** access (required: JetKVMs answer on the local network) and **Accessibility** (recommended: ⌘Tab, ⌘Space and other system shortcuts then reach the remote computer). BlitzKVM › Settings… (⌘,) shows both later.
+
+**Updates:** BlitzKVM checks its GitHub releases once a day and offers each new version with its release notes; BlitzKVM › Check for Updates… checks now. In Settings you can turn the daily check off, or have updates download in the background and install when you quit BlitzKVM. Every update is notarized by Apple and signed with BlitzKVM's update key, and the app checks that signature, and that the new app carries the same Developer ID, before it installs anything (Sparkle).
 
 ## Using the app
 
@@ -115,7 +118,7 @@ Install it with JetKVM Setup (one button; the previous build stays on the device
 
 ## Privacy and security
 
-- **No telemetry.** The app talks to your JetKVMs, and to pkgs.tailscale.com only when you install Tailscale from JetKVM Setup.
+- **No telemetry.** The app talks to your JetKVMs, to GitHub once a day to look for updates (Settings turns that off), and to pkgs.tailscale.com only when you install Tailscale from JetKVM Setup. The update check sends nothing but the request for the latest release's appcast.
 - **Identity before input.** A session accepts input only after the device's ID matches the one pinned on first connect.
 - **HTTPS trust on first use.** The device's certificate authority is pinned; a change stops the session before any password is sent, and the app asks whether to trust the new one.
 - **Passwords** live in the login keychain.
@@ -180,15 +183,18 @@ Run root targets from the repository root and macOS targets with `make -C macos 
 | `make -C macos selftest-stalls` | End to end with the BlitzKVM firmware's keyframe policy: the picture may stand still no longer than a link stall, and resumes once a hidden window is shown |
 | `make -C macos selftest-refresh` | End to end with firmware D13's still refresh: region refreshes after typing pauses, none while typing, a full refresh after a long pause; a view-only window leaves refreshes to the device |
 | `make -C macos selftest-audio` | End to end with the emulator's tone, played at zero volume: the BlitzKVM firmware's Opus in a window that turns the device's audio on (once, then reconnects), JetKVM firmware's PCMU in a view-only window, and nothing from a device whose audio is off; view-only never changes the setting |
+| `make -C macos selftest-update` | The updater end to end, maintainers only (it signs with the update key from the keychain): an older copy installs a newer one from a local signed appcast when it quits; an archive changed after signing is refused |
 | `make -C macos run DEVICE=jetkvm.local` | Builds and opens the app connected to a device |
 | `make -C macos install` | Copies the app to `/Applications` |
 | `make -C macos notarize` | Notarizes with the Xcode account and staples; leaves `macos/build/BlitzKVM.zip` (see [Signing and distribution](#signing-and-distribution)) |
+| `make -C macos release NOTES=notes.md` | Notarizes HEAD and publishes it as the latest GitHub release with a signed appcast, which installed apps pick up (see [Releases and updates](#releases-and-updates)) |
 
 Focused checks, by what you changed:
 
 - When you edit `pkg/emulator`, `pkg/client`, `pkg/session` or `pkg/engine`, run `go test -race -count=1 ./pkg/<package>`. If you touched video, NACK or netem code, also run `make test-timing`.
 - When you edit `macos/Sources/JetKVMCore`, run `make -C macos test`.
 - When you edit `macos/Sources/BlitzKVM`, `pkg/engineipc` or engine commands, run `make -C macos selftest` and `make -C macos selftest-extras`. If you touched video, the decoder or keyframe handling, also run `make -C macos selftest-stalls`; if you touched still refreshes (`RefreshPlanner`, `StillRefresh`, input or frame handling), `make -C macos selftest-refresh`; if you touched audio (`AudioPlayer`, `AudioJitterBuffer`, `pkg/client/audio.go`, `pkg/session/audio.go`), `make -C macos selftest-audio`.
+- When you touch updates (`Updater.swift`, the `SU…` keys in `Info.plist.in`, Sparkle's version, `scripts/release.sh`), run `make -C macos selftest-update`.
 - When you add or update a Go module the helper links, or bump a bundled firmware build, run `make -C macos licenses` and check that it succeeds (it fails on a module without a license file).
 - Before you push, run `make check` (or its steps individually while the tree is dirty, since `generate-check` needs a clean tree).
 
@@ -200,7 +206,7 @@ A passing self-test prints a JSON report and ends with `selftest passed: …`. A
 BlitzKVM.app (Swift)                          one helper per device
   DeviceWindowController ── VideoDecoder (VideoToolbox) ── VideoView (Metal)
   AudioPlayer (AVAudioConverter, AudioJitterBuffer, AVAudioEngine)
-  InputController, VirtualMediaWindow, SerialConsoleWindow
+  InputController, VirtualMediaWindow, SerialConsoleWindow, Settings, Updater (Sparkle)
         │  length-prefixed frames over stdin/stdout (pkg/engineipc ⇄ EngineProtocol.swift)
         ▼
   blitzkvm-engine (Go): engine → session.Controller → client.Client
@@ -254,6 +260,18 @@ CI (`.github/workflows/ci.yml`, macOS 26) runs `make check`'s steps and an unsig
 
 The app shows its licenses under BlitzKVM › Licenses…, assembled at build time (`make -C macos licenses`); the bundled firmware builds are GPL-2.0, and that window links their source.
 
+### Releases and updates
+
+The app updates itself with [Sparkle](https://sparkle-project.org) (`Updater.swift`) from `SUFeedURL`, the appcast of the latest GitHub release. Info.plist requires a signed feed and archive verification before extraction (`SURequireSignedFeed`, `SUVerifyUpdateBeforeExtraction`), and its `SUPublicEDKey` is the public half of the update key, whose private half is in the maintainer's login keychain (Sparkle's `generate_keys`, account `blitzkvm`). Releases are built, notarized and signed on that Mac; nothing in CI holds a key.
+
+To release: set `CFBundleShortVersionString` in `macos/Support/Info.plist.in`, commit and push to `main`, write the release notes (Markdown, they appear in the update window), then run `make -C macos release NOTES=notes.md` from the repository root. `macos/scripts/release.sh` refuses a dirty tree, a HEAD that isn't `origin/main`, an app that isn't notarized or isn't of HEAD, an existing tag, and a keychain key that doesn't match `SUPublicEDKey`. It then signs the appcast (`generate_appcast`, release notes embedded) and creates release `v<version>` with `BlitzKVM.zip`, `appcast.xml` and `SHA256SUMS.txt`, marked latest. The build number is the commit count, so every release outranks the last.
+
+Mandatory:
+- **Back up the update key** (`macos/.build/artifacts/sparkle/Sparkle/bin/generate_keys --account blitzkvm -x <file>`, into a password manager, then delete the file). Without it, installed apps can't verify any later update and every user has to download the app again by hand.
+- **Never commit the key** or put it in CI.
+
+`make -C macos selftest-update` tests the whole path before a release: an older copy (another bundle identifier, so your own app's update settings stay untouched) runs a self-test with `BLITZKVM_UPDATE_FEED` pointing at a local appcast signed with the real key, and must have installed the newer copy once it quits; an archive changed after signing must not be installed. Self-tests check for updates only when `BLITZKVM_UPDATE_FEED` is set.
+
 ### Command-line options
 
 Also used by the self-tests:
@@ -266,15 +284,16 @@ Also used by the self-tests:
 | `--selftest <seconds>` and `--crash-engine-after`, `--inject-input`, `--exercise-extras`, `--snapshot <png>`, `--hide-after <seconds>`, `--max-freeze-ms <ms>`, `--set-quality-after 4:low,9:maximum`, `--toggle-status-bar-after <seconds>`, `--type-pauses`, `--expect-audio opus\|pcmu\|none` | Self-test mode (prints JSON, exits 0 on success). The window floats above other windows and never captures your own keyboard or pointer; only `--inject-input` and `--type-pauses` (typing bursts, then checks the still refreshes) send input. Self-tests play no audio, except with `--expect-audio`, which plays it at zero volume and fails unless it came in that codec (or none came). The window's number is logged (`selftest: window number N`) for `screencapture -l N` |
 | `--setup check\|install-tailscale\|login\|restart\|install-firmware[=blitzkvm\|stock]\|password=<new password>\|change-password=<new password>\|remove-password`, `--setup-snapshot <png>`, `--wake` | With `--selftest`: opens JetKVM Setup, runs the action, and reports the three states (`setup`, `setupOK`); the snapshot renders the sheet. `--wake` wakes the target once connected (no keystrokes) |
 | `--latency-probe <samples>` | Measures input-to-photon latency against `tools/latency-probe/latency.html` on the target (prints JSON, exits) |
-| `--show-licenses` | Opens BlitzKVM › Licenses… at launch |
+| `--open settings\|licenses\|devices` | Opens Settings, Licenses or the Devices window (the welcome screen on first launch) at launch and logs its window number (`opened settings: window number N`) |
 
-Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `BLITZKVM_DEBUG_BLACKHOLE=period:duration` (seconds) makes the helper drop all session traffic for `duration` every `period`, to reproduce network hiccups. `BLITZKVM_IMPAIR` runs the session's traffic through a model of a slow link, both ways (`pkg/netimpair`): a profile (`lte`, `lte-congested`, `wifi-hotel`, `derp`), settings (`rate=4mbit,queue=1s,delay=40ms,jitter=5ms,loss=1%,burst=3,outage-every=20s,outage=200ms-800ms`, or `trace=<Mahimahi file>` for the rate), or a profile with overrides (`lte,loss=1%`). The helper logs what the link did when the session ends; `BLITZKVM_BENCH=60s go test -run TestSlowLinkBenchmark ./pkg/emulator` runs the session with automatic quality through each profile, against the emulator's model of the patched encoder (`BLITZKVM_BENCH_CONTENT=desktop|scroll|motion`). `BLITZKVM_ENGINE` points at a helper binary for development. `BLITZKVM_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.
+Environment: `JETKVM_DEVICE` and `JETKVM_PASSWORD` stand in for `--device` and a password. `BLITZKVM_UPDATE_FEED` replaces the update feed (`SUFeedURL`), to test a release before publishing it. `BLITZKVM_DEBUG_BLACKHOLE=period:duration` (seconds) makes the helper drop all session traffic for `duration` every `period`, to reproduce network hiccups. `BLITZKVM_IMPAIR` runs the session's traffic through a model of a slow link, both ways (`pkg/netimpair`): a profile (`lte`, `lte-congested`, `wifi-hotel`, `derp`), settings (`rate=4mbit,queue=1s,delay=40ms,jitter=5ms,loss=1%,burst=3,outage-every=20s,outage=200ms-800ms`, or `trace=<Mahimahi file>` for the rate), or a profile with overrides (`lte,loss=1%`). The helper logs what the link did when the session ends; `BLITZKVM_BENCH=60s go test -run TestSlowLinkBenchmark ./pkg/emulator` runs the session with automatic quality through each profile, against the emulator's model of the patched encoder (`BLITZKVM_BENCH_CONTENT=desktop|scroll|motion`). `BLITZKVM_ENGINE` points at a helper binary for development. `BLITZKVM_LOG_LEVEL` (error, warn, info, debug, trace) sets Go logging in the helper.
 
 Where things live:
 
 - Device library: `~/Library/Application Support/BlitzKVM/devices.json`.
 - Passwords: the login keychain, service `xyz.scio.blitzkvm`, account = the device's ID (the entry's UUID until the ID is learned on first connect).
 - Logs: `~/Library/Logs/BlitzKVM/app.log` holds app messages and each helper's stderr.
+- Update settings: the app's user defaults (`xyz.scio.blitzkvm`, Sparkle's `SU…` keys).
 
 ### Troubleshooting
 
