@@ -22,6 +22,7 @@ var rpcParams = map[string]struct{ required, optional []string }{
 	"setEDID":                 {required: []string{"edid"}},
 	"setVideoEncoderParams":   {required: []string{"params"}},
 	"refreshRegions":          {required: []string{"rects", "qp"}, optional: []string{"frames"}},
+	"setBrowserAccessState":   {required: []string{"enabled"}},
 	"setHostDisplayIdleMode":  {required: []string{"enabled"}},
 	"setVideoSleepMode":       {required: []string{"duration"}},
 	"setDevChannelState":      {required: []string{"enabled"}},

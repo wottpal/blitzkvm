@@ -93,6 +93,7 @@ func main() {
 	serveCmd.Flags().BoolVar(&cfg.AudioEnabled, "audio-enabled", false, "Start with the device's audio on (setAudioConfig; off by default, as on firmware)")
 	serveCmd.Flags().BoolVar(&cfg.AudioTone, "audio-tone", false, "Let the target play a 440 Hz tone for a second, then nothing for a second, again and again")
 	serveCmd.Flags().BoolVar(&cfg.OpusAudio, "opus-audio", false, "Like fork firmware D14: Opus audio where offered, getFirmwareFeatures lists opusAudio")
+	serveCmd.Flags().BoolVar(&cfg.BrowserAccess, "browser-access", false, "Like fork firmware D16: getBrowserAccessState/setBrowserAccessState; while off, browsers get 403")
 	serveCmd.Flags().BoolVar(&logInputs, "log-inputs", false, "Print every received input as a JSON line on stdout")
 
 	rootCmd := &cobra.Command{

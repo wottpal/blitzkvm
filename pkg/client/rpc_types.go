@@ -248,6 +248,11 @@ type DeveloperModeState struct {
 	Enabled bool `json:"enabled"`
 }
 
+// BrowserAccessState is getBrowserAccessState's result (fork firmware D16).
+type BrowserAccessState struct {
+	Enabled bool `json:"enabled"`
+}
+
 type KeyboardMacrosRequest struct {
 	Params KeyboardMacrosParams `json:"params"`
 }

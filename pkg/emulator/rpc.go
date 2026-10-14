@@ -473,6 +473,21 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 		}
 		st.DeveloperMode = params.Enabled
 		return ok(nil), nil
+	case "getBrowserAccessState":
+		if !srv.cfg.BrowserAccess {
+			return notFound(), nil
+		}
+		return ok(client.BrowserAccessState{Enabled: !st.BrowserAccessOff}), nil
+	case "setBrowserAccessState":
+		if !srv.cfg.BrowserAccess {
+			return notFound(), nil
+		}
+		params, err := decodeParams[client.EnabledStateRequest](req.Params)
+		if err != nil {
+			return invalid("missing enabled"), nil
+		}
+		st.BrowserAccessOff = !params.Enabled
+		return ok(nil), nil
 	case "getDevChannelState":
 		return ok(st.DevChannel), nil
 	case "setDevChannelState":
@@ -636,6 +651,9 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 		}
 		if srv.cfg.OpusAudio {
 			features = append(features, client.FeatureOpusAudio)
+		}
+		if srv.cfg.BrowserAccess {
+			features = append(features, client.FeatureBrowserAccess)
 		}
 		if features == nil {
 			return notFound(), nil

@@ -120,6 +120,11 @@ type Config struct {
 	// tone, the RTP timestamp running through silence), and
 	// getFirmwareFeatures lists opusAudio.
 	OpusAudio bool
+	// BrowserAccess models fork firmware D16: getFirmwareFeatures lists
+	// browserAccess, getBrowserAccessState and setBrowserAccessState switch
+	// it, and while it is off every request from a web browser (Origin,
+	// Sec-Fetch-Site or a Mozilla User-Agent) gets a 403.
+	BrowserAccess bool
 }
 
 type FaultConfig struct {
@@ -183,6 +188,7 @@ type DeviceState struct {
 	CloudAppURL         string
 	KeyboardLayout      string
 	DeveloperMode       bool
+	BrowserAccessOff    bool
 	DevChannel          bool
 	LoopbackOnly        bool
 	SSHKey              string
@@ -335,6 +341,7 @@ func NewServer(cfg Config) (*Server, error) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		offline := time.Now().Before(s.offlineUntil)
+		browsersRefused := s.state.BrowserAccessOff
 		s.mu.Unlock()
 		if offline {
 			// Rebooting: drop the connection as an unreachable host would.
@@ -345,6 +352,10 @@ func NewServer(cfg Config) (*Server, error) {
 				}
 			}
 			http.Error(w, "rebooting", http.StatusServiceUnavailable)
+			return
+		}
+		if browsersRefused && isBrowser(r) {
+			writeJSONError(w, http.StatusForbidden, "Browser access is off on this JetKVM. Connect with BlitzKVM, which can turn it back on.")
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -1168,6 +1179,14 @@ func (s *Server) writeCORS(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "Origin")
 	}
 	w.Header().Set("Content-Type", "application/json")
+}
+
+// isBrowser tells a web browser's request as fork firmware D16 does
+// (internal/webguard IsBrowser): Origin, Sec-Fetch-Site or a User-Agent
+// starting with "Mozilla/".
+func isBrowser(r *http.Request) bool {
+	return r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != "" ||
+		strings.HasPrefix(r.Header.Get("User-Agent"), "Mozilla/")
 }
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {

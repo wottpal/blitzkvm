@@ -2,7 +2,8 @@ import JetKVMCore
 import SwiftUI
 
 /// Set Up JetKVM: the BlitzKVM firmware, a password and Tailscale,
-/// each with its state and the one action that moves it forward.
+/// each with its state and the one action that moves it forward; below them,
+/// optional hardening the firmware offers (browser access).
 struct JetKVMSetupView: View {
     @ObservedObject var model: JetKVMSetupModel
     let deviceName: String
@@ -25,6 +26,11 @@ struct JetKVMSetupView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if model.hasBrowserAccessSwitch == true {
+                    Section("Optional") {
+                        browserAccessRow
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -162,12 +168,31 @@ struct JetKVMSetupView: View {
         return SetupRow(symbol: "lock.fill", tint: .orange, title: "Password", row: row, content: content, retry: model.refresh)
     }
 
+    /// Browser access (BlitzKVM firmware D16): the web interface for any
+    /// browser, or for none while this app keeps connecting.
+    private var browserAccessRow: some View {
+        let row = model.browserAccess
+        var content = RowContent(detail: "Checking…")
+        switch row.value {
+        case true?:
+            content = RowContent(detail: "Browsers allowed", note: "Any browser can open it. BlitzKVM doesn't need it.",
+                                 action: .init(title: "Turn Off…") { confirming = .browserAccessOff })
+        case false?:
+            content = RowContent(detail: "Browsers refused", note: "BlitzKVM still connects and can turn it back on.", badge: "Off",
+                                 menu: [RowAction(title: "Turn On Browser Access") { model.setBrowserAccess(true) }])
+        case nil:
+            break
+        }
+        return SetupRow(symbol: "safari", tint: .teal, title: "Browser Access", row: row, content: content, retry: model.refresh)
+    }
+
     // MARK: Confirmations
 
     private enum Confirmation: Identifiable {
         case firmware(FirmwareBuild)
         case tailscale(passwordOff: Bool)
         case restart
+        case browserAccessOff
 
         var id: String { title }
 
@@ -176,6 +201,7 @@ struct JetKVMSetupView: View {
             case .firmware(let build): return build.kind == .stock ? "Switch to \(build.title)?" : "Install \(build.title)?"
             case .tailscale: return "Install Tailscale on this JetKVM?"
             case .restart: return "Restart the JetKVM?"
+            case .browserAccessOff: return "Turn off browser access?"
             }
         }
 
@@ -190,6 +216,9 @@ struct JetKVMSetupView: View {
                     : restart + " JetKVM's automatic updates replace this build with their next release."
             case .restart:
                 return "It takes about a minute and reconnects by itself. The computer keeps running, but may briefly lose its display."
+            case .browserAccessOff:
+                return "Browsers that open the JetKVM get an error instead of its web interface. BlitzKVM keeps connecting "
+                    + "and can turn it back on here. JetKVM's own firmware ignores this setting."
             case .tailscale(let passwordOff):
                 let base = "It's downloaded from tailscale.com and installed without restarting the JetKVM. Your browser then opens to log in."
                 return passwordOff ? base + "\n\nSet a password too: everyone on your tailnet will be able to reach the JetKVM." : base
@@ -200,6 +229,7 @@ struct JetKVMSetupView: View {
             switch self {
             case .firmware(let build) where build.kind == .stock: return "Switch"
             case .restart: return "Restart"
+            case .browserAccessOff: return "Turn Off"
             default: return "Install"
             }
         }
@@ -210,6 +240,7 @@ struct JetKVMSetupView: View {
         case .firmware(let build): model.installFirmware(build)
         case .tailscale: model.installTailscale()
         case .restart: model.restartJetKVM()
+        case .browserAccessOff: model.setBrowserAccess(false)
         }
     }
 }

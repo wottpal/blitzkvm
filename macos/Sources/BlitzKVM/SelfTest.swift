@@ -471,6 +471,16 @@ final class SelfTest {
             model.changePassword(current: current, to: String(a.dropFirst("change-password=".count)))
             try? await Task.sleep(for: .milliseconds(300))
             ok = await until(30) { !model.password.isWorking } && model.password.error == nil
+        case let a where a.hasPrefix("browser-access="):
+            // browser-access=off or =on (BlitzKVM firmware D16)
+            let enabled = a == "browser-access=on"
+            guard model.hasBrowserAccessSwitch == true else {
+                ok = false
+                break
+            }
+            model.setBrowserAccess(enabled)
+            try? await Task.sleep(for: .milliseconds(300))
+            ok = await until(30) { !model.browserAccess.isWorking } && model.browserAccess.value == enabled
         case "remove-password":
             guard let current = model.knownPassword else {
                 ok = false

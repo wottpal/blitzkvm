@@ -42,7 +42,8 @@ struct Options {
     var scaling: ScalingMode?
     var profile: ModifierProfile?
     /// Self-test: open JetKVM Setup and run `check`, `install-tailscale`,
-    /// `login` (Tailscale), `restart`, `install-firmware` or `password=<new password>`.
+    /// `login` (Tailscale), `restart`, `install-firmware`, `password=<new password>`
+    /// or `browser-access=off`/`=on`.
     var setup: String?
     /// Self-test: render the setup sheet to this PNG at the end.
     var setupSnapshot: String?

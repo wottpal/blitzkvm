@@ -1675,6 +1675,9 @@ const (
 	// FeatureOpusAudio: an offer with Opus gets the device's audio as Opus,
 	// 48 kHz stereo (D14).
 	FeatureOpusAudio = "opusAudio"
+	// FeatureBrowserAccess: getBrowserAccessState and setBrowserAccessState,
+	// a switch that makes the device refuse web browsers (D16).
+	FeatureBrowserAccess = "browserAccess"
 )
 
 // probeFirmwareFeatures asks which protocol additions the firmware has (the

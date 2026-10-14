@@ -3,8 +3,9 @@ import CryptoKit
 import JetKVMCore
 
 /// The JetKVM Setup sheet's state and actions: which firmware the JetKVM
-/// runs, whether it is on Tailscale and has a password, and installing each.
-/// Owned by the device window, so an install goes on with the sheet closed.
+/// runs, whether it is on Tailscale and has a password, and installing each;
+/// optionally, whether browsers may open it. Owned by the device window, so
+/// an install goes on with the sheet closed.
 @MainActor
 final class JetKVMSetupModel: ObservableObject {
     /// One row of the sheet: the last known state, the step an action is on,
@@ -21,6 +22,11 @@ final class JetKVMSetupModel: ObservableObject {
     @Published private(set) var tailscale = Row<TailscaleState>()
     /// Whether the device asks for a password.
     @Published private(set) var password = Row<Bool>()
+    /// Whether browsers may open the device's web interface (BlitzKVM
+    /// firmware D16). Optional: not one of the summary's steps.
+    @Published private(set) var browserAccess = Row<Bool>()
+    /// The firmware has the browser access switch; nil until checked.
+    @Published private(set) var hasBrowserAccessSwitch: Bool?
     /// The firmware builds this app ships, the recommended BlitzKVM
     /// build first.
     let builds: [(build: FirmwareBuild, binary: URL)] = JetKVMSetupModel.bundledFirmware()
@@ -36,7 +42,7 @@ final class JetKVMSetupModel: ObservableObject {
         self.controller = controller
     }
 
-    var isWorking: Bool { firmware.isWorking || tailscale.isWorking || password.isWorking }
+    var isWorking: Bool { firmware.isWorking || tailscale.isWorking || password.isWorking || browserAccess.isWorking }
 
     func cancel() {
         tailscaleWatch?.cancel()
@@ -44,12 +50,13 @@ final class JetKVMSetupModel: ObservableObject {
 
     // MARK: Checking
 
-    /// Reads all three states (rows with an action under way keep theirs).
+    /// Reads every state (rows with an action under way keep theirs).
     func refresh() {
         Task {
             async let canSSH = shellWorks()
             if !tailscale.isWorking { await checkTailscale() }
             if !password.isWorking { await checkPassword() }
+            if !browserAccess.isWorking { await checkBrowserAccess() }
             let ssh = await canSSH
             if !firmware.isWorking { await checkFirmware(ssh: ssh) }
             record()
@@ -116,6 +123,21 @@ final class JetKVMSetupModel: ObservableObject {
             password.error = nil
         } else {
             password.error = "The JetKVM didn't answer."
+        }
+    }
+
+    /// Reads the browser access switch where the firmware has one; on other
+    /// firmware the row stays hidden.
+    private func checkBrowserAccess() async {
+        guard let engine = controller?.engine else { return }
+        let features = (try? await engine.call("getFirmwareFeatures", as: [String].self)) ?? []
+        hasBrowserAccessSwitch = features.contains("browserAccess")
+        guard hasBrowserAccessSwitch == true else { return }
+        do {
+            browserAccess.value = try await engine.call("getBrowserAccessState", as: EnabledState.self).enabled
+            browserAccess.error = nil
+        } catch {
+            browserAccess.error = Self.describe(error)
         }
     }
 
@@ -395,6 +417,26 @@ final class JetKVMSetupModel: ObservableObject {
         }
     }
 
+    // MARK: Browser access
+
+    /// Lets browsers open the JetKVM's web interface, or makes it refuse
+    /// them; this app connects either way.
+    func setBrowserAccess(_ enabled: Bool) {
+        guard let engine = controller?.engine, !browserAccess.isWorking else { return }
+        Task {
+            do {
+                browserAccess.error = nil
+                browserAccess.progress = enabled ? "Turning on browser access…" : "Turning off browser access…"
+                try await engine.call("setBrowserAccessState", params: .object(["enabled": .bool(enabled)]))
+                browserAccess.progress = nil
+                browserAccess.value = enabled
+            } catch {
+                browserAccess.progress = nil
+                browserAccess.error = Self.describe(error)
+            }
+        }
+    }
+
     // MARK: SSH
 
     private var shell: JetKVMShell? {
@@ -414,7 +456,7 @@ final class JetKVMSetupModel: ObservableObject {
         guard let shell, let engine = controller?.engine else { throw SetupError("Not connected.") }
         let key = try JetKVMShell.publicKey()
         if await shellWorks() { return shell }
-        if try await engine.call("getDevModeState", as: DevModeState.self).enabled == false {
+        if try await engine.call("getDevModeState", as: EnabledState.self).enabled == false {
             try await engine.call("setDevModeState", params: .object(["enabled": .bool(true)]))
         }
         let keys = try await engine.call("getSSHKeyState", as: String.self)
@@ -438,6 +480,7 @@ final class JetKVMSetupModel: ObservableObject {
     var isSettled: Bool {
         !isWorking && (firmware.value != nil || firmware.error != nil) && (tailscale.value != nil || tailscale.error != nil)
             && (password.value != nil || password.error != nil)
+            && (hasBrowserAccessSwitch == false || browserAccess.value != nil || browserAccess.error != nil)
     }
 
     var report: [String: Any] {
@@ -445,6 +488,7 @@ final class JetKVMSetupModel: ObservableObject {
             row.error.map { "error: \($0)" } ?? row.value.map { "\($0)" } ?? "unknown"
         }
         return ["firmware": text(firmware), "tailscale": text(tailscale), "password": text(password),
+                "browserAccess": hasBrowserAccessSwitch == false ? "no switch" : text(browserAccess),
                 "bundledFirmware": builds.map(\.build.title)]
     }
 
@@ -454,7 +498,8 @@ final class JetKVMSetupModel: ObservableObject {
         var appVersion: String
     }
 
-    private struct DevModeState: Decodable {
+    /// getDevModeState's and getBrowserAccessState's result.
+    private struct EnabledState: Decodable {
         var enabled: Bool
     }
 
