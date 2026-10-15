@@ -32,6 +32,8 @@ public struct Device: Codable, Equatable, Identifiable {
     public var lastConnected: Date?
     /// The last JetKVM Setup check, shown in the Devices window.
     public var setup: SetupSummary?
+    /// Clipboard sync with the remote Mac, once set up (JetKVM Setup).
+    public var clipboardSync: ClipboardSync?
 
     public init(id: String = UUID().uuidString, name: String, addresses: [String], deviceID: String? = nil,
                 modifierProfile: ModifierProfile = .mac, scaling: ScalingMode = .actualSize,

@@ -64,6 +64,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     var onAddressesChanged: ((DeviceWindowController) -> Void)?
     /// JetKVM Setup checked the device: persist the summary.
     var onSetupChecked: ((DeviceWindowController, SetupSummary) -> Void)?
+    /// Clipboard sync was set up, turned on or off, or removed: persist it.
+    var onClipboardChanged: ((DeviceWindowController) -> Void)?
+    /// Clipboard sync's state as the engine reports it ("off" until it runs).
+    var clipboardLive = ClipboardLive()
     /// Opens the setup sheet once the session connects.
     var showsSetupOnConnect = false
     private var setupModel: JetKVMSetupModel?
@@ -257,6 +261,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         device = edited
         device.deviceID = keep.deviceID ?? edited.deviceID
         device.certificateSHA256 = keep.certificateSHA256 ?? edited.certificateSHA256
+        device.clipboardSync = keep.clipboardSync // JetKVM Setup owns it
         applyPreferences()
         if edited.adaptiveQuality != keep.adaptiveQuality && !input.viewOnly {
             engine.setAutoQuality(edited.adaptiveQuality)
@@ -503,6 +508,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         try engine.start()
         audio.setEnabled(playsAudio)
         connectEngine()
+        applyClipboardSync()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.input.ensureEventTap()
             self?.refreshStatus()
@@ -683,6 +689,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         statusTimer?.invalidate()
         stallTimer?.invalidate()
         setupModel?.cancel()
+        ClipboardBridge.shared.unregister(self)
         reprobeTimer?.invalidate()
         pathMonitor?.cancel()
         mediaWindow?.close()
@@ -960,6 +967,33 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         if let error, !error.isEmpty {
             refreshStatus(extra: error)
         }
+    }
+
+    /// Records clipboard sync's new setting (nil: removed), applies and
+    /// persists it (ClipboardSync.swift).
+    func updateClipboardSync(_ sync: ClipboardSync?) {
+        device.clipboardSync = sync
+        if sync?.enabled != true { clipboardLive = ClipboardLive() }
+        applyClipboardSync()
+        onClipboardChanged?(self)
+    }
+
+    func engine(_ engine: EngineProcess, didReceiveClipboard items: [String: Data]) {
+        guard device.clipboardSync?.enabled == true else { return }
+        ClipboardBridge.shared.write(items, from: device.id)
+    }
+
+    func engine(_ engine: EngineProcess, didUpdateClipboardState state: String, message: String?) {
+        let live = ClipboardLive(state: state, message: message)
+        guard live != clipboardLive else { return }
+        AppLog.log("\(device.name): clipboard sync \(state)\(message.map { ": \($0)" } ?? "")")
+        clipboardLive = live
+        followClipboard(state == "active")
+        setupModel?.clipboardLiveChanged()
+    }
+
+    func engine(_ engine: EngineProcess, didReportClipboardSetup step: String) {
+        setupModel?.clipboardSetupStep(step)
     }
 
     func engineDidRestart(_ engine: EngineProcess, reason: String) {

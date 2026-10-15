@@ -63,6 +63,7 @@ final class SelfTest {
     private var refreshActiveAt: Double?
     private var latestFrame: CVPixelBuffer?
     private var setupReport: [String: Any]?
+    private var clipboardReport: [String: Any]?
     private var setupOK = false
     private var finished = false
     private var extras: [String: Any] = [:]
@@ -428,73 +429,98 @@ final class SelfTest {
         }
         AppLog.log("selftest: setup before \(model.report)")
         var ok = true
-        switch action {
-        case "check":
-            break
-        case "install-tailscale":
-            model.installTailscale()
-            try? await Task.sleep(for: .milliseconds(300))
-            ok = await until(600) {
-                switch model.tailscale.value {
-                case .needsLogin?, .running?: return !model.tailscale.isWorking
-                default: return model.tailscale.error != nil && !model.tailscale.isWorking
+        // Several actions run in turn: --setup clipboard,clipboard-roundtrip
+        for action in action.split(separator: ",").map(String.init) where ok {
+            AppLog.log("selftest: setup action \(action)")
+            switch action {
+            case "check":
+                break
+            case "install-tailscale":
+                model.installTailscale()
+                try? await Task.sleep(for: .milliseconds(300))
+                ok = await until(600) {
+                    switch model.tailscale.value {
+                    case .needsLogin?, .running?: return !model.tailscale.isWorking
+                    default: return model.tailscale.error != nil && !model.tailscale.isWorking
+                    }
+                } && model.tailscale.error == nil
+            case "restart":
+                model.restartJetKVM()
+                try? await Task.sleep(for: .milliseconds(300))
+                ok = await until(300) { !model.firmware.isWorking } && model.firmware.error == nil
+            case "login":
+                model.logIn()
+                try? await Task.sleep(for: .milliseconds(300))
+                ok = await until(60) {
+                    switch model.tailscale.value {
+                    case .needsLogin(_?)?, .running?: return !model.tailscale.isWorking
+                    default: return model.tailscale.error != nil && !model.tailscale.isWorking
+                    }
+                } && model.tailscale.error == nil
+            case let a where a.hasPrefix("install-firmware"):
+                // install-firmware (the recommended build), =blitzkvm or =stock
+                let kind = a.split(separator: "=").dropFirst().first.flatMap { FirmwareBuild.Kind(rawValue: String($0)) } ?? .blitzkvm
+                guard let build = model.builds.first(where: { $0.build.kind == kind })?.build else {
+                    ok = false
+                    break
                 }
-            } && model.tailscale.error == nil
-        case "restart":
-            model.restartJetKVM()
-            try? await Task.sleep(for: .milliseconds(300))
-            ok = await until(300) { !model.firmware.isWorking } && model.firmware.error == nil
-        case "login":
-            model.logIn()
-            try? await Task.sleep(for: .milliseconds(300))
-            ok = await until(60) {
-                switch model.tailscale.value {
-                case .needsLogin(_?)?, .running?: return !model.tailscale.isWorking
-                default: return model.tailscale.error != nil && !model.tailscale.isWorking
+                model.installFirmware(build)
+                try? await Task.sleep(for: .seconds(1))
+                ok = await until(600) { !model.firmware.isWorking } && model.firmware.error == nil
+            case let a where a.hasPrefix("change-password="):
+                guard let current = model.knownPassword else {
+                    ok = false
+                    break
                 }
-            } && model.tailscale.error == nil
-        case let a where a.hasPrefix("install-firmware"):
-            // install-firmware (the recommended build), =blitzkvm or =stock
-            let kind = a.split(separator: "=").dropFirst().first.flatMap { FirmwareBuild.Kind(rawValue: String($0)) } ?? .blitzkvm
-            guard let build = model.builds.first(where: { $0.build.kind == kind })?.build else {
+                model.changePassword(current: current, to: String(a.dropFirst("change-password=".count)))
+                try? await Task.sleep(for: .milliseconds(300))
+                ok = await until(30) { !model.password.isWorking } && model.password.error == nil
+            case let a where a.hasPrefix("browser-access="):
+                // browser-access=off or =on (BlitzKVM firmware D16)
+                let enabled = a == "browser-access=on"
+                guard model.hasBrowserAccessSwitch == true else {
+                    ok = false
+                    break
+                }
+                model.setBrowserAccess(enabled)
+                try? await Task.sleep(for: .milliseconds(300))
+                ok = await until(30) { !model.browserAccess.isWorking } && model.browserAccess.value == enabled
+            case "remove-password":
+                guard let current = model.knownPassword else {
+                    ok = false
+                    break
+                }
+                model.removePassword(current: current)
+                try? await Task.sleep(for: .milliseconds(300))
+                ok = await until(30) { !model.password.isWorking } && model.password.value == false
+            case let a where a.hasPrefix("password="):
+                model.createPassword(String(a.dropFirst("password=".count)))
+                try? await Task.sleep(for: .milliseconds(300))
+                ok = await until(30) { !model.password.isWorking } && model.password.value == true
+            case "clipboard":
+                model.setUpClipboard()
+                try? await Task.sleep(for: .milliseconds(300))
+                ok = await until(300) { !model.clipboard.isWorking } && model.clipboard.error == nil
+                    && model.clipboard.value?.sync != nil
+            case "clipboard-on", "clipboard-off":
+                model.setClipboardEnabled(action == "clipboard-on")
+                ok = controller?.device.clipboardSync?.enabled == (action == "clipboard-on")
+            case "clipboard-remove":
+                model.removeClipboard()
+                try? await Task.sleep(for: .milliseconds(300))
+                ok = await until(120) { !model.clipboard.isWorking } && model.clipboard.error == nil
+                    && controller?.device.clipboardSync == nil
+            case "clipboard-roundtrip":
+                ok = await clipboardRoundtrip(until: until)
+            case let a where a.hasPrefix("snapshot="):
+                // The sheet as it is between two actions.
+                model.refresh()
+                try? await Task.sleep(for: .seconds(1)) // the checks, then a render
+                _ = await until(30) { model.isSettled }
+                ok = controller?.writeSetupSnapshot(to: URL(fileURLWithPath: String(a.dropFirst("snapshot=".count)))) == true
+            default:
                 ok = false
-                break
             }
-            model.installFirmware(build)
-            try? await Task.sleep(for: .seconds(1))
-            ok = await until(600) { !model.firmware.isWorking } && model.firmware.error == nil
-        case let a where a.hasPrefix("change-password="):
-            guard let current = model.knownPassword else {
-                ok = false
-                break
-            }
-            model.changePassword(current: current, to: String(a.dropFirst("change-password=".count)))
-            try? await Task.sleep(for: .milliseconds(300))
-            ok = await until(30) { !model.password.isWorking } && model.password.error == nil
-        case let a where a.hasPrefix("browser-access="):
-            // browser-access=off or =on (BlitzKVM firmware D16)
-            let enabled = a == "browser-access=on"
-            guard model.hasBrowserAccessSwitch == true else {
-                ok = false
-                break
-            }
-            model.setBrowserAccess(enabled)
-            try? await Task.sleep(for: .milliseconds(300))
-            ok = await until(30) { !model.browserAccess.isWorking } && model.browserAccess.value == enabled
-        case "remove-password":
-            guard let current = model.knownPassword else {
-                ok = false
-                break
-            }
-            model.removePassword(current: current)
-            try? await Task.sleep(for: .milliseconds(300))
-            ok = await until(30) { !model.password.isWorking } && model.password.value == false
-        case let a where a.hasPrefix("password="):
-            model.createPassword(String(a.dropFirst("password=".count)))
-            try? await Task.sleep(for: .milliseconds(300))
-            ok = await until(30) { !model.password.isWorking } && model.password.value == true
-        default:
-            ok = false
         }
         model.refresh()
         try? await Task.sleep(for: .seconds(1))
@@ -510,6 +536,41 @@ final class SelfTest {
         setupOK = ok && model.isSettled
         AppLog.log("selftest: setup after \(model.report)")
         finish()
+    }
+
+    /// Clipboard sync both ways: puts a token on this Mac's clipboard, types
+    /// a command on the remote Mac that appends "-back" to its clipboard
+    /// (the remote's frontmost window must be a shell prompt), and waits for
+    /// the result here. This Mac's clipboard text is restored afterwards.
+    @MainActor private func clipboardRoundtrip(until: (Double, () -> Bool) async -> Bool) async -> Bool {
+        guard let controller, await until(60, { controller.clipboardLive.state == "active" }) else {
+            clipboardReport = ["error": "sync didn't become active: \(controller?.clipboardLive.message ?? "")"]
+            return false
+        }
+        let pasteboard = NSPasteboard.general
+        let saved = pasteboard.string(forType: .string)
+        defer {
+            if let saved {
+                pasteboard.clearContents()
+                pasteboard.setString(saved, forType: .string)
+            }
+        }
+        let token = "BlitzKVM self-test \(UUID().uuidString.prefix(8))"
+        pasteboard.clearContents()
+        pasteboard.setString(token, forType: .string)
+        let sent = Date()
+        try? await Task.sleep(for: .seconds(2))
+        do {
+            try await controller.engine.run(EngineCommand(cmd: "paste", text: "osascript -e 'set the clipboard to (the clipboard) & \"-back\"'\n",
+                                                          delay: 20))
+        } catch {
+            clipboardReport = ["error": "typing on the remote Mac failed: \(error.localizedDescription)"]
+            return false
+        }
+        let ok = await until(20) { pasteboard.string(forType: .string) == token + "-back" }
+        clipboardReport = ["token": token, "back": pasteboard.string(forType: .string) ?? "", "ok": ok,
+                           "seconds": (Date().timeIntervalSince(sent) * 10).rounded() / 10]
+        return ok
     }
 
     private func finish() {
@@ -590,6 +651,7 @@ final class SelfTest {
         }
         if setupAction != nil {
             report["setup"] = setupReport ?? ["error": "not finished"]
+            if let clipboardReport { report["clipboardRoundtrip"] = clipboardReport }
             report["setupOK"] = setupOK
         }
         if let setupSnapshotPath {

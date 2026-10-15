@@ -72,3 +72,21 @@ func TestEverySupportedLayoutHasATable(t *testing.T) {
 		}
 	}
 }
+
+func TestLetterKeyFollowsTheLayout(t *testing.T) {
+	for _, tc := range []struct {
+		layout string
+		r      rune
+		hid    byte
+	}{
+		{"en-US", 'w', 0x1a},
+		{"de-DE", 'z', 0x1c}, // QWERTZ: Z where Y is on QWERTY
+		{"fr-FR", 'w', 0x1d}, // AZERTY: W where Z is
+		{"", 'n', 0x11},
+	} {
+		hid, ok := LetterKey(tc.layout, tc.r)
+		if !ok || hid != tc.hid {
+			t.Errorf("%s %q: %#x %v, want %#x", tc.layout, tc.r, hid, ok, tc.hid)
+		}
+	}
+}

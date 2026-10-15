@@ -13,6 +13,11 @@ protocol EngineProcessDelegate: AnyObject {
     func engine(_ engine: EngineProcess, didFinishCommand id: Int64, error: String?, invalid: String?)
     func engine(_ engine: EngineProcess, didReceiveSerial text: String)
     func engine(_ engine: EngineProcess, didUpdateUpload progress: UploadProgress)
+    /// Clipboard sync (pkg/hostlink): the remote Mac's new clipboard, the
+    /// sync's state ("connecting", "active", "error", "off") and a setup step.
+    func engine(_ engine: EngineProcess, didReceiveClipboard items: [String: Data])
+    func engine(_ engine: EngineProcess, didUpdateClipboardState state: String, message: String?)
+    func engine(_ engine: EngineProcess, didReportClipboardSetup step: String)
     func engineDidRestart(_ engine: EngineProcess, reason: String)
 }
 
@@ -36,6 +41,8 @@ final class EngineProcess {
     private var readHandles: [FileHandle] = []
     // Main-thread state.
     private var lastConnect: EngineCommand?
+    /// The running clipboard sync, replayed after a restart like lastConnect.
+    private var clipboardStart: EngineCommand?
     private var videoPaused = false
     private var stopped = false
     private var restartDelay: TimeInterval = 0.5
@@ -187,6 +194,10 @@ final class EngineProcess {
                     connect.id = nil
                     self.send(command: connect)
                 }
+                if var clipboard = self.clipboardStart {
+                    clipboard.id = nil
+                    self.send(command: clipboard)
+                }
             } catch {
                 self.delegate?.engineDidRestart(self, reason: "relaunch failed: \(error)")
             }
@@ -206,9 +217,10 @@ final class EngineProcess {
             case .event:
                 handleEvent(payload)
             case .commandDone, .rpcResult:
-                // RPC results share the id/error shape, plus a result.
+                // RPC results share the id/error shape, plus a result (which
+                // some commands have too).
                 if let result = try? JSONDecoder().decode(CommandResult.self, from: payload) {
-                    let value = type == .rpcResult ? (try? JSONSerialization.jsonObject(with: payload) as? [String: Any])?["result"] : nil
+                    let value = (try? JSONSerialization.jsonObject(with: payload) as? [String: Any])?["result"]
                     let resultData = value.flatMap { try? JSONSerialization.data(withJSONObject: $0, options: .fragmentsAllowed) }
                     DispatchQueue.main.async {
                         if let continuation = self.waiting.removeValue(forKey: result.id) {
@@ -248,6 +260,16 @@ final class EngineProcess {
                   let data = try? JSONSerialization.data(withJSONObject: raw),
                   let progress = try? JSONDecoder().decode(UploadProgress.self, from: data) else { return }
             DispatchQueue.main.async { self.delegate?.engine(self, didUpdateUpload: progress) }
+        case "clipboard":
+            guard let items = ClipboardPolicy.items(fromClip: object["clip"]) else { return }
+            DispatchQueue.main.async { self.delegate?.engine(self, didReceiveClipboard: items) }
+        case "clipboardState":
+            let state = object["text"] as? String ?? "off"
+            let message = object["message"] as? String
+            DispatchQueue.main.async { self.delegate?.engine(self, didUpdateClipboardState: state, message: message) }
+        case "clipboardSetup":
+            guard let step = object["message"] as? String else { return }
+            DispatchQueue.main.async { self.delegate?.engine(self, didReportClipboardSetup: step) }
         case "stats":
             // {"stats": {"stats": {...client stats...}, "engineDroppedUnits": n}}
             guard let wrapper = object["stats"] as? [String: Any] else { return }
@@ -319,6 +341,19 @@ final class EngineProcess {
         guard paused != videoPaused else { return }
         videoPaused = paused
         send(command: EngineCommand(cmd: "setVideoPaused", paused: paused))
+    }
+
+    /// Starts clipboard sync (params: pkg/engine's clipboardParams), also for
+    /// a restarted helper; nil stops it.
+    func setClipboardSync(_ params: JSONValue?) {
+        if let params {
+            let command = EngineCommand(cmd: "clipboardStart", params: params)
+            clipboardStart = command
+            send(command: command)
+        } else if clipboardStart != nil {
+            clipboardStart = nil
+            send(command: EngineCommand(cmd: "clipboardStop"))
+        }
     }
 
     /// Asks the device for a keyframe. Any thread; no reply.

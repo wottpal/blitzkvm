@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Set Up JetKVM: the BlitzKVM firmware, a password and Tailscale,
 /// each with its state and the one action that moves it forward; below them,
-/// optional hardening the firmware offers (browser access).
+/// optional features the firmware offers (browser access, clipboard sync).
 struct JetKVMSetupView: View {
     @ObservedObject var model: JetKVMSetupModel
     let deviceName: String
@@ -27,9 +27,10 @@ struct JetKVMSetupView: View {
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                if model.hasBrowserAccessSwitch == true {
+                if model.hasBrowserAccessSwitch == true || model.hasHostLink == true {
                     Section("Optional") {
-                        browserAccessRow
+                        if model.hasBrowserAccessSwitch == true { browserAccessRow }
+                        if model.hasHostLink == true { clipboardRow }
                     }
                 }
             }
@@ -186,6 +187,54 @@ struct JetKVMSetupView: View {
         return SetupRow(symbol: "safari", tint: .teal, title: "Browser Access", row: row, content: content, retry: model.refresh)
     }
 
+    /// Clipboard sync with the remote Mac (BlitzKVM firmware D17): set up
+    /// once (a key installed there), then on or off; removing takes the key
+    /// back off the Mac.
+    private var clipboardRow: some View {
+        let row = model.clipboard
+        var content = RowContent(detail: "Checking…")
+        let remove = RowAction(title: "Remove…") { confirming = .clipboardRemove }
+        let forget = RowAction(title: "Forget on This Mac…") { confirming = .clipboardForget }
+        if let state = row.value {
+            let target = state.sync.map { sync in sync.computerName.map { "\(sync.user) on \($0)" } ?? sync.user } ?? ""
+            let turnOff = RowAction(title: "Turn Off") { model.setClipboardEnabled(false) }
+            switch state.sync {
+            case nil:
+                content = RowContent(detail: "Not set up", note: "Copy on one Mac, paste on the other.",
+                                     action: .init(title: "Set Up…") { confirming = .clipboardSetUp })
+            case let sync? where !sync.enabled:
+                content = RowContent(detail: "Off", note: "Set up for \(target).",
+                                     action: .init(title: "Turn On") { model.setClipboardEnabled(true) }, menu: [remove, forget])
+            case _ where state.live.state == "needsSetup":
+                // The model shows the reason as the row's error.
+                content = RowContent(detail: target, action: .init(title: "Set Up Again…") { confirming = .clipboardSetUp },
+                                     menu: [turnOff, remove, forget])
+            case _ where state.live.state == "error":
+                // It retries by itself; the model shows why it stopped.
+                content = RowContent(detail: target, action: .init(title: "Turn Off") { model.setClipboardEnabled(false) },
+                                     menu: [remove, forget])
+            default:
+                content = RowContent(detail: target, note: Self.readAccessNote(state.readAccess)
+                                        ?? (state.live.state == "active" ? "Syncing text, rich text and images." : "Connecting…"),
+                                     badge: "On", menu: [turnOff, remove, forget])
+            }
+        }
+        return SetupRow(symbol: "doc.on.clipboard", tint: .green, title: "Clipboard Sync", row: row, content: content,
+                        retry: model.refresh)
+    }
+
+    /// What macOS's pasteboard privacy means for sync, when it gets in the way.
+    private static func readAccessNote(_ access: ClipboardBridge.ReadAccess) -> String? {
+        switch access {
+        case .denied:
+            return "macOS blocks BlitzKVM from the clipboard: allow it in Privacy & Security."
+        case .asks:
+            return "macOS asks each time: set BlitzKVM to Always Allow in Privacy & Security."
+        case .allowed:
+            return nil
+        }
+    }
+
     // MARK: Confirmations
 
     private enum Confirmation: Identifiable {
@@ -193,6 +242,9 @@ struct JetKVMSetupView: View {
         case tailscale(passwordOff: Bool)
         case restart
         case browserAccessOff
+        case clipboardSetUp
+        case clipboardRemove
+        case clipboardForget
 
         var id: String { title }
 
@@ -202,6 +254,9 @@ struct JetKVMSetupView: View {
             case .tailscale: return "Install Tailscale on this JetKVM?"
             case .restart: return "Restart the JetKVM?"
             case .browserAccessOff: return "Turn off browser access?"
+            case .clipboardSetUp: return "Set up clipboard sync?"
+            case .clipboardRemove: return "Remove clipboard sync?"
+            case .clipboardForget: return "Forget clipboard sync on this Mac?"
             }
         }
 
@@ -219,6 +274,19 @@ struct JetKVMSetupView: View {
             case .browserAccessOff:
                 return "Browsers that open the JetKVM get an error instead of its web interface. BlitzKVM keeps connecting "
                     + "and can turn it back on here. JetKVM's own firmware ignores this setting."
+            case .clipboardSetUp:
+                return "The JetKVM adds a USB network link to the remote Mac, whose keyboard, mouse and virtual media reconnect once. "
+                    + "BlitzKVM then opens Terminal there and types one command that lets this Mac's key in, over that link only.\n\n"
+                    + "The remote Mac must be unlocked, with Remote Login on (System Settings › General › Sharing), and its "
+                    + "input source must match the JetKVM's keyboard layout (English US or German). Don't type on it until setup "
+                    + "is done. A MacBook may first ask whether to allow the changed accessory."
+            case .clipboardRemove:
+                return "BlitzKVM takes its key off the remote Mac and turns the USB link off; the remote Mac's keyboard, mouse "
+                    + "and virtual media reconnect once."
+            case .clipboardForget:
+                return "For a remote Mac BlitzKVM can't reach any more: it forgets the setup here and turns the USB link off. "
+                    + "Its key stays in that Mac's ~/.ssh/authorized_keys (the line ending in \"BlitzKVM on …\"), "
+                    + "usable only through this JetKVM's USB link."
             case .tailscale(let passwordOff):
                 let base = "It's downloaded from tailscale.com and installed without restarting the JetKVM. Your browser then opens to log in."
                 return passwordOff ? base + "\n\nSet a password too: everyone on your tailnet will be able to reach the JetKVM." : base
@@ -230,6 +298,9 @@ struct JetKVMSetupView: View {
             case .firmware(let build) where build.kind == .stock: return "Switch"
             case .restart: return "Restart"
             case .browserAccessOff: return "Turn Off"
+            case .clipboardSetUp: return "Set Up"
+            case .clipboardRemove: return "Remove"
+            case .clipboardForget: return "Forget"
             default: return "Install"
             }
         }
@@ -241,6 +312,9 @@ struct JetKVMSetupView: View {
         case .tailscale: model.installTailscale()
         case .restart: model.restartJetKVM()
         case .browserAccessOff: model.setBrowserAccess(false)
+        case .clipboardSetUp: model.setUpClipboard()
+        case .clipboardRemove: model.removeClipboard()
+        case .clipboardForget: model.removeClipboard(localOnly: true)
         }
     }
 }

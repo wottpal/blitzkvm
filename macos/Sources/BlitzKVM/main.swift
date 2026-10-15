@@ -324,6 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.onPreferencesChanged = { [weak self] c in self?.recordPreferences(c.device) }
             controller.onAddressesChanged = { [weak self] c in self?.recordAddresses(c.device) }
             controller.onSetupChecked = { [weak self] c, summary in self?.recordSetup(summary, for: c.device) }
+            controller.onClipboardChanged = { [weak self] c in self?.recordClipboard(c.device) }
         }
         let tabHost = (windows.first { $0.window?.isKeyWindow == true } ?? windows.last)?.window
         windows.append(controller)
@@ -400,6 +401,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func recordAddresses(_ device: Device) {
         guard var saved = store.device(id: device.id) else { return }
         for address in device.addresses { _ = saved.addAddress(address) }
+        store.upsert(saved)
+        try? store.save()
+        devicesModel.reload()
+    }
+
+    /// Persists clipboard sync's setup and setting.
+    private func recordClipboard(_ device: Device) {
+        guard var saved = store.device(id: device.id) else { return }
+        saved.clipboardSync = device.clipboardSync
         store.upsert(saved)
         try? store.save()
         devicesModel.reload()

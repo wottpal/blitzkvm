@@ -16,6 +16,7 @@ BlitzKVM started from [lkarlslund/jetkvm-desktop](https://github.com/lkarlslund/
 - **Sound.** The remote computer's audio plays here: Opus stereo with the BlitzKVM firmware, and nothing on the wire while it is silent.
 - **Slow links.** Automatic quality follows each frame's queueing delay, so cellular and relayed Tailscale links stay usable.
 - **Everything a KVM needs.** Keyboard capture including system shortcuts, an absolute pointer that goes where you hover, paste as keystrokes, virtual media, serial console, ATX/DC power, Wake Computer, several devices as tabs.
+- **Clipboard sync with a Mac.** Copy on one Mac, paste on the other: text, rich text and images, over the JetKVM's USB cable, with nothing installed on the remote Mac but a key (BlitzKVM firmware).
 - **JetKVM Setup.** Firmware, password and Tailscale on the device, each with one button.
 - **Updates itself.** From signed, notarized GitHub releases, after asking or on its own when you quit.
 
@@ -39,7 +40,7 @@ On first launch a welcome screen asks for **Local Network** access (required: Je
 
 The Devices window (⌘N) holds the device library: a name, an ordered list of addresses (LAN IP, `.local` name, VPN name; `https://…` for TLS) and per-device preferences. Addresses are probed over HTTP in parallel and the earliest that answers wins; probing never opens a WebRTC session, because that would take over an existing one. Devices show as a gallery of screens that light up while the device answers (the same probe, every 30 s while the window is visible); the most recently used one starts selected, so Return connects it.
 
-**JetKVM Setup** (Device › Set Up JetKVM…, or the setup badge on a device in the Devices window) shows three things and fixes each with one button. The badge shows how far a device is (a dot per step, filled when done) as of the last check; every connection checks quietly, and a click on the badge connects and opens the sheet. Below them, optional: on BlitzKVM firmware that has the switch, **Browser Access** turns off the device's web interface for browsers; the app keeps connecting and can turn it back on.
+**JetKVM Setup** (Device › Set Up JetKVM…, or the setup badge on a device in the Devices window) shows three things and fixes each with one button. The badge shows how far a device is (a dot per step, filled when done) as of the last check; every connection checks quietly, and a click on the badge connects and opens the sheet. Below them, optional: on BlitzKVM firmware that has the switch, **Browser Access** turns off the device's web interface for browsers; the app keeps connecting and can turn it back on. On BlitzKVM firmware with the USB link, **Clipboard Sync** sets up, turns on or off, and removes clipboard sync with the remote Mac ([below](#clipboard-sync)).
 - **Firmware:** the app ships two builds, so nothing is downloaded: the BlitzKVM firmware (recommended) and JetKVM's own latest release, both pinned by SHA-256 in `macos/Support/Firmware.json`. The row shows which runs (by the installed binary's hash). Its button installs the BlitzKVM build; its menu reinstalls either, switches to JetKVM's own, or restarts the JetKVM. Installing uploads the build next to the running app, checks it, and restarts the JetKVM, which moves it into place as it does an update (about a minute). The previous build stays as `/userdata/jetkvm/jetkvm_app.backup`. JetKVM's automatic updates replace a BlitzKVM build with their next release.
 - **Password:** set the JetKVM's first password (kept in your keychain), so not everyone who can reach it controls the computer. Its menu changes the password or turns it off.
 - **Tailscale:** Install downloads the current release for 32-bit ARM from pkgs.tailscale.com, checks it against its SHA-256, and installs it as `tailscale configure jetkvm` expects, so it starts at boot. The JetKVM doesn't restart. The kernel's `tun` module gives it a real `tailscale0` interface. Your browser opens to log in, and once the JetKVM is on the tailnet its name (e.g. `mac-mini-jetkvm.<tailnet>.ts.net`) is added to the device's addresses. Turn off key expiry for it in the admin console, or it drops off the tailnet when its key expires.
@@ -94,6 +95,16 @@ With the BlitzKVM firmware a still screen refreshes to near-lossless: half a sec
 - **After a long pause** (no input for 3 s, picture still for 1 s) the whole frame gets the near-lossless keyframe, over the LAN and links as fast as one.
 - **Slower links** get region refreshes only. A blinking caret or a ticking clock asks for nothing. View-only windows, the lowest quality level and other firmware keep the device's own refresh.
 
+### Clipboard sync
+
+With the BlitzKVM firmware (0.5.9-fork.8 or later) and a Mac on the other end, JetKVM Setup › Clipboard Sync › Set Up… syncs the two clipboards both ways: what you copy on one Mac is on the other's clipboard a moment later.
+- **What it needs on the remote Mac:** Remote Login on (System Settings › General › Sharing), and nothing else. The remote Mac must be unlocked during setup, which takes about a minute; on a locked Mac the keystrokes would go to the password field.
+- **Setup:** the JetKVM adds a USB network link to the remote Mac (its keyboard, mouse and virtual media reconnect once; a MacBook may first ask whether to allow the changed accessory). The app then opens Terminal there through ⌘Space (Spotlight, or a launcher in its place), types one command and closes that window again. The command adds this Mac's key to `~/.ssh/authorized_keys`, usable only from the JetKVM's end of the link and without a terminal or forwarding, and tells the JetKVM the account's name.
+- **Keyboard layouts:** the JetKVM types through Windows-based layout tables, and on a Mac some characters sit on other keys, differently for each layout. Setup types only characters that the English (US) and German layouts place the same way on a Mac; for other layouts, set the JetKVM's keyboard layout and the remote Mac's input source to one of them for the setup. As for paste, the two must match.
+- **While it syncs:** the app logs in to the remote Mac's own SSH server through the JetKVM (end to end: the JetKVM never sees the key or the clipboard) and runs a small script there with `osascript`, sent with every session, that watches the clipboard. It ends with the session (a few minutes later if the USB cable is pulled mid-session). Synced: plain and rich text, HTML, links, and PNG or TIFF images, up to 8 MB per copy (images are left out first). Files aren't, and neither is anything a password manager marks as private. What was on either clipboard before syncing started stays where it is.
+- **Turn Off** stops syncing and keeps the key on the remote Mac; **Remove…** takes the key off the remote Mac and turns the USB link off.
+- On macOS 15.4 and later, macOS may ask whether BlitzKVM may read the clipboard. Allow it, or set BlitzKVM to Always Allow in System Settings › Privacy & Security › Paste from Other Apps; the setup row says so when macOS asks or refuses.
+
 ### Audio
 
 View › Play Audio (on by default, for all windows; turned off it mutes at once, turned on it reconnects windows that connected without it): the remote computer's sound plays on this Mac.
@@ -115,6 +126,7 @@ The BlitzKVM firmware is JetKVM's open-source firmware ([jetkvm/kvm](https://git
 - Wheel steps over HID-RPC and a 1 s cap on the input channel's retransmission timeout.
 - Hardening: other websites can't reach the device through your browser (cross-site requests, DNS rebinding), malformed input can't crash it, and secrets stay out of its logs.
 - A switch, in JetKVM Setup, that turns off the web interface for browsers while this app keeps connecting.
+- An opt-in USB network link to the computer, for clipboard sync. The device runs its own network stack there, so none of its services (web interface, SSH) is reachable from the computer over the cable.
 
 Install it with JetKVM Setup (one button; the previous build stays on the device as a backup), and switch back to JetKVM's own release from the same menu. JetKVM's automatic updates replace it with their next release. Installing any firmware other than JetKVM's own is at your own risk.
 
@@ -126,6 +138,7 @@ Install it with JetKVM Setup (one button; the previous build stays on the device
 - **Passwords** live in the login keychain.
 - **JetKVM Setup** turns on Developer Mode on the device and adds the app's own SSH key (`~/Library/Application Support/BlitzKVM/SSH/`) to it, keeping any others.
 - **Browser access off** (optional, BlitzKVM firmware with the switch): the device refuses every web browser, so other websites can't reach it through yours; only apps like this one connect. JetKVM's own firmware ignores the setting.
+- **Clipboard sync** (optional, BlitzKVM firmware with the USB link): the remote Mac accepts the app's clipboard key (`~/Library/Application Support/BlitzKVM/SSH/clipboard_ed25519`) only from the JetKVM's end of the USB link, and the app pins the remote Mac's SSH host key at setup. The session is SSH end to end, so the JetKVM relays it without seeing the clipboard. Items a password manager marks as private aren't synced.
 
 Report security issues privately as described in [SECURITY.md](SECURITY.md).
 
@@ -285,7 +298,7 @@ Also used by the self-tests:
 | `--view-only` | Never send keyboard or mouse input |
 | `--scale actualSize\|fit\|pixelExact\|integer\|matchWindow`, `--match-scale 1.5`, `--match-refresh 60\|auto`, `--scaling-filter lanczos`, `--local-pointer hidden\|dot\|arrow`, `--profile mac\|pc`, `--window-size 1280x720`, `--full-screen` | View and input overrides |
 | `--selftest <seconds>` and `--crash-engine-after`, `--inject-input`, `--exercise-extras`, `--snapshot <png>`, `--hide-after <seconds>`, `--max-freeze-ms <ms>`, `--set-quality-after 4:low,9:maximum`, `--toggle-status-bar-after <seconds>`, `--type-pauses`, `--expect-audio opus\|pcmu\|none` | Self-test mode (prints JSON, exits 0 on success). The window floats above other windows and never captures your own keyboard or pointer; only `--inject-input` and `--type-pauses` (typing bursts, then checks the still refreshes) send input. Self-tests play no audio, except with `--expect-audio`, which plays it at zero volume and fails unless it came in that codec (or none came). The window's number is logged (`selftest: window number N`) for `screencapture -l N` |
-| `--setup check\|install-tailscale\|login\|restart\|install-firmware[=blitzkvm\|stock]\|password=<new password>\|change-password=<new password>\|remove-password\|browser-access=off\|on`, `--setup-snapshot <png>`, `--wake` | With `--selftest`: opens JetKVM Setup, runs the action, and reports the states (`setup`, `setupOK`); the snapshot renders the sheet. `--wake` wakes the target once connected (no keystrokes) |
+| `--setup check\|install-tailscale\|login\|restart\|install-firmware[=blitzkvm\|stock]\|password=<new password>\|change-password=<new password>\|remove-password\|browser-access=off\|on\|clipboard\|clipboard-on\|clipboard-off\|clipboard-remove\|clipboard-roundtrip\|snapshot=<png>`, `--setup-snapshot <png>`, `--wake` | With `--selftest`: opens JetKVM Setup, runs the actions (several, comma-separated, in turn), and reports the states (`setup`, `setupOK`); the snapshot renders the sheet (`snapshot=` between two actions). `clipboard-roundtrip` puts a token on this Mac's clipboard, types a command on the remote Mac that appends `-back` to its clipboard (its frontmost window must be a shell prompt) and waits for the result here (`clipboardRoundtrip`). `--wake` wakes the target once connected (no keystrokes) |
 | `--latency-probe <samples>` | Measures input-to-photon latency against `tools/latency-probe/latency.html` on the target (prints JSON, exits) |
 | `--open settings\|licenses\|devices` | Opens Settings, Licenses or the Devices window (the welcome screen on first launch) at launch and logs its window number (`opened settings: window number N`) |
 
@@ -295,6 +308,7 @@ Where things live:
 
 - Device library: `~/Library/Application Support/BlitzKVM/devices.json`.
 - Passwords: the login keychain, service `xyz.scio.blitzkvm`, account = the device's ID (the entry's UUID until the ID is learned on first connect).
+- SSH keys: `~/Library/Application Support/BlitzKVM/SSH/`, `id_ed25519` for JetKVM Setup on the device and `clipboard_ed25519` for clipboard sync with remote Macs.
 - Logs: `~/Library/Logs/BlitzKVM/app.log` holds app messages and each helper's stderr.
 - Update settings: the app's user defaults (`xyz.scio.blitzkvm`, Sparkle's `SU…` keys).
 

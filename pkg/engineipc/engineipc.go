@@ -124,7 +124,9 @@ type Command struct {
 	// and uses it from then on), changePassword (OldPassword, Password),
 	// removePassword (Password: the current one; the device then asks for none),
 	// reboot (restarts the JetKVM; the session reconnects once it is up),
-	// setAudio (Audio).
+	// setAudio (Audio), and clipboard sync over the firmware's host link
+	// (pkg/hostlink; Params as in pkg/engine): clipboardInstall,
+	// clipboardUninstall, clipboardStart, clipboardStop, clipboardSet.
 	Cmd      string `json:"cmd"`
 	BaseURL  string `json:"baseURL,omitempty"`
 	Password string `json:"password,omitempty"`
@@ -163,7 +165,10 @@ type Command struct {
 // Event is a JSON message from the engine. Type "snapshot" carries the
 // session snapshot (without the serial scrollback); "stats" carries
 // transport statistics; "serial" carries new serial console output in Text;
-// "uploadProgress" carries Upload; "log" carries a diagnostic line.
+// "uploadProgress" carries Upload; "log" carries a diagnostic line;
+// "clipboard" carries the remote Mac's new clipboard in Clip;
+// "clipboardState" the sync's state in Text (connecting, active, error,
+// off) with the reason in Message; "clipboardSetup" a setup step in Message.
 type Event struct {
 	Type     string          `json:"type"`
 	Snapshot json.RawMessage `json:"snapshot,omitempty"`
@@ -171,6 +176,7 @@ type Event struct {
 	Message  string          `json:"message,omitempty"`
 	Text     string          `json:"text,omitempty"`
 	Upload   *UploadProgress `json:"upload,omitempty"`
+	Clip     json.RawMessage `json:"clip,omitempty"`
 }
 
 // UploadProgress reports an upload command's progress; ID is the command's.
@@ -194,6 +200,8 @@ type CommandResult struct {
 	Error string `json:"error,omitempty"`
 	// Invalid lists characters a paste could not type on the target layout.
 	Invalid string `json:"invalid,omitempty"`
+	// Result is a command's answer, where it has one (clipboardInstall).
+	Result json.RawMessage `json:"result,omitempty"`
 }
 
 // Writer serialises frames; safe for concurrent use.

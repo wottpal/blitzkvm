@@ -71,6 +71,10 @@ type Engine struct {
 
 	uploadMu sync.Mutex
 	uploads  map[int64]context.CancelFunc
+
+	// Clipboard sync's running clipboardStart (hostlink.go).
+	clipMu sync.Mutex
+	clip   *clipRun
 }
 
 // Run serves the protocol until in reaches EOF or ctx ends. Closing the
@@ -257,6 +261,19 @@ func (e *Engine) command(cmd engineipc.Command) error {
 		})
 	case "upload":
 		go e.upload(cmd)
+	case "clipboardInstall":
+		go e.clipboardInstall(cmd)
+	case "clipboardUninstall":
+		go e.clipboardUninstall(cmd)
+	case "clipboardStart":
+		e.clipboardStart(cmd)
+	case "clipboardStop":
+		go func() {
+			e.clipboardStop()
+			e.reply(cmd.ID, nil, "")
+		}()
+	case "clipboardSet":
+		e.reply(cmd.ID, e.clipboardSet(cmd.Params), "")
 	case "cancelUpload":
 		e.uploadMu.Lock()
 		cancel := e.uploads[cmd.Target]

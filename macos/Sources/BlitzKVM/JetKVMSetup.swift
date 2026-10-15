@@ -27,6 +27,11 @@ final class JetKVMSetupModel: ObservableObject {
     @Published private(set) var browserAccess = Row<Bool>()
     /// The firmware has the browser access switch; nil until checked.
     @Published private(set) var hasBrowserAccessSwitch: Bool?
+    /// Clipboard sync with the remote Mac (BlitzKVM firmware D17).
+    /// Optional, like browser access.
+    @Published private(set) var clipboard = Row<ClipboardRowState>()
+    /// The firmware has the USB link clipboard sync needs; nil until checked.
+    @Published private(set) var hasHostLink: Bool?
     /// The firmware builds this app ships, the recommended BlitzKVM
     /// build first.
     let builds: [(build: FirmwareBuild, binary: URL)] = JetKVMSetupModel.bundledFirmware()
@@ -42,7 +47,9 @@ final class JetKVMSetupModel: ObservableObject {
         self.controller = controller
     }
 
-    var isWorking: Bool { firmware.isWorking || tailscale.isWorking || password.isWorking || browserAccess.isWorking }
+    var isWorking: Bool {
+        firmware.isWorking || tailscale.isWorking || password.isWorking || browserAccess.isWorking || clipboard.isWorking
+    }
 
     func cancel() {
         tailscaleWatch?.cancel()
@@ -57,6 +64,7 @@ final class JetKVMSetupModel: ObservableObject {
             if !tailscale.isWorking { await checkTailscale() }
             if !password.isWorking { await checkPassword() }
             if !browserAccess.isWorking { await checkBrowserAccess() }
+            if !clipboard.isWorking { checkClipboard() }
             let ssh = await canSSH
             if !firmware.isWorking { await checkFirmware(ssh: ssh) }
             record()
@@ -132,6 +140,7 @@ final class JetKVMSetupModel: ObservableObject {
         guard let engine = controller?.engine else { return }
         let features = (try? await engine.call("getFirmwareFeatures", as: [String].self)) ?? []
         hasBrowserAccessSwitch = features.contains("browserAccess")
+        hasHostLink = features.contains("hostLink")
         guard hasBrowserAccessSwitch == true else { return }
         do {
             browserAccess.value = try await engine.call("getBrowserAccessState", as: EnabledState.self).enabled
@@ -437,6 +446,75 @@ final class JetKVMSetupModel: ObservableObject {
         }
     }
 
+    // MARK: Clipboard sync
+
+    /// Reads the device's setting and the sync's live state; a sync that
+    /// fails shows why as the row's error.
+    private func checkClipboard() {
+        guard let controller else { return }
+        let sync = controller.device.clipboardSync
+        let live = controller.clipboardLive
+        clipboard.value = ClipboardRowState(sync: sync, live: live, readAccess: ClipboardBridge.readAccess)
+        if sync?.enabled == true {
+            let failed = live.state == "error" || live.state == "needsSetup"
+            clipboard.error = failed ? Self.describe(EngineError(message: live.message ?? "it stopped")) : nil
+        }
+    }
+
+    /// The engine reported a new sync state.
+    func clipboardLiveChanged() {
+        if !clipboard.isWorking { checkClipboard() }
+    }
+
+    /// The engine reported a setup step.
+    func clipboardSetupStep(_ step: String) {
+        if clipboard.isWorking { clipboard.progress = step }
+    }
+
+    /// Installs this app's key on the remote Mac and turns sync on.
+    func setUpClipboard() {
+        guard let controller, !clipboard.isWorking else { return }
+        Task {
+            do {
+                clipboard.error = nil
+                clipboard.progress = "Starting…"
+                try await controller.installClipboardSync()
+                clipboard.progress = nil
+                checkClipboard()
+            } catch {
+                clipboard.progress = nil
+                clipboard.error = Self.describe(error)
+            }
+        }
+    }
+
+    /// Turns sync on or off; the key stays on the remote Mac.
+    func setClipboardEnabled(_ enabled: Bool) {
+        guard let controller, var sync = controller.device.clipboardSync, !clipboard.isWorking else { return }
+        sync.enabled = enabled
+        controller.updateClipboardSync(sync)
+        clipboard.error = nil
+        checkClipboard()
+    }
+
+    /// Removes the key from the remote Mac and turns the USB link off;
+    /// `localOnly` forgets the setup without reaching the Mac.
+    func removeClipboard(localOnly: Bool = false) {
+        guard let controller, !clipboard.isWorking else { return }
+        Task {
+            do {
+                clipboard.error = nil
+                clipboard.progress = localOnly ? "Forgetting…" : "Removing the key from the remote Mac…"
+                try await controller.removeClipboardSync(localOnly: localOnly)
+                clipboard.progress = nil
+                checkClipboard()
+            } catch {
+                clipboard.progress = nil
+                clipboard.error = Self.describe(error)
+            }
+        }
+    }
+
     // MARK: SSH
 
     private var shell: JetKVMShell? {
@@ -481,6 +559,7 @@ final class JetKVMSetupModel: ObservableObject {
         !isWorking && (firmware.value != nil || firmware.error != nil) && (tailscale.value != nil || tailscale.error != nil)
             && (password.value != nil || password.error != nil)
             && (hasBrowserAccessSwitch == false || browserAccess.value != nil || browserAccess.error != nil)
+            && (hasHostLink == false || clipboard.value != nil || clipboard.error != nil)
     }
 
     var report: [String: Any] {
@@ -489,6 +568,7 @@ final class JetKVMSetupModel: ObservableObject {
         }
         return ["firmware": text(firmware), "tailscale": text(tailscale), "password": text(password),
                 "browserAccess": hasBrowserAccessSwitch == false ? "no switch" : text(browserAccess),
+                "clipboard": hasHostLink == false ? "no USB link" : text(clipboard),
                 "bundledFirmware": builds.map(\.build.title)]
     }
 
@@ -528,6 +608,14 @@ final class JetKVMSetupModel: ObservableObject {
         if let error = error as? EngineError { return error.message.prefix(1).uppercased() + error.message.dropFirst() + "." }
         return error.localizedDescription
     }
+}
+
+/// The Clipboard Sync row's state: the device's setting, the sync's live
+/// state, and whether macOS lets the app read the clipboard.
+struct ClipboardRowState: Equatable {
+    var sync: ClipboardSync?
+    var live: ClipboardLive
+    var readAccess: ClipboardBridge.ReadAccess
 }
 
 struct SetupError: Error {
