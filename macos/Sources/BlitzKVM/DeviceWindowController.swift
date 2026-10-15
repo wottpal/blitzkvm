@@ -453,9 +453,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             stallOverlay.topAnchor.constraint(equalTo: view.topAnchor),
             stallOverlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             statusBarHeightConstraint,
-            hud.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            hud.topAnchor.constraint(equalTo: view.topAnchor, constant: 18),
-            hud.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -40),
+            hud.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            hud.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            hud.topAnchor.constraint(equalTo: view.topAnchor),
+            hud.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             viewControl.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
             viewControl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -1039,15 +1040,19 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func windowDidBecomeKey(_ notification: Notification) {
         window?.makeFirstResponder(videoView)
-        if !input.captured && !captureHintShown && capturesOnRequest && !input.viewOnly {
-            captureHintShown = true
-            showCaptureHint()
+        guard !captureHintShown && capturesOnRequest && !input.viewOnly else { return }
+        // A click into the window captures at once; the hint is for focus
+        // without one (⌘Tab, the Devices window), so it waits for that click.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self, self.window?.isKeyWindow == true, !self.input.captured, !self.captureHintShown else { return }
+            self.captureHintShown = true
+            self.showCaptureHint()
         }
     }
 
     /// How to hand the keyboard to the remote.
     func showCaptureHint() {
-        hud.show("Click the screen or press ⌘ twice to control \(device.name)", for: 2.5)
+        hud.show("Click the screen or press ⌘ twice to control \(device.name)", for: 3.5, prominent: true)
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -1392,31 +1397,68 @@ final class CaptureVideoView: VideoView {
     }
 }
 
-/// A transient hint over the video (how to release capture and the like).
-final class HintView: NSVisualEffectView {
+/// A transient hint over the video (how to release capture and the like),
+/// in a pill at the top. A prominent hint (how to take control, which is
+/// easy to miss while typing goes nowhere) is larger, with a symbol and an
+/// accent edge, and briefly dims the picture inside an accent frame.
+final class HintView: NSView {
+    private let panel = NSVisualEffectView()
+    private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private let flash = NSView()
     private var hideWork: DispatchWorkItem?
+    private var flashWork: DispatchWorkItem?
 
     init() {
         super.init(frame: .zero)
-        material = .hudWindow
-        blendingMode = .withinWindow
-        state = .active
-        wantsLayer = true
-        layer?.cornerRadius = 10
-        layer?.masksToBounds = true
-        alphaValue = 0
-        label.font = .systemFont(ofSize: 13, weight: .medium)
+        appearance = NSAppearance(named: .darkAqua)
+        flash.wantsLayer = true
+        flash.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.18).cgColor
+        flash.layer?.borderWidth = 3
+        panel.material = .hudWindow
+        panel.blendingMode = .withinWindow
+        panel.state = .active
+        panel.wantsLayer = true
+        panel.layer?.cornerRadius = 10
+        panel.layer?.masksToBounds = true
+        // The material alone is too light over a bright picture.
+        let shade = NSView()
+        shade.wantsLayer = true
+        shade.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
+        icon.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: nil)
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+        icon.contentTintColor = .labelColor
         label.textColor = .labelColor
-        label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(label)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let stack = NSStackView(views: [icon, label])
+        stack.spacing = 9
+        stack.edgeInsets = NSEdgeInsets(top: 9, left: 16, bottom: 9, right: 16)
+        panel.addSubview(shade)
+        panel.addSubview(stack)
+        addSubview(flash)
+        addSubview(panel)
+        for view in [flash, panel, shade, stack] { view.translatesAutoresizingMaskIntoConstraints = false }
+        for view in [flash, panel] {
+            view.alphaValue = 0
+            view.isHidden = true
+        }
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            label.topAnchor.constraint(equalTo: topAnchor, constant: 9),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
+            flash.leadingAnchor.constraint(equalTo: leadingAnchor),
+            flash.trailingAnchor.constraint(equalTo: trailingAnchor),
+            flash.topAnchor.constraint(equalTo: topAnchor),
+            flash.bottomAnchor.constraint(equalTo: bottomAnchor),
+            panel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            panel.topAnchor.constraint(equalTo: topAnchor, constant: 18),
+            panel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -40),
+            shade.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+            shade.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+            shade.topAnchor.constraint(equalTo: panel.topAnchor),
+            shade.bottomAnchor.constraint(equalTo: panel.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: panel.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: panel.bottomAnchor),
         ])
     }
 
@@ -1425,14 +1467,36 @@ final class HintView: NSVisualEffectView {
     // Never takes clicks from the video.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    func show(_ text: String, for seconds: TimeInterval) {
+    /// Shows `text` for `seconds`. A prominent hint shown again while it
+    /// flashes (each key typed without control) keeps the flash on.
+    func show(_ text: String, for seconds: TimeInterval, prominent: Bool = false) {
         label.stringValue = text
-        hideWork?.cancel()
-        NSAnimationContext.runAnimationGroup { $0.duration = 0.15; animator().alphaValue = 1 }
-        let work = DispatchWorkItem { [weak self] in
-            NSAnimationContext.runAnimationGroup { $0.duration = 0.4; self?.animator().alphaValue = 0 }
+        label.font = .systemFont(ofSize: prominent ? 14 : 13, weight: prominent ? .semibold : .medium)
+        icon.isHidden = !prominent
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            panel.layer?.borderColor = NSColor.controlAccentColor.cgColor
+            flash.layer?.borderColor = NSColor.controlAccentColor.cgColor
         }
-        hideWork = work
+        panel.layer?.borderWidth = prominent ? 1.5 : 0
+        hideWork?.cancel()
+        flashWork?.cancel()
+        fade(panel, in: true, duration: 0.15)
+        hideWork = after(seconds) { $0.fade($0.panel, in: false, duration: 0.4) }
+        fade(flash, in: prominent, duration: prominent ? 0.12 : 0.15)
+        if prominent { flashWork = after(0.5) { $0.fade($0.flash, in: false, duration: 0.6) } }
+    }
+
+    private func after(_ seconds: TimeInterval, _ body: @escaping (HintView) -> Void) -> DispatchWorkItem {
+        let work = DispatchWorkItem { [weak self] in if let self { body(self) } }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+        return work
+    }
+
+    /// Hidden once faded out, so nothing is composited over the video.
+    private func fade(_ view: NSView, in shown: Bool, duration: TimeInterval) {
+        if shown { view.isHidden = false }
+        NSAnimationContext.runAnimationGroup({ $0.duration = duration; view.animator().alphaValue = shown ? 1 : 0 }) {
+            if view.alphaValue == 0 { view.isHidden = true }
+        }
     }
 }
