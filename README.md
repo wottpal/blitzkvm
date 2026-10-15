@@ -113,6 +113,8 @@ The BlitzKVM firmware is JetKVM's open-source firmware ([jetkvm/kvm](https://git
 - Capture buffers for Match Window modes up to 4.19 megapixels, and no HDMI re-plug when its app restarts.
 - Opus stereo audio that sends nothing while the computer is silent.
 - Wheel steps over HID-RPC and a 1 s cap on the input channel's retransmission timeout.
+- Hardening: other websites can't reach the device through your browser (cross-site requests, DNS rebinding), malformed input can't crash it, and secrets stay out of its logs.
+- A switch, in JetKVM Setup, that turns off the web interface for browsers while this app keeps connecting.
 
 Install it with JetKVM Setup (one button; the previous build stays on the device as a backup), and switch back to JetKVM's own release from the same menu. JetKVM's automatic updates replace it with their next release. Installing any firmware other than JetKVM's own is at your own risk.
 
