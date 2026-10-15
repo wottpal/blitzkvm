@@ -35,6 +35,11 @@ func TestControllerConnects(t *testing.T) {
 	defer controller.Stop()
 
 	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	// Device details load in the background once connected (bootstrap).
+	deadline := time.Now().Add(3 * time.Second)
+	for controller.Snapshot().DeviceID == "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	snapshot := controller.Snapshot()
 	if snapshot.DeviceID == "" {
 		t.Fatal("expected device ID after bootstrap")
