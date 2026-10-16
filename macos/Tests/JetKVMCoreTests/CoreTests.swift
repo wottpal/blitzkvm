@@ -549,8 +549,9 @@ final class JetKVMSetupTests: XCTestCase {
     /// The builds `make firmware` bundled, as the JetKVM receives them: the
     /// pinned binary after gunzip.
     func testBundledFirmwareArrivesAsPinned() throws {
-        let folder = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../build/firmware")
-        let builds = try FirmwareBuild.manifest(Data(contentsOf: folder.appendingPathComponent("../../Support/Firmware.json")))
+        let macos = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let folder = macos.appendingPathComponent("build/firmware")
+        let builds = try FirmwareBuild.manifest(Data(contentsOf: macos.appendingPathComponent("Support/Firmware.json")))
             .filter { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0.fileName).path) }
         guard !builds.isEmpty else { throw XCTSkip("no bundled firmware (make firmware)") }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
