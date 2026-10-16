@@ -278,8 +278,8 @@ struct JetKVMSetupView: View {
                 return "The JetKVM adds a USB network link to the remote Mac, whose keyboard, mouse and virtual media reconnect once. "
                     + "BlitzKVM then opens Terminal there and types one command that lets this Mac's key in, over that link only.\n\n"
                     + "The remote Mac must be unlocked, with Remote Login on (System Settings › General › Sharing), and its "
-                    + "input source must match the JetKVM's keyboard layout (English US or German). Don't type on it until setup "
-                    + "is done. A MacBook may first ask whether to allow the changed accessory."
+                    + "input source must match the JetKVM's keyboard layout. Don't type on it until setup is done. "
+                    + "A MacBook may first ask whether to allow the changed accessory."
             case .clipboardRemove:
                 return "BlitzKVM takes its key off the remote Mac and turns the USB link off; the remote Mac's keyboard, mouse "
                     + "and virtual media reconnect once."

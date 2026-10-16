@@ -1,4 +1,4 @@
-.PHONY: build engine emulator test test-race test-timing vet vulncheck generate generate-check layouts check app
+.PHONY: build engine emulator test test-race test-timing vet vulncheck generate generate-check layouts maclayouts check app
 
 GO ?= go
 
@@ -43,6 +43,13 @@ layouts:
 	@test -n "$(UPSTREAM)" || { echo "usage: make layouts UPSTREAM=../kvm" >&2; exit 2; }
 	$(GO) run ./scripts/genlayouts -upstream $(UPSTREAM) -ref "$$(git -C $(UPSTREAM) describe --always --tags)" > pkg/input/layouts_gen.go.tmp
 	mv pkg/input/layouts_gen.go.tmp pkg/input/layouts_gen.go
+
+# Regenerate how a Mac types clipboard sync's installer on each layout, from
+# the keyboard layouts of the macOS this runs on:
+#   make maclayouts
+maclayouts:
+	swift scripts/genmaclayouts.swift | gofmt > pkg/input/maclayouts_gen.go.tmp
+	mv pkg/input/maclayouts_gen.go.tmp pkg/input/maclayouts_gen.go
 
 # The same steps as .github/workflows/fork-check.yml.
 check: vet generate-check test-race test-timing vulncheck

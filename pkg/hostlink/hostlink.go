@@ -67,11 +67,9 @@ func sanitizeComment(comment string) string {
 // authorizedKey (once) and reports the user and computer name to the
 // JetKVM.
 //
-// The JetKVM types through its Windows-based layout tables, and on a Mac
-// many characters sit elsewhere (~ | > < @ and brackets on most layouts,
-// more on others). So the script travels base64-encoded inside an
-// osascript one-liner of letters, digits and a little punctuation
-// (TypeSafe) that InstallerLayouts type the same way on a Mac.
+// The script travels base64-encoded inside an osascript one-liner of
+// letters, digits and a little punctuation (InstallerChars), which a Mac
+// types on nearly every layout without a dead key.
 func InstallCommand(authorizedKey, deviceAddress string) (string, error) {
 	if strings.ContainsAny(authorizedKey, "'\n") {
 		return "", fmt.Errorf("unexpected characters in the key line")
@@ -101,17 +99,14 @@ func InstallCommand(authorizedKey, deviceAddress string) (string, error) {
 		`$.NSData.alloc.initWithBase64EncodedStringOptions("` + encoded + `",0),4).js)'`, nil
 }
 
-// InstallerLayouts are the JetKVM keyboard layouts whose tables type every
-// TypeSafe character as a Mac with the matching input source does (checked
-// on Macs: U.S. and German). Others differ: British puts " where the Mac
-// has @, French moves - = +.
-var InstallerLayouts = []string{"en-US", "de-DE"}
+// InstallerChars are the characters InstallCommand types; pkg/input's Mac
+// tables say how each keyboard layout types them on a Mac.
+const InstallerChars = `abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 !"$%&/()=?+*#'-_.:,;`
 
-// TypeSafe reports whether s uses only the characters InstallCommand types.
+// TypeSafe reports whether s uses only InstallerChars.
 func TypeSafe(s string) bool {
 	for _, r := range s {
-		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune(` !"$%&/()=?+*#'-_.:,;`, r)
-		if !ok {
+		if !strings.ContainsRune(InstallerChars, r) {
 			return false
 		}
 	}

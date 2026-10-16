@@ -25,6 +25,16 @@ func (c *Controller) DialHostSSH(ctx context.Context) (net.Conn, error) {
 	return current.DialHostSSH(ctx)
 }
 
+// TypeMacro types prepared macro steps through the device's macro engine
+// (input.BuildMacTyping), returning when they are done.
+func (c *Controller) TypeMacro(ctx context.Context, steps []hidrpc.KeyboardMacroStep) error {
+	current := c.clientIfConnected()
+	if current == nil {
+		return errors.New("not connected")
+	}
+	return current.TypeMacro(ctx, steps)
+}
+
 // TapKey presses and releases one key with modifiers (HID usages) through
 // the device's macro engine, so the chord lands whole even on a slow link.
 func (c *Controller) TapKey(ctx context.Context, modifier, key byte) error {

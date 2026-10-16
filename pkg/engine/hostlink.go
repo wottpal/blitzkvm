@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -201,11 +202,6 @@ func (e *Engine) installClipboard(raw json.RawMessage) (*clipboardInstallResult,
 	if layout == "" {
 		layout = "en-US"
 	}
-	if !slices.Contains(hostlink.InstallerLayouts, layout) {
-		return nil, fmt.Errorf("setup types a command on the remote Mac, which works with the English (US) and German "+
-			"keyboard layouts so far, not %s. Set the JetKVM's keyboard layout and the remote Mac's input source to one "+
-			"of them for the setup", layout)
-	}
 	line, err := hostlink.AuthorizedKey(string(ssh.MarshalAuthorizedKey(signer.PublicKey())), state.DeviceAddress, p.Comment)
 	if err != nil {
 		return nil, err
@@ -214,8 +210,10 @@ func (e *Engine) installClipboard(raw json.RawMessage) (*clipboardInstallResult,
 	if err != nil {
 		return nil, err
 	}
-	if !hostlink.TypeSafe(command) {
-		return nil, errors.New("the setup command has characters that don't type the same way on a Mac")
+	if !slices.Contains(input.MacLayoutsTyping(hostlink.InstallerChars), layout) || !hostlink.TypeSafe(command) {
+		return nil, fmt.Errorf("setup types a command on the remote Mac, which the %s keyboard layout can't type on a Mac. "+
+			"Set the JetKVM's keyboard layout and the remote Mac's input source to one of %s for the setup",
+			layoutName(layout), installerLayoutNames())
 	}
 	var before time.Time
 	if state.Report != nil {
@@ -232,7 +230,7 @@ func (e *Engine) installClipboard(raw json.RawMessage) (*clipboardInstallResult,
 	}
 	// The installer ran in the window opened for it, which is in front:
 	// close it (its shell is idle, so Terminal doesn't ask).
-	if key, ok := input.LetterKey(layout, 'w'); ok {
+	if key, ok := input.MacLetterKey(layout, 'w'); ok {
 		_ = sleepCtx(ctx, time.Second)
 		_ = c.TapKey(ctx, hidModGUI, key)
 	}
@@ -276,11 +274,14 @@ func waitForMacSSH(ctx context.Context, c *session.Controller) (hostLinkState, e
 }
 
 // typeInstaller opens a new Terminal window on the Mac (⌘Space finds
-// Terminal in Spotlight or a launcher in its place) and types command.
+// Terminal in Spotlight or a launcher in its place) and types command, all
+// as a Mac with the input source of layout types it.
 func (e *Engine) typeInstaller(ctx context.Context, c *session.Controller, layout, command string) error {
-	newWindow, ok := input.LetterKey(layout, 'n')
-	if !ok {
-		return fmt.Errorf("keyboard layout %q has no N key", layout)
+	newWindow, okN := input.MacLetterKey(layout, 'n')
+	terminal, okT := input.BuildMacTyping(layout, "Terminal", defaultPasteMS)
+	typed, okC := input.BuildMacTyping(layout, command, defaultPasteMS)
+	if !okN || !okT || !okC {
+		return fmt.Errorf("the %s keyboard layout can't type the setup command on a Mac", layoutName(layout))
 	}
 	steps := []struct {
 		message string
@@ -288,10 +289,10 @@ func (e *Engine) typeInstaller(ctx context.Context, c *session.Controller, layou
 		wait    time.Duration
 	}{
 		{"Opening Terminal on the remote Mac…", func() error { return c.TapKey(ctx, hidModGUI, hidSpace) }, 1200 * time.Millisecond},
-		{"", func() error { return pasteText(c, "Terminal") }, 900 * time.Millisecond},
+		{"", func() error { return c.TypeMacro(ctx, terminal) }, 900 * time.Millisecond},
 		{"", func() error { return c.TapKey(ctx, 0, hidEnter) }, 3 * time.Second},
 		{"", func() error { return c.TapKey(ctx, hidModGUI, newWindow) }, 1500 * time.Millisecond},
-		{"Typing the setup command…", func() error { return pasteText(c, command) }, 300 * time.Millisecond},
+		{"Typing the setup command…", func() error { return c.TypeMacro(ctx, typed) }, 300 * time.Millisecond},
 		{"", func() error { return c.TapKey(ctx, 0, hidEnter) }, 0},
 	}
 	for _, step := range steps {
@@ -308,12 +309,24 @@ func (e *Engine) typeInstaller(ctx context.Context, c *session.Controller, layou
 	return nil
 }
 
-func pasteText(c *session.Controller, text string) error {
-	invalid, err := c.ExecutePaste(text, defaultPasteMS)
-	if err == nil && len(invalid) > 0 {
-		err = fmt.Errorf("the keyboard layout can't type %q", input.InvalidRunesString(invalid))
+// layoutName is a keyboard layout's name ("English (UK)").
+func layoutName(code string) string {
+	for _, layout := range input.SupportedKeyboardLayouts() {
+		if layout.Code == code {
+			return layout.Label
+		}
 	}
-	return err
+	return code
+}
+
+// installerLayoutNames lists the layouts the installer can be typed in.
+func installerLayoutNames() string {
+	codes := input.MacLayoutsTyping(hostlink.InstallerChars)
+	names := make([]string, len(codes))
+	for i, code := range codes {
+		names[i] = layoutName(code)
+	}
+	return strings.Join(names, ", ")
 }
 
 // waitForReport waits for a report newer than before.

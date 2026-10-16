@@ -13,12 +13,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/wottpal/blitzkvm/pkg/input"
 )
 
 const deviceAddress = "fe80::4a:4bff:fe00:1"
@@ -96,6 +99,30 @@ func TestInstallCommandTypesTheSameOnEveryLayout(t *testing.T) {
 	}
 	if _, err := InstallCommand("x' ; rm -rf /", deviceAddress); err == nil {
 		t.Fatal("accepted a line with a quote")
+	}
+}
+
+func TestInstallCommandTypesOnMostMacLayouts(t *testing.T) {
+	_, _, public := newKey(t)
+	line, _ := AuthorizedKey(public, deviceAddress, "client")
+	command, _ := InstallCommand(line, deviceAddress)
+	layouts := input.MacLayoutsTyping(InstallerChars)
+	if len(layouts) < 16 {
+		t.Fatalf("only %v", layouts)
+	}
+	for _, layout := range layouts {
+		if _, ok := input.BuildMacTyping(layout, command, 20); !ok {
+			t.Errorf("%s can't type the command", layout)
+		}
+	}
+	// On German and U.S. Macs it types exactly as paste did, the way it was
+	// verified on a German Mac.
+	for _, layout := range []string{"de-DE", "en-US"} {
+		mac, _ := input.BuildMacTyping(layout, command, 20)
+		paste, invalid := input.BuildPasteMacro(layout, command, 20)
+		if len(invalid) > 0 || !reflect.DeepEqual(mac, paste) {
+			t.Errorf("%s: Mac typing differs from paste", layout)
+		}
 	}
 }
 

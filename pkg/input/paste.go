@@ -104,18 +104,3 @@ func InvalidRunesString(invalid []rune) string {
 	}
 	return strings.Join(parts, ", ")
 }
-
-// LetterKey returns the HID usage of the key that types the lowercase
-// letter r on layout, for shortcuts such as ⌘N: the key moves with the
-// layout (W is where Z is on AZERTY).
-func LetterKey(layout string, r rune) (byte, bool) {
-	table := generatedLayouts[NormalizeKeyboardLayoutCode(layout)]
-	if table == nil {
-		table = generatedLayouts["en-US"]
-	}
-	combo, ok := table[r]
-	if !ok || combo.shift || combo.altRight || combo.deadKey || combo.accent != nil {
-		return 0, false
-	}
-	return combo.hid, true
-}
