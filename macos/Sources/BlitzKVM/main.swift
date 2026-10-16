@@ -54,8 +54,9 @@ struct Options {
     /// Self-test: play the device's audio (silently) and expect this codec
     /// ("opus", "pcmu") or none ("none"). Without it, self-tests play none.
     var expectAudio: String?
-    /// `--open settings|licenses|devices`: opens that window at launch (and
-    /// logs its window number, for `screencapture -l`).
+    /// `--open settings|shortcuts|permissions|licenses|devices`: opens that
+    /// window (or Settings tab) at launch (and logs its window number, for
+    /// `screencapture -l`).
     var openWindow: String?
 
     static func parse(_ args: [String]) -> Options {
@@ -165,8 +166,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showDevices()
         }
         switch options.openWindow {
-        case "settings":
+        case "settings", "shortcuts", "permissions":
             showSettings()
+            settingsWindow?.select(SettingsTab(rawValue: options.openWindow?.capitalized ?? "") ?? .general)
             AppLog.log("opened settings: window number \(settingsWindow?.window?.windowNumber ?? 0)")
         case "licenses":
             showLicenses()
@@ -491,19 +493,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         main.addItem(editItem)
 
         let device = NSMenu(title: "Device")
-        device.addItem(item("Devices…", #selector(showDevices), key: "n"))
+        device.addItem(item("Devices", #selector(showDevices), key: "n"))
         device.addItem(item("Reconnect", #selector(reconnect), key: "r"))
-        device.addItem(item("Open Device Web Settings…", #selector(openWebUI)))
-        device.addItem(item("Set Up JetKVM…", #selector(showSetup)))
+        device.addItem(item("Device Settings", #selector(showDeviceSettings)))
+        device.addItem(item("Set Up JetKVM", #selector(showSetup)))
+        device.addItem(item("Open JetKVM Web Interface", #selector(openWebUI)))
         device.addItem(.separator())
         device.addItem(item("Paste Clipboard as Keystrokes", #selector(pasteClipboard), key: "v", mods: [.command, .option]))
         device.addItem(item("Cancel Paste", #selector(cancelPaste)))
         device.addItem(item("Release All Keys", #selector(releaseAll)))
         device.addItem(item("Capture Keyboard", #selector(toggleCapture)))
-        device.addItem(item("Enable System Shortcut Capture…", #selector(requestAccessibility)))
+        device.addItem(item("Enable System Shortcut Capture", #selector(requestAccessibility)))
         device.addItem(.separator())
         device.addItem(item("Wake Computer", #selector(wakeComputer)))
-        device.addItem(item("Restart JetKVM…", #selector(restartJetKVM)))
+        device.addItem(item("Restart JetKVM", #selector(restartJetKVM)))
         let power = NSMenu(title: "Power")
         for (title, action) in [("ATX: Press Power Button", "power-short"), ("ATX: Hold Power Button (Force Off)", "power-long"), ("ATX: Press Reset", "reset")] {
             let i = item(title, #selector(atxAction(_:)))
@@ -519,8 +522,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let powerItem = NSMenuItem(title: "Power", action: nil, keyEquivalent: "")
         powerItem.submenu = power
         device.addItem(powerItem)
-        device.addItem(item("Virtual Media…", #selector(showVirtualMedia), key: "m", mods: [.command, .shift]))
-        device.addItem(item("Serial Console…", #selector(showSerialConsole), key: "l", mods: [.command, .shift]))
+        device.addItem(item("Virtual Media", #selector(showVirtualMedia), key: "m", mods: [.command, .shift]))
+        device.addItem(item("Serial Console", #selector(showSerialConsole), key: "l", mods: [.command, .shift]))
         let extensions = NSMenu(title: "Extension Port")
         for (title, id) in [("None", ""), ("ATX Power Control", "atx-power"), ("DC Power Control", "dc-power"), ("Serial Console", "serial-console")] {
             let i = item(title, #selector(setExtension(_:)))
@@ -705,6 +708,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc private func showSetup() { current?.showSetup() }
 
+    /// The device library's editor for the current window's device, as a
+    /// sheet of that window; saving updates the window at once (onSaved).
+    @objc private func showDeviceSettings() {
+        guard let c = current else { return }
+        c.showDeviceSettings(store.device(id: c.device.id) ?? c.device) { [weak self] device, password in
+            self?.devicesModel.save(device, password: password)
+        }
+    }
+
     /// The welcome screen, to check or grant the app's permissions.
     @objc private func showAbout() {
         let style = NSMutableParagraphStyle()
@@ -801,8 +813,11 @@ extension AppDelegate: NSMenuItemValidation {
         case #selector(setScaling(_:)):
             menuItem.state = c?.device.scaling.rawValue == menuItem.representedObject as? String ? .on : .off
             return c != nil
-        case #selector(showSetup):
+        case #selector(showSetup), #selector(showDeviceSettings):
             return c != nil
+        case #selector(openWebUI):
+            // Not while JetKVM Setup found browser access off (BlitzKVM firmware D16).
+            return c != nil && c?.setup?.browserAccess.value != false
         case #selector(restartJetKVM):
             return c?.snapshot.Phase == "connected"
         case #selector(wakeComputer):

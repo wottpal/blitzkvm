@@ -31,6 +31,9 @@ const maxLine = MaxClipBytes*4/3 + 64<<10
 // public.utf8-plain-text, public.rtf, public.html, public.png.
 type Clip struct {
 	Items map[string][]byte `json:"items"`
+	// ID, when set, comes back once the Mac's clipboard has the clip
+	// (StartClipboard's onApplied).
+	ID string `json:"id,omitempty"`
 }
 
 // Size is the clip's data size in bytes.
@@ -46,6 +49,7 @@ func (c Clip) Size() int {
 type message struct {
 	T     string            `json:"t"`
 	Items map[string][]byte `json:"items,omitempty"`
+	ID    string            `json:"id,omitempty"`
 }
 
 // silence ends a session that sent nothing (clipboard.js pings every 10 s).
@@ -71,10 +75,11 @@ func clipboardCommand() string {
 }
 
 // StartClipboard runs the bridge on the Mac. onClip receives each change of
-// the Mac's clipboard (from the session's reader goroutine). The session
-// ends when the bridge exits, the Mac goes silent or Close is called; Done
-// then closes and Err says why.
-func StartClipboard(client *ssh.Client, onClip func(Clip)) (*ClipboardSession, error) {
+// the Mac's clipboard, onApplied the ID of each clip Set put on it (both
+// from the session's reader goroutine). The session ends when the bridge
+// exits, the Mac goes silent or Close is called; Done then closes and Err
+// says why.
+func StartClipboard(client *ssh.Client, onClip func(Clip), onApplied func(id string)) (*ClipboardSession, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return nil, err
@@ -94,11 +99,11 @@ func StartClipboard(client *ssh.Client, onClip func(Clip)) (*ClipboardSession, e
 		session.Close()
 		return nil, err
 	}
-	go s.read(stdout, onClip)
+	go s.read(stdout, onClip, onApplied)
 	return s, nil
 }
 
-func (s *ClipboardSession) read(stdout io.Reader, onClip func(Clip)) {
+func (s *ClipboardSession) read(stdout io.Reader, onClip func(Clip), onApplied func(id string)) {
 	activity := &activityReader{r: stdout}
 	activity.touch()
 	lines := make(chan []byte)
@@ -133,8 +138,11 @@ loop:
 			if json.Unmarshal(line, &m) != nil {
 				continue // what the login shell's startup files print
 			}
-			if m.T == "clip" && len(m.Items) > 0 {
+			switch {
+			case m.T == "clip" && len(m.Items) > 0:
 				onClip(Clip{Items: m.Items})
+			case m.T == "applied" && m.ID != "" && onApplied != nil:
+				onApplied(m.ID)
 			}
 		case err = <-readErr:
 			break loop
@@ -198,7 +206,7 @@ func (s *ClipboardSession) Set(clip Clip) error {
 	if clip.Size() > MaxClipBytes {
 		return fmt.Errorf("clip too large: %d bytes", clip.Size())
 	}
-	line, err := json.Marshal(message{T: "clip", Items: clip.Items})
+	line, err := json.Marshal(message{T: "clip", Items: clip.Items, ID: clip.ID})
 	if err != nil {
 		return err
 	}

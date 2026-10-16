@@ -263,7 +263,10 @@ func (m *fakeMac) serve(t *testing.T, conn net.Conn) {
 					for scanner.Scan() {
 						var msg message
 						if json.Unmarshal(scanner.Bytes(), &msg) == nil {
-							m.received <- Clip{Items: msg.Items}
+							m.received <- Clip{Items: msg.Items, ID: msg.ID}
+							if msg.ID != "" { // the bridge confirms it
+								_, _ = channel.Write([]byte(`{"t":"applied","id":"` + msg.ID + `"}` + "\n"))
+							}
 						}
 					}
 					_ = channel.Close()
@@ -309,7 +312,8 @@ func TestClipboardSessionBothWays(t *testing.T) {
 	}
 
 	fromMac := make(chan Clip, 1)
-	session, err := StartClipboard(client, func(c Clip) { fromMac <- c })
+	applied := make(chan string, 1)
+	session, err := StartClipboard(client, func(c Clip) { fromMac <- c }, func(id string) { applied <- id })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,6 +342,19 @@ func TestClipboardSessionBothWays(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the Mac got nothing")
 	}
+
+	if err := session.Set(Clip{Items: map[string][]byte{"public.utf8-plain-text": []byte("dictated")}, ID: "42"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case id := <-applied:
+		if id != "42" {
+			t.Fatalf("applied %q", id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no confirmation from the Mac")
+	}
+	<-mac.received
 
 	if err := session.Set(Clip{Items: map[string][]byte{"public.png": make([]byte, MaxClipBytes+1)}}); err == nil {
 		t.Fatal("a clip past the limit went out")

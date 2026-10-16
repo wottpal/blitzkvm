@@ -14,6 +14,12 @@ import JetKVMCore
 /// server, ahead of every hotkey and other apps' session taps. Secure Event
 /// Input (password fields, some password managers) silently disables taps,
 /// so it is detected and reported.
+///
+/// Shortcuts for This Mac (Settings) stay here: a key combination, or
+/// modifiers alone (⌥ fn), skips the remote and goes on to macOS, so another
+/// app's hotkey (dictation) works. And a ⌘V that another app sends (the
+/// dictation's text) pastes this Mac's clipboard on the remote computer
+/// (onPasteFromApp) instead of the remote's own.
 final class InputController {
     var send: (Data) -> Void = { _ in }
     var onCaptureChange: ((Bool) -> Void)?
@@ -32,6 +38,20 @@ final class InputController {
     private var tapSource: CFRunLoopSource?
     private var chordArmed = false
     private var doubleCommand = DoubleCommandPress()
+    /// The shortcuts that stay on this Mac (read on every key).
+    var localShortcuts: () -> [LocalShortcut] = { [] }
+    /// Another app pressed ⌘V: true when handled (it isn't sent then); nil
+    /// or false leaves it to the remote like any key.
+    var onPasteFromApp: (() -> Bool)?
+    /// Keys pressed as a shortcut for this Mac: their release stays here too.
+    private var localKeys = Set<UInt16>()
+    /// Modifiers alone made a shortcut for this Mac: modifier changes stay
+    /// here until all are up.
+    private var localModifiers = false
+    /// ⌘V presses taken as another app's paste: their release is dropped.
+    private var appPasteKeys = Set<UInt16>()
+    /// Events the tap let through to macOS, which then reach this app too.
+    private var passedOn: [CGEventTimestamp] = []
 
     // MARK: Capture
 
@@ -124,6 +144,13 @@ final class InputController {
         guard captured, NSApp.isActive else { return Unmanaged.passUnretained(event) }
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let keyboardType = event.getIntegerValueField(.keyboardEventKeyboardType)
+        switch route(type, keyCode: keyCode, flags: event.flags.rawValue, fromApp: Self.isFromOtherApp(event)) {
+        case .local:
+            passedOn = Array((passedOn + [event.timestamp]).suffix(16))
+            return Unmanaged.passUnretained(event)
+        case .drop: return nil
+        case .remote: break
+        }
         switch type {
         case .keyDown:
             if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return nil }
@@ -164,6 +191,14 @@ final class InputController {
         // (Secure Event Input, tap briefly disabled) and must be forwarded.
         guard captured else { return false }
         let keyboardType = event.cgEvent?.getIntegerValueField(.keyboardEventKeyboardType) ?? 0
+        if let cgEvent = event.cgEvent, let index = passedOn.firstIndex(of: cgEvent.timestamp) {
+            passedOn.remove(at: index) // a shortcut for this Mac the tap let through
+            return true
+        }
+        if let type = CGEventType(rawValue: UInt32(event.type.rawValue)), let cgEvent = event.cgEvent,
+           route(type, keyCode: event.keyCode, flags: cgEvent.flags.rawValue, fromApp: Self.isFromOtherApp(cgEvent)) != .remote {
+            return true // here the system has seen it already: consumed, not sent
+        }
         switch event.type {
         case .keyDown:
             if !event.isARepeat { key(keyCode: event.keyCode, keyboardType: keyboardType, down: true) }
@@ -177,6 +212,62 @@ final class InputController {
         default:
             return false
         }
+    }
+
+    enum Route { case remote, local, drop }
+
+    /// Where a captured key event goes: to the remote, on to macOS (a
+    /// shortcut for this Mac), or nowhere (another app's ⌘V, handled by
+    /// onPasteFromApp).
+    func route(_ type: CGEventType, keyCode: UInt16, flags: UInt64, fromApp: Bool) -> Route {
+        switch type {
+        case .keyDown:
+            if localModifiers { return .local }
+            if fromApp, keyCode == UInt16(kVK_ANSI_V), flags & LocalShortcut.flagsMask == LocalShortcut.command,
+               onPasteFromApp?() == true {
+                appPasteKeys.insert(keyCode)
+                releaseModifiers()
+                return .drop
+            }
+            if localShortcuts().contains(where: { $0.matches(keyCode: keyCode, flags: flags) }) {
+                localKeys.insert(keyCode)
+                releaseModifiers()
+                return .local
+            }
+            return .remote
+        case .keyUp:
+            if localKeys.remove(keyCode) != nil { return .local }
+            if appPasteKeys.remove(keyCode) != nil { return .drop }
+            return localModifiers ? .local : .remote
+        case .flagsChanged:
+            if localModifiers {
+                if flags & LocalShortcut.flagsMask == 0 { localModifiers = false }
+                return .local
+            }
+            if localShortcuts().contains(where: { $0.matches(flags: flags) }) {
+                localModifiers = true
+                releaseModifiers()
+                return .local
+            }
+            return .remote
+        default:
+            return .remote
+        }
+    }
+
+    /// Posted by another process (a dictation app, say), not typed.
+    private static func isFromOtherApp(_ event: CGEvent) -> Bool {
+        let pid = event.getIntegerValueField(.eventSourceUnixProcessID)
+        return pid != 0 && pid != Int64(getpid())
+    }
+
+    /// Lifts the modifiers held on the remote, so a shortcut that stays on
+    /// this Mac doesn't leave them down there.
+    private func releaseModifiers() {
+        for usage in pressedUsages where (0xE0...0xE7).contains(usage) {
+            sendKey(usage, down: false)
+        }
+        chordArmed = false
     }
 
     private func key(keyCode: UInt16, keyboardType: Int64, down: Bool) {
@@ -247,6 +338,10 @@ final class InputController {
             send(EngineProtocol.key(hid: usage, pressed: false))
         }
         pressedUsages.removeAll()
+        localKeys.removeAll()
+        localModifiers = false
+        appPasteKeys.removeAll()
+        passedOn.removeAll()
         lastPointer = nil
         buttonState = 0
         scroll.reset()

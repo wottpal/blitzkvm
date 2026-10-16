@@ -607,8 +607,8 @@ private struct EmptyLibrary: View {
 
 // MARK: - Editor
 
-/// Add or edit a device, as a grouped form.
-private struct DeviceEditor: View {
+/// Add or edit a device, as a grouped form (also Device › Device Settings).
+struct DeviceEditor: View {
     @State private var device: Device
     @State private var addressText: String
     @State private var password = ""

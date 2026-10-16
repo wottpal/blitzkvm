@@ -1,28 +1,37 @@
 import AppKit
 import SwiftUI
 
-/// BlitzKVM › Settings…: updates and the permissions the app needs.
-struct SettingsView: View {
-    @ObservedObject var updater: Updater
-    @ObservedObject var permissions: PermissionsModel
+/// BlitzKVM › Settings…: a toolbar tab each for updates, shortcuts that stay
+/// on this Mac, and the permissions the app needs.
+enum SettingsTab: String, CaseIterable {
+    case general = "General"
+    case shortcuts = "Shortcuts"
+    case permissions = "Permissions"
 
-    var body: some View {
-        VStack(spacing: 0) {
-            AppHeader(iconSize: 64, title: "BlitzKVM", subtitle: Self.version)
-            Form {
-                UpdatesSection(updater: updater)
-                PermissionsSection(permissions: permissions, showsHeader: true)
-            }
-            .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
-            .scrollDisabled(true)
-            .fixedSize(horizontal: false, vertical: true)
+    var symbol: String {
+        switch self {
+        case .general: "gearshape"
+        case .shortcuts: "keyboard"
+        case .permissions: "hand.raised"
         }
-        .padding(.top, 24)
-        .padding(.bottom, 4) // the form adds its own bottom margin
-        .frame(width: 540)
-        .onAppear { permissions.startWatching() }
-        .onDisappear { permissions.stopWatching() }
+    }
+
+    @MainActor
+    func view(updater: Updater, permissions: PermissionsModel) -> AnyView {
+        switch self {
+        case .general:
+            AnyView(SettingsPane {
+                UpdatesSection(updater: updater)
+            } header: {
+                AppHeader(iconSize: 64, title: "BlitzKVM", subtitle: Self.version)
+            })
+        case .shortcuts:
+            AnyView(SettingsPane { ShortcutsSettings(store: LocalShortcuts.shared) })
+        case .permissions:
+            AnyView(SettingsPane { PermissionsSection(permissions: permissions) }
+                .onAppear { permissions.startWatching() }
+                .onDisappear { permissions.stopWatching() })
+        }
     }
 
     /// "Version 0.1.0 (268)".
@@ -31,6 +40,33 @@ struct SettingsView: View {
         let short = info["CFBundleShortVersionString"] as? String ?? "–"
         let build = info["CFBundleVersion"] as? String ?? "–"
         return "Version \(short) (\(build))"
+    }
+}
+
+/// One Settings tab: grouped sections at the window's width and their own
+/// height, under an optional header.
+struct SettingsPane<Content: View, Header: View>: View {
+    @ViewBuilder var content: Content
+    @ViewBuilder var header: Header
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Form { content }
+                .formStyle(.grouped)
+                .scrollContentBackground(.hidden)
+                .scrollDisabled(true)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, Header.self == EmptyView.self ? 0 : 20)
+        .padding(.bottom, 4) // the form adds its own bottom margin
+        .frame(width: 540)
+    }
+}
+
+extension SettingsPane where Header == EmptyView {
+    init(@ViewBuilder content: () -> Content) {
+        self.init(content: content, header: { EmptyView() })
     }
 }
 
@@ -55,6 +91,22 @@ struct AppHeader: View {
                 .monospacedDigit()
                 .padding(.top, 4)
         }
+    }
+}
+
+/// A section's note below it, wrapped to the form's width.
+struct SettingsFooter: View {
+    let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -84,11 +136,7 @@ struct UpdatesSection: View {
         } header: {
             Text("Updates")
         } footer: {
-            Text("Every update is notarized by Apple and verified before it installs.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            SettingsFooter("Every update is notarized by Apple and verified before it installs.")
         }
         .animation(.snappy(duration: 0.2), value: updater.lastCheck)
     }
@@ -103,20 +151,13 @@ struct UpdatesSection: View {
 /// grants it, or a check once granted.
 struct PermissionsSection: View {
     @ObservedObject var permissions: PermissionsModel
-    var showsHeader = false
 
     var body: some View {
         Section {
             localNetworkRow
             accessibilityRow
-        } header: {
-            if showsHeader { Text("Permissions") }
         } footer: {
-            Text("Change these anytime in System Settings › Privacy & Security.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            SettingsFooter("Change these anytime in System Settings › Privacy & Security.")
         }
         .animation(.snappy(duration: 0.2), value: permissions.localNetwork)
         .animation(.snappy(duration: 0.2), value: permissions.accessibility)
@@ -155,18 +196,33 @@ struct PermissionsSection: View {
     }
 }
 
+/// The Settings window: toolbar tabs, each tab's height (the window follows
+/// it), titled after the tab.
 final class SettingsWindowController: NSWindowController {
+    private let tabs = NSTabViewController()
+
     init(updater: Updater, permissions: PermissionsModel) {
-        // The window takes the view's size (and follows it as it changes).
-        let host = NSHostingController(rootView: SettingsView(updater: updater, permissions: permissions))
-        host.sizingOptions = [.preferredContentSize]
-        let window = NSWindow(contentViewController: host)
+        tabs.tabStyle = .toolbar
+        for tab in SettingsTab.allCases {
+            let host = NSHostingController(rootView: tab.view(updater: updater, permissions: permissions))
+            host.sizingOptions = [.preferredContentSize]
+            host.title = tab.rawValue
+            let item = NSTabViewItem(viewController: host)
+            item.image = NSImage(systemSymbolName: tab.symbol, accessibilityDescription: nil)
+            item.identifier = tab.rawValue
+            tabs.addTabViewItem(item)
+        }
+        let window = NSWindow(contentViewController: tabs)
         window.styleMask = [.titled, .closable, .miniaturizable]
-        window.title = "Settings"
+        window.toolbarStyle = .preference
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.center()
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    func select(_ tab: SettingsTab) {
+        tabs.selectedTabViewItemIndex = SettingsTab.allCases.firstIndex(of: tab) ?? 0
+    }
 }

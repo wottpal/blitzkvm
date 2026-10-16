@@ -411,7 +411,8 @@ func (e *Engine) uninstallClipboard(raw json.RawMessage) error {
 }
 
 // clipRun is one clipboardStart's sync: its loop, its session while
-// connected to the Mac, and the clip waiting to go out.
+// connected to the Mac, the clip waiting to go out, and who waits for the
+// Mac to confirm a clip (clipboardPaste).
 type clipRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -420,6 +421,17 @@ type clipRun struct {
 	session *hostlink.ClipboardSession
 	pending *hostlink.Clip
 	wake    chan struct{}
+	applied map[string]chan struct{}
+}
+
+func (run *clipRun) confirm(id string) {
+	run.mu.Lock()
+	ch := run.applied[id]
+	delete(run.applied, id)
+	run.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
 }
 
 // clipboardStart runs the sync until clipboardStop (or the engine ends),
@@ -436,7 +448,7 @@ func (e *Engine) clipboardStart(cmd engineipc.Command) {
 	}
 	e.clipboardStop()
 	ctx, cancel := context.WithCancel(e.ctx)
-	run := &clipRun{cancel: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	run := &clipRun{cancel: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1), applied: map[string]chan struct{}{}}
 	e.clipMu.Lock()
 	e.clip = run
 	e.clipMu.Unlock()
@@ -489,6 +501,66 @@ func (e *Engine) clipboardSet(raw json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+// clipboardPaste pastes this Mac's clipboard on the remote computer, for an
+// app that pasted into the window (dictation): with sync connected, the
+// clip goes to the Mac's clipboard and, once the Mac confirms, ⌘V follows
+// there; otherwise its text is typed as keystrokes.
+func (e *Engine) clipboardPaste(raw json.RawMessage) error {
+	var clip hostlink.Clip
+	if err := json.Unmarshal(raw, &clip); err != nil {
+		return fmt.Errorf("clip: %w", err)
+	}
+	c := e.controller()
+	if c == nil {
+		return errors.New("not connected")
+	}
+	if e.pasteThroughSync(c, clip) {
+		return nil
+	}
+	text := string(clip.Items["public.utf8-plain-text"])
+	if text == "" {
+		return errors.New("nothing to paste as text")
+	}
+	_, err := c.ExecutePaste(text, defaultPasteMS)
+	return err
+}
+
+// pasteThroughSync puts clip on the Mac's clipboard and presses ⌘V there;
+// false when sync isn't connected or the Mac didn't confirm in time.
+func (e *Engine) pasteThroughSync(c *session.Controller, clip hostlink.Clip) bool {
+	e.clipMu.Lock()
+	run := e.clip
+	e.clipMu.Unlock()
+	if run == nil || clip.Size() > hostlink.MaxClipBytes {
+		return false
+	}
+	clip.ID = fmt.Sprintf("paste-%d", time.Now().UnixNano())
+	confirmed := make(chan struct{})
+	run.mu.Lock()
+	s := run.session
+	if s != nil {
+		run.applied[clip.ID] = confirmed
+	}
+	run.mu.Unlock()
+	if s == nil || s.Set(clip) != nil {
+		run.confirm(clip.ID)
+		return false
+	}
+	select {
+	case <-confirmed:
+	case <-time.After(3 * time.Second):
+		run.confirm(clip.ID)
+		return false
+	case <-e.ctx.Done():
+		return false
+	}
+	key, ok := input.MacLetterKey(c.Snapshot().KeyboardLayout, 'v')
+	if !ok {
+		key = 0x19
+	}
+	return c.TapKey(e.ctx, hidModGUI, key) == nil
 }
 
 // writeClips sends the run's pending clips to s until it ends.
@@ -567,7 +639,7 @@ func (e *Engine) syncClipboard(ctx context.Context, c *session.Controller, run *
 			return
 		}
 		_ = e.w.WriteJSON(engineipc.TypeEvent, engineipc.Event{Type: "clipboard", Clip: data})
-	})
+	}, run.confirm)
 	if err != nil {
 		return err
 	}

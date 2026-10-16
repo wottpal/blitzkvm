@@ -126,7 +126,8 @@ type Command struct {
 	// reboot (restarts the JetKVM; the session reconnects once it is up),
 	// setAudio (Audio), and clipboard sync over the firmware's host link
 	// (pkg/hostlink; Params as in pkg/engine): clipboardInstall,
-	// clipboardUninstall, clipboardStart, clipboardStop, clipboardSet.
+	// clipboardUninstall, clipboardStart, clipboardStop, clipboardSet,
+	// clipboardPaste (this Mac's clipboard pasted on the remote computer).
 	Cmd      string `json:"cmd"`
 	BaseURL  string `json:"baseURL,omitempty"`
 	Password string `json:"password,omitempty"`

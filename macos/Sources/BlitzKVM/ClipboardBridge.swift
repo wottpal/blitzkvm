@@ -16,6 +16,9 @@ final class ClipboardBridge {
         /// coming back (Universal Clipboard between two Macs on one Apple
         /// Account copies it without the marker) isn't sent again.
         var last: [String: Data]?
+        /// Until then, changes wait (a paste on the remote is under way);
+        /// the clipboard as it is then goes out.
+        var holdUntil: Date?
     }
 
     private var sinks: [ObjectIdentifier: Sink] = [:]
@@ -47,6 +50,16 @@ final class ClipboardBridge {
             timer?.invalidate()
             timer = nil
         }
+    }
+
+    /// The window sends `sent` itself (pasteFromApp): it counts as sent, and
+    /// changes wait `seconds`, so a clipboard another app puts back can't
+    /// overtake it on the remote.
+    func hold(_ owner: AnyObject, sent: [String: Data], for seconds: TimeInterval) {
+        let key = ObjectIdentifier(owner)
+        guard sinks[key] != nil else { return }
+        sinks[key]?.last = sent
+        sinks[key]?.holdUntil = Date().addingTimeInterval(seconds)
     }
 
     /// Puts a remote Mac's clipboard on this Mac's.
@@ -83,11 +96,15 @@ final class ClipboardBridge {
 
     private func poll() {
         let pasteboard = NSPasteboard.general
-        guard pasteboard.changeCount != changeCount else { return }
+        let now = Date()
+        // A hold that ended sends what changed meanwhile.
+        let released = sinks.filter { $0.value.holdUntil.map { $0 <= now } ?? false }.map(\.key)
+        released.forEach { sinks[$0]?.holdUntil = nil }
+        guard pasteboard.changeCount != changeCount || !released.isEmpty else { return }
         changeCount = pasteboard.changeCount
         guard let item = pasteboard.pasteboardItems?.first else { return }
         let origin = item.string(forType: NSPasteboard.PasteboardType(ClipboardPolicy.marker))
-        let targets = sinks.filter { $0.value.deviceID != origin }.map(\.key)
+        let targets = sinks.filter { $0.value.deviceID != origin && $0.value.holdUntil == nil }.map(\.key)
         guard !targets.isEmpty,
               let items = ClipboardPolicy.select(types: item.types.map(\.rawValue),
                                                  data: { item.data(forType: NSPasteboard.PasteboardType($0)) }) else { return }

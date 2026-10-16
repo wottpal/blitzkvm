@@ -217,6 +217,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             self.stillRefresh.inputSent(keysHeld: self.input.keysHeld)
         }
         input.onCaptureChange = { [weak self] in self?.captureChanged($0) }
+        input.localShortcuts = { MainActor.assumeIsolated { LocalShortcuts.shared.shortcuts } }
+        input.onPasteFromApp = { [weak self] in
+            MainActor.assumeIsolated {
+                LocalShortcuts.shared.pastesFromApps && self?.pasteFromApp() == true
+            }
+        }
         applyPreferences()
     }
 
@@ -547,6 +553,21 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         Task { await mediaModel.refresh() }
     }
 
+    /// Device Settings: the device library's editor for this device, as a
+    /// sheet; `save` stores what was saved (it comes back as libraryEdited).
+    func showDeviceSettings(_ saved: Device, save: @escaping (Device, String?) -> Void) {
+        guard let window, window.attachedSheet == nil else { return }
+        let host = NSHostingController(rootView: AnyView(EmptyView()))
+        let sheet = NSWindow(contentViewController: host)
+        host.rootView = AnyView(DeviceEditor(device: saved, isNew: false) { [weak window, weak sheet] device, password in
+            save(device, password)
+            if let sheet { window?.endSheet(sheet) }
+        } cancel: { [weak window, weak sheet] in
+            if let sheet { window?.endSheet(sheet) }
+        })
+        window.beginSheet(sheet)
+    }
+
     /// The JetKVM Setup sheet: firmware, Tailscale and password.
     func showSetup() {
         guard let window, setupSheet == nil else { return }
@@ -733,6 +754,21 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func cancelPaste() {
         engine.send(command: EngineCommand(cmd: "cancelPaste"))
+    }
+
+    /// Another app pasted into the window (a dictation app's text): this
+    /// Mac's clipboard is pasted on the remote computer, through clipboard
+    /// sync when it runs (exactly, with ⌘V there), else typed. The clipboard
+    /// is read now: such apps often put the old one back right away. False
+    /// when there is nothing to paste (the ⌘V then goes to the remote).
+    func pasteFromApp() -> Bool {
+        guard let item = NSPasteboard.general.pasteboardItems?.first,
+              let items = ClipboardPolicy.select(types: item.types.map(\.rawValue),
+                                                 data: { item.data(forType: NSPasteboard.PasteboardType($0)) }) else { return false }
+        // Sync sends this clip itself; the clipboard put back meanwhile follows once it's pasted.
+        ClipboardBridge.shared.hold(self, sent: items, for: 2)
+        engine.send(command: EngineCommand(cmd: "clipboardPaste", params: ClipboardPolicy.params(items)))
+        return true
     }
 
     /// Resizes the window to show the remote screen at its natural size: one

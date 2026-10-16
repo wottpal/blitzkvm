@@ -5,7 +5,7 @@
 ObjC.import('AppKit');
 
 // MARKER tags what this script put on the pasteboard, so "watch" doesn't
-// send it back.
+// send it back; its value is the message's id, which "watch" confirms.
 const MARKER = 'com.blitzkvm.synced';
 const MAX_BYTES = 8 * 1024 * 1024;
 // In order of importance: what doesn't fit in MAX_BYTES is left out from
@@ -33,6 +33,12 @@ function watch() {
 		const count = Number(pasteboard.changeCount);
 		if (count !== last) {
 			last = count;
+			const applied = appliedID(pasteboard);
+			if (applied !== null) {
+				if (applied) emit({ t: 'applied', id: applied });
+				idle = 0;
+				continue;
+			}
 			const items = read(pasteboard);
 			if (items) {
 				emit({ t: 'clip', items: items });
@@ -47,6 +53,15 @@ function watch() {
 			idle = 0;
 		}
 	}
+}
+
+// The id of what "apply" put on the pasteboard ('' without one), or null
+// when something else did.
+function appliedID(pasteboard) {
+	const items = pasteboard.pasteboardItems;
+	if (!items || items.isNil() || Number(items.count) === 0) return null;
+	const marker = items.objectAtIndex(0).stringForType(MARKER);
+	return !marker || marker.isNil() ? null : marker.js;
 }
 
 function read(pasteboard) {
@@ -98,7 +113,7 @@ function write(pasteboard, message) {
 		const data = $.NSData.alloc.initWithBase64EncodedStringOptions(message.items[type], 0);
 		if (!data.isNil()) item.setDataForType(data, type);
 	}
-	item.setStringForType('', MARKER);
+	item.setStringForType(typeof message.id === 'string' ? message.id : '', MARKER);
 	pasteboard.clearContents;
 	pasteboard.writeObjects($([item]));
 }
