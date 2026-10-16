@@ -8,6 +8,7 @@ import (
 	"github.com/wottpal/blitzkvm/pkg/video/openh264"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -443,27 +444,37 @@ func TestKeyboardStateTracksModifiersAndReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	type keyState struct {
+		Modifier byte   `json:"modifier"`
+		Keys     []byte `json:"keys"`
+	}
+	// The presses travel on the HID channel, the state comes over RPC: poll
+	// until the presses have arrived (slow under -race).
+	waitForState := func(what string, ok func(keyState) bool) {
+		t.Helper()
+		var state keyState
+		for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			if err := c.Call(ctx, "getKeyDownState", nil, &state); err != nil {
+				t.Fatal(err)
+			}
+			if ok(state) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected %s, got modifier %08b, keys %+v", what, state.Modifier, state.Keys)
+			}
+		}
+	}
+
 	if err := c.SendKeypress(225, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.SendKeypress(4, true); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond)
-
-	var state struct {
-		Modifier byte   `json:"modifier"`
-		Keys     []byte `json:"keys"`
-	}
-	if err := c.Call(waitCtx, "getKeyDownState", nil, &state); err != nil {
-		t.Fatal(err)
-	}
-	if state.Modifier != 0x02 {
-		t.Fatalf("expected left shift modifier bit, got %08b", state.Modifier)
-	}
-	if len(state.Keys) < 1 || state.Keys[0] != 4 {
-		t.Fatalf("expected key A in keysDown state, got %+v", state.Keys)
-	}
+	waitForState("left shift and key A down", func(s keyState) bool {
+		return s.Modifier == 0x02 && len(s.Keys) > 0 && s.Keys[0] == 4
+	})
 
 	if err := c.SendKeypress(4, false); err != nil {
 		t.Fatal(err)
@@ -471,18 +482,9 @@ func TestKeyboardStateTracksModifiersAndReleases(t *testing.T) {
 	if err := c.SendKeypress(225, false); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond)
-	if err := c.Call(waitCtx, "getKeyDownState", nil, &state); err != nil {
-		t.Fatal(err)
-	}
-	if state.Modifier != 0 {
-		t.Fatalf("expected modifiers to clear, got %08b", state.Modifier)
-	}
-	for _, key := range state.Keys {
-		if key != 0 {
-			t.Fatalf("expected all keys released, got %+v", state.Keys)
-		}
-	}
+	waitForState("every key released", func(s keyState) bool {
+		return s.Modifier == 0 && !slices.ContainsFunc(s.Keys, func(key byte) bool { return key != 0 })
+	})
 }
 
 func TestForcedDisconnectFaultClosesPeerConnection(t *testing.T) {
