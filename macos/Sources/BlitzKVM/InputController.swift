@@ -58,6 +58,12 @@ final class InputController {
     /// uptime): focus lost and back within keepsControlFor captures again.
     private var keptControlAt: TimeInterval?
     static let keepsControlFor: TimeInterval = 600
+    /// Keys pressed while another app's paste is on its way wait for it (a
+    /// dictation app's Return after its text, typing): the frames, in order,
+    /// and the keys among them still down.
+    private var heldFrames: [Data]?
+    private var heldUsages = Set<UInt8>()
+    private var holdTimeout: DispatchWorkItem?
 
     // MARK: Capture
 
@@ -289,8 +295,27 @@ final class InputController {
         if shortcut.keepsControl { keptControlAt = ProcessInfo.processInfo.systemUptime }
     }
 
+    /// Keys pressed from now on wait until releaseHeldKeys (or `seconds`).
+    func holdKeys(for seconds: TimeInterval = 10) {
+        if heldFrames == nil { heldFrames = [] }
+        holdTimeout?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in self?.releaseHeldKeys() }
+        holdTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: timeout)
+    }
+
+    /// Sends the keys held meanwhile.
+    func releaseHeldKeys() {
+        holdTimeout?.cancel()
+        holdTimeout = nil
+        let frames = heldFrames ?? []
+        heldFrames = nil
+        heldUsages.removeAll()
+        frames.forEach(send)
+    }
+
     /// Posted by another process (a dictation app, say), not typed.
-    private static func isFromOtherApp(_ event: CGEvent) -> Bool {
+    static func isFromOtherApp(_ event: CGEvent) -> Bool {
         let pid = event.getIntegerValueField(.eventSourceUnixProcessID)
         return pid != 0 && pid != Int64(getpid())
     }
@@ -361,7 +386,15 @@ final class InputController {
         } else {
             pressedUsages.remove(usage)
         }
-        send(EngineProtocol.key(hid: usage, pressed: down))
+        let frame = EngineProtocol.key(hid: usage, pressed: down)
+        // Pressed while held (or released after): waits, in order. Keys
+        // down from before go up now.
+        if heldFrames != nil, down || heldUsages.contains(usage) {
+            if down { heldUsages.insert(usage) } else { heldUsages.remove(usage) }
+            heldFrames?.append(frame)
+            return
+        }
+        send(frame)
     }
 
     /// Releases every key and button we pressed on the remote (focus loss,
@@ -372,6 +405,10 @@ final class InputController {
             send(EngineProtocol.key(hid: usage, pressed: false))
         }
         pressedUsages.removeAll()
+        holdTimeout?.cancel()
+        holdTimeout = nil
+        heldFrames = nil // never sent: nothing to release for them
+        heldUsages.removeAll()
         localKeys.removeAll()
         localModifiers = false
         appPasteKeys.removeAll()

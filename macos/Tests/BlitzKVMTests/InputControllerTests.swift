@@ -109,6 +109,32 @@ final class InputControllerTests: XCTestCase {
         XCTAssertEqual(input.route(.keyDown, keyCode: 9, flags: LocalShortcut.command, fromApp: true), .remote)
     }
 
+    func testKeysAfterAnAppsPasteWaitForIt() {
+        let (input, sent) = captured([])
+        input.onPasteFromApp = { input.holdKeys(); return true }
+        // The dictation app holds ⌘ (sent), pastes, then presses Return.
+        let commandDown = EngineProtocol.key(hid: 0xE3, pressed: true)
+        let commandDownEvent = NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(LocalShortcut.command | 0x08)), timestamp: 1, windowNumber: 0,
+                                                context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 0x37)!
+        XCTAssertTrue(input.handle(commandDownEvent))
+        XCTAssertEqual(sent().last, commandDown)
+        XCTAssertEqual(input.route(.keyDown, keyCode: 9, flags: LocalShortcut.command, fromApp: true), .drop)
+        // ⌘ is lifted at once; Return waits for the paste.
+        XCTAssertEqual(sent().last, EngineProtocol.key(hid: 0xE3, pressed: false))
+        let returnKey = { (down: Bool) in
+            NSEvent.keyEvent(with: down ? .keyDown : .keyUp, location: .zero, modifierFlags: [], timestamp: 2, windowNumber: 0,
+                             context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 0x24)!
+        }
+        XCTAssertTrue(input.handle(returnKey(true)))
+        XCTAssertTrue(input.handle(returnKey(false)))
+        let before = sent().count
+        input.releaseHeldKeys()
+        XCTAssertEqual(Array(sent().suffix(from: before)), [EngineProtocol.key(hid: 0x28, pressed: true), EngineProtocol.key(hid: 0x28, pressed: false)])
+        // Not held any more.
+        XCTAssertTrue(input.handle(returnKey(true)))
+        XCTAssertEqual(sent().last, EngineProtocol.key(hid: 0x28, pressed: true))
+    }
+
     func testRepeatedReportsAreSentOnce() {
         let sent = pointerReports([(1000, 500, 0), (1000, 500, 0), (1000, 500, 1), (1000, 500, 1), (1000, 500, 0)])
         XCTAssertEqual(sent.count, 3)

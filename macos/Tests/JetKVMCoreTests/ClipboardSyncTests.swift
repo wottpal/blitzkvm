@@ -20,6 +20,14 @@ final class ClipboardSyncTests: XCTestCase {
         XCTAssertNil(select(["com.apple.webarchive": Data(count: 10)]))
     }
 
+    func testAPasteOnPurposeKeepsTransientTextMarked() {
+        // What a dictation app pastes (Superwhisper marks it transient).
+        let data = ["public.utf8-plain-text": Data("dictated".utf8), "org.nspasteboard.TransientType": Data()]
+        let items = ClipboardPolicy.select(types: Array(data.keys), includingPrivate: true) { data[$0] }
+        XCTAssertEqual(items, data)
+        XCTAssertNil(ClipboardPolicy.select(types: ["org.nspasteboard.TransientType"], includingPrivate: true) { data[$0] })
+    }
+
     func testPrefersPNGOverTheSameImageAsTIFF() {
         let items = select(["public.png": Data(count: 100), "public.tiff": Data(count: 1000)])
         XCTAssertEqual(items?.keys.sorted(), ["public.png"])

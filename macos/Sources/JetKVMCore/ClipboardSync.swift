@@ -37,9 +37,13 @@ public enum ClipboardPolicy {
     public static let privateTypes = ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"]
 
     /// The data to send for an item with `types`, read through `data`; nil
-    /// when the item is private or has nothing synced.
-    public static func select(types itemTypes: [String], data: (String) -> Data?) -> [String: Data]? {
-        if itemTypes.contains(where: privateTypes.contains) { return nil }
+    /// when it has nothing synced, or is private and not `includingPrivate`
+    /// (pasted on purpose: an app's paste into the window, which dictation
+    /// apps mark transient). A private item keeps its marks, so the other
+    /// Mac's clipboard tools leave it alone too.
+    public static func select(types itemTypes: [String], includingPrivate: Bool = false, data: (String) -> Data?) -> [String: Data]? {
+        let marks = privateTypes.filter(itemTypes.contains)
+        if !marks.isEmpty && !includingPrivate { return nil }
         var items: [String: Data] = [:]
         var size = 0
         for type in types where itemTypes.contains(type) {
@@ -48,7 +52,9 @@ public enum ClipboardPolicy {
             size += value.count
             items[type] = value
         }
-        return items.isEmpty ? nil : items
+        guard !items.isEmpty else { return nil }
+        for mark in marks { items[mark] = Data() }
+        return items
     }
 
     /// The engine's clipboardSet parameters for `items` (base64 data).

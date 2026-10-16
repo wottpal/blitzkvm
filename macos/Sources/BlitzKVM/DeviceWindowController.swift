@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import CoreVideo
 import JetKVMCore
 import Network
@@ -96,6 +97,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private var pathMonitor: NWPathMonitor?
     private var aspectLocked = false
     private var pendingPasteID: Int64?
+    /// The paste of another app's clipboard on its way (pasteFromApp).
+    private var appPasteID: Int64?
     let serialLog = SerialConsoleLog()
     private(set) lazy var mediaModel = VirtualMediaModel(engine: engine)
     private var mediaWindow: VirtualMediaWindowController?
@@ -218,11 +221,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         input.onCaptureChange = { [weak self] in self?.captureChanged($0) }
         input.localShortcuts = { MainActor.assumeIsolated { LocalShortcuts.shared.shortcuts } }
-        input.onPasteFromApp = { [weak self] in
-            MainActor.assumeIsolated {
-                LocalShortcuts.shared.pastesFromApps && self?.pasteFromApp() == true
-            }
-        }
+        input.onPasteFromApp = { [weak self] in MainActor.assumeIsolated { self?.pasteFromApp() == true } }
         applyPreferences()
     }
 
@@ -756,20 +755,26 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         engine.send(command: EngineCommand(cmd: "cancelPaste"))
     }
 
-    /// Another app pasted into the window (a dictation app's text): this
-    /// Mac's clipboard is pasted on the remote computer, through clipboard
-    /// sync when it runs (exactly, with ⌘V there), else typed. The clipboard
-    /// is read now: such apps often put the old one back right away. False
-    /// when there is nothing to paste (the ⌘V then goes to the remote).
+    /// Another app pasted into the window (a dictation app's text, with ⌘V
+    /// or Edit › Paste): this Mac's clipboard is pasted on the remote
+    /// computer, through clipboard sync when it runs (exactly, with ⌘V
+    /// there), else typed; keys pressed meanwhile follow it. The clipboard
+    /// is read now: such apps put the old one back right away, and mark
+    /// theirs transient. False when off or there is nothing to paste (the ⌘V
+    /// then goes to the remote).
     func pasteFromApp() -> Bool {
-        guard let item = NSPasteboard.general.pasteboardItems?.first,
-              let items = ClipboardPolicy.select(types: item.types.map(\.rawValue),
+        guard canPasteFromApp, let item = NSPasteboard.general.pasteboardItems?.first,
+              let items = ClipboardPolicy.select(types: item.types.map(\.rawValue), includingPrivate: true,
                                                  data: { item.data(forType: NSPasteboard.PasteboardType($0)) }) else { return false }
         // Sync sends this clip itself; the clipboard put back meanwhile follows once it's pasted.
         ClipboardBridge.shared.hold(self, sent: items, for: 2)
-        engine.send(command: EngineCommand(cmd: "clipboardPaste", params: ClipboardPolicy.params(items)))
+        appPasteID = engine.send(command: EngineCommand(cmd: "clipboardPaste", params: ClipboardPolicy.params(items)))
+        input.holdKeys()
+        AppLog.log("\(device.name): pasting another app's clipboard (\(items.keys.sorted().joined(separator: ", ")))")
         return true
     }
+
+    var canPasteFromApp: Bool { LocalShortcuts.shared.pastesFromApps && !input.viewOnly }
 
     /// Resizes the window to show the remote screen at its natural size: one
     /// remote pixel per point (pixel for pixel in that mode), or as large as
@@ -993,6 +998,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     }
 
     func engine(_ engine: EngineProcess, didFinishCommand id: Int64, error: String?, invalid: String?) {
+        if id == appPasteID {
+            appPasteID = nil
+            input.releaseHeldKeys()
+        }
         if id == pendingPasteID {
             pendingPasteID = nil
             if let invalid, !invalid.isEmpty {
@@ -1034,6 +1043,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func engineDidRestart(_ engine: EngineProcess, reason: String) {
         pendingPasteID = nil
+        appPasteID = nil
+        input.releaseAll()
         decoder.reset()
         audio.streamEnded()
         onRestart?(reason)
@@ -1439,6 +1450,12 @@ final class CaptureVideoView: VideoView {
     override func otherMouseUp(with event: NSEvent) { routeMouse(event) }
     override func scrollWheel(with event: NSEvent) { controller?.input.scroll(event) }
 
+    /// Edit › Paste, which dictation apps also press (through Accessibility):
+    /// this Mac's clipboard is pasted on the remote computer.
+    @objc func paste(_ sender: Any?) {
+        _ = controller?.pasteFromApp()
+    }
+
     override func keyDown(with event: NSEvent) {
         guard let controller else { return super.keyDown(with: event) }
         if controller.input.handle(event) { return }
@@ -1465,8 +1482,23 @@ final class CaptureVideoView: VideoView {
     /// ⌘-shortcuts reach this before the menu bar: while captured they go to
     /// the remote (⌘Q quits the remote app, not this one).
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard let controller, controller.input.captured else { return super.performKeyEquivalent(with: event) }
-        return controller.input.handle(event)
+        guard let controller else { return super.performKeyEquivalent(with: event) }
+        if controller.input.captured { return controller.input.handle(event) }
+        // A ⌘V typed before taking control says how, as other keys do (only
+        // another app's goes on to Edit › Paste).
+        if event.type == .keyDown, event.keyCode == UInt16(kVK_ANSI_V),
+           event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad]) == .command,
+           !(event.cgEvent.map(InputController.isFromOtherApp) ?? false), controller.capturesOnRequest {
+            keyDown(with: event)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+extension CaptureVideoView: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        menuItem.action == #selector(paste(_:)) ? controller?.canPasteFromApp == true : true
     }
 }
 
