@@ -585,6 +585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for (title, level) in Self.qualityLevels {
             let i = item(title, #selector(setQualityLevel(_:)))
             i.representedObject = level
+            i.mixedStateImage = Self.automaticLevelDot
             quality.addItem(i)
         }
         let qualityItem = NSMenuItem(title: "Stream Quality", action: nil, keyEquivalent: "")
@@ -689,6 +690,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ("Maximum (Fast LAN)", "maximum"), ("High", "high"), ("Balanced", "balanced"),
         ("Low", "low"), ("Minimal (Slow Links)", "minimal"),
     ]
+    /// Marks the level Automatic runs at now (a check marks a chosen one).
+    private static let automaticLevelDot: NSImage = {
+        let dot = NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
+            NSBezierPath(ovalIn: NSRect(x: rect.midX - 3, y: rect.midY - 3, width: 6, height: 6)).fill()
+            return true
+        }
+        dot.isTemplate = true
+        dot.accessibilityDescription = "Automatic's level now"
+        return dot
+    }()
+
     @objc private func toggleAdaptiveQuality() {
         guard let c = current else { return }
         c.setAdaptiveQuality(!c.device.adaptiveQuality)
@@ -857,8 +869,14 @@ extension AppDelegate: NSMenuItemValidation {
             menuItem.state = c?.device.adaptiveQuality == true ? .on : .off
             return c != nil
         case #selector(setQualityLevel(_:)):
-            let manual = c?.device.adaptiveQuality == false
-            menuItem.state = manual && c?.device.qualityLevel == menuItem.representedObject as? String ? .on : .off
+            let level = menuItem.representedObject as? String
+            if c?.device.adaptiveQuality == true {
+                menuItem.state = c?.snapshot.QualityLevel == level ? .mixed : .off
+                menuItem.toolTip = menuItem.state == .mixed ? "Automatic runs at this level now" : nil
+            } else {
+                menuItem.state = c?.device.qualityLevel == level ? .on : .off
+                menuItem.toolTip = nil
+            }
             return c?.snapshot.Phase == "connected"
         default:
             break
