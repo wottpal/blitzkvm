@@ -14,7 +14,7 @@ let package = Package(
     targets: [
         // Platform-independent logic (wire protocol, Annex-B handling, key
         // mapping, geometry); unit tested without a window server.
-        .target(name: "JetKVMCore"),
+        .target(name: "JetKVMCore", linkerSettings: [.linkedLibrary("z")]),
         .executableTarget(
             name: "BlitzKVM",
             dependencies: ["JetKVMCore", .product(name: "Sparkle", package: "Sparkle")]

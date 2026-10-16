@@ -1,9 +1,11 @@
 #!/bin/sh
 # Prepares the firmware builds JetKVM Setup installs (Support/Firmware.json):
-# each is checked against its SHA-256 and gzipped into the output directory
-# as <tag with / as ->.gz, next to a copy of the manifest. A build with a
-# "url" is downloaded once (cached under build/firmware-cache); the JetKVM
-# Desktop build comes from the fork's own build output.
+# each is checked against its SHA-256 and compressed with xz into the output
+# directory as <tag with / as ->.xz, next to a copy of the manifest; builds
+# no longer pinned are removed from it. A build with a "url" is downloaded
+# once (cached under build/firmware-cache); the BlitzKVM build comes from
+# the fork's own build output. (xz is a quarter smaller than gzip; JetKVM
+# Setup turns it back into gzip for the JetKVM's gunzip.)
 #
 #   scripts/bundle-firmware.sh <fork jetkvm_app> <Firmware.json> <out dir>
 #
@@ -14,13 +16,24 @@ cache=$(dirname "$out")/firmware-cache
 mkdir -p "$out" "$cache"
 cp "$manifest" "$out/Firmware.json"
 count=$(plutil -extract builds raw "$manifest")
+name() { echo "$(plutil -extract "builds.$1.tag" raw "$manifest" | tr / -).xz"; }
+pinned=
 i=0
 while [ "$i" -lt "$count" ]; do
+	pinned="$pinned $(name "$i")"
+	i=$((i + 1))
+done
+for file in "$out"/*.gz "$out"/*.xz; do
+	[ -f "$file" ] || continue
+	case " $pinned " in *" $(basename "$file") "*) ;; *) rm -f "$file" "$file.sha256" ;; esac
+done
+i=0
+while [ "$i" -lt "$count" ]; do
+	file="$out/$(name "$i")"
 	tag=$(plutil -extract "builds.$i.tag" raw "$manifest")
 	want=$(plutil -extract "builds.$i.sha256" raw "$manifest")
 	url=$(plutil -extract "builds.$i.url" raw "$manifest" 2>/dev/null || true)
 	i=$((i + 1))
-	file="$out/$(echo "$tag" | tr / -).gz"
 	if [ -f "$file" ] && [ "$(cat "$file.sha256" 2>/dev/null)" = "$want" ]; then
 		continue
 	fi
@@ -46,7 +59,8 @@ while [ "$i" -lt "$count" ]; do
 		echo "error: $binary is $have, Support/Firmware.json pins $want for $tag" >&2
 		exit 1
 	fi
-	gzip -9 -n -c "$binary" > "$file"
+	# One thread: the same output on every machine.
+	xz -9e -T1 -c "$binary" > "$file"
 	echo "$want" > "$file.sha256"
-	echo "bundled $tag ($(du -h "$file" | cut -f 1 | tr -d ' ') gzipped)"
+	echo "bundled $tag ($(du -h "$file" | cut -f 1 | tr -d ' ') as xz)"
 done

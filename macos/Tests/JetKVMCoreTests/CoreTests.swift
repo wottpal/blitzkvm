@@ -520,7 +520,55 @@ final class JetKVMSetupTests: XCTestCase {
                                               bundled: bundled), .stock("0.5.10"))
         XCTAssertEqual(fork.title, "BlitzKVM 0.5.9-fork.4")
         XCTAssertEqual(stock.title, "JetKVM 0.5.9")
-        XCTAssertEqual(fork.fileName, "release-0.5.9-fork.4.gz")
+        XCTAssertEqual(fork.fileName, "release-0.5.9-fork.4.xz")
+    }
+
+    func testFirmwareGoesToTheJetKVMAsGzip() throws {
+        // A binary's worth of mixed data, shipped as xz like the bundled builds.
+        let binary = Data((0..<3_000_000).map { $0 % 7 == 0 ? UInt8.random(in: 0...255) : UInt8($0 % 251) })
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let xz = dir.appendingPathComponent("build.xz"), gz = dir.appendingPathComponent("build.gz")
+        try ((binary as NSData).compressed(using: .lzma) as Data).write(to: xz)
+        try FirmwareBuild.gzip(xz: xz, to: gz)
+        // What the JetKVM runs on it: gunzip -c.
+        let gunzip = Process()
+        gunzip.executableURL = URL(fileURLWithPath: "/usr/bin/gunzip")
+        gunzip.arguments = ["-c", gz.path]
+        let out = Pipe()
+        gunzip.standardOutput = out
+        try gunzip.run()
+        let unzipped = out.fileHandleForReading.readDataToEndOfFile()
+        gunzip.waitUntilExit()
+        XCTAssertEqual(gunzip.terminationStatus, 0)
+        XCTAssertEqual(unzipped, binary)
+        XCTAssertThrowsError(try FirmwareBuild.gzip(xz: gz, to: dir.appendingPathComponent("not-xz.gz")))
+    }
+
+    /// The builds `make firmware` bundled, as the JetKVM receives them: the
+    /// pinned binary after gunzip.
+    func testBundledFirmwareArrivesAsPinned() throws {
+        let folder = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../build/firmware")
+        let builds = try FirmwareBuild.manifest(Data(contentsOf: folder.appendingPathComponent("../../Support/Firmware.json")))
+            .filter { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0.fileName).path) }
+        guard !builds.isEmpty else { throw XCTSkip("no bundled firmware (make firmware)") }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for build in builds {
+            let gz = dir.appendingPathComponent("\(build.version).gz")
+            try FirmwareBuild.gzip(xz: folder.appendingPathComponent(build.fileName), to: gz)
+            let sum = Process()
+            sum.executableURL = URL(fileURLWithPath: "/bin/sh")
+            sum.arguments = ["-c", "gunzip -c \"$0\" | shasum -a 256", gz.path]
+            let out = Pipe()
+            sum.standardOutput = out
+            try sum.run()
+            let line = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            sum.waitUntilExit()
+            XCTAssertEqual(line.split(separator: " ").first.map(String.init), build.sha256, build.title)
+        }
     }
 
     func testFirmwareManifest() throws {

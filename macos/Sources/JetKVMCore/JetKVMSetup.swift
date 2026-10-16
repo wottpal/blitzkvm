@@ -1,6 +1,7 @@
 import Foundation
+import zlib
 
-/// A firmware build this app ships (`Firmware.json`, with each build gzipped
+/// A firmware build this app ships (`Firmware.json`, with each build as xz
 /// next to it in the app's resources).
 public struct FirmwareBuild: Decodable, Equatable, Identifiable {
     public enum Kind: String, Decodable {
@@ -31,8 +32,26 @@ public struct FirmwareBuild: Decodable, Equatable, Identifiable {
     /// "BlitzKVM 0.5.9-fork.4", "JetKVM 0.5.9"
     public var title: String { kind == .blitzkvm ? "BlitzKVM \(version)" : "JetKVM \(version)" }
 
-    /// The gzipped binary's file name in the app's resources.
-    public var fileName: String { tag.replacingOccurrences(of: "/", with: "-") + ".gz" }
+    /// The binary's file name in the app's resources (xz).
+    public var fileName: String { tag.replacingOccurrences(of: "/", with: "-") + ".xz" }
+
+    /// Writes the binary in `xz` as gzip, which the JetKVM's gunzip takes:
+    /// the app ships xz, a quarter smaller.
+    public static func gzip(xz: URL, to destination: URL) throws {
+        let binary = try (Data(contentsOf: xz) as NSData).decompressed(using: .lzma) as Data
+        guard let file = gzopen(destination.path, "wb9") else { throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: destination]) }
+        var written = 0
+        binary.withUnsafeBytes { bytes in
+            while written < bytes.count {
+                let count = gzwrite(file, bytes.baseAddress! + written, UInt32(min(1 << 20, bytes.count - written)))
+                if count <= 0 { break }
+                written += Int(count)
+            }
+        }
+        guard gzclose(file) == Z_OK, written == binary.count else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: destination])
+        }
+    }
 
     /// The builds in a `Firmware.json`.
     public static func manifest(_ data: Data) throws -> [FirmwareBuild] {

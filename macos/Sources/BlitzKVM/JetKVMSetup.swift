@@ -180,8 +180,11 @@ final class JetKVMSetupModel: ObservableObject {
                 firmware.progress = "Turning on SSH…"
                 let shell = try await ensureShell()
                 firmware.progress = "Uploading the firmware…"
+                let upload = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).gz")
+                defer { try? FileManager.default.removeItem(at: upload) }
+                try await Task.detached { try FirmwareBuild.gzip(xz: bundled.binary, to: upload) }.value
                 let part = "/userdata/jetkvm/jetkvm_app.update.part"
-                let sum = try await shell.run("gunzip -c > \(part) && sha256sum \(part)", input: bundled.binary, timeout: 600)
+                let sum = try await shell.run("gunzip -c > \(part) && sha256sum \(part)", input: upload, timeout: 600)
                 guard JetKVMSSH.sha256(fromSumOutput: sum) == bundled.build.sha256.lowercased() else {
                     _ = try? await shell.run("rm -f \(part)")
                     throw SetupError("The upload arrived damaged. Nothing was installed.")
