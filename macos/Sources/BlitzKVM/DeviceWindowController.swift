@@ -1130,13 +1130,14 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             guard let self, self.window?.isKeyWindow == true, !self.input.captured, !self.captureHintShown else { return }
             self.captureHintShown = true
-            self.showCaptureHint()
+            self.showCaptureHint(typed: false)
         }
     }
 
-    /// How to hand the keyboard to the remote.
-    func showCaptureHint() {
-        hud.show("Click the screen or press ⌘ twice to control \(device.name)", for: 3.5, prominent: true)
+    /// How to hand the keyboard to the remote; after keys typed without
+    /// control (they went nowhere), the picture flashes too.
+    func showCaptureHint(typed: Bool) {
+        hud.show("Click the screen or press ⌘ twice to control \(device.name)", for: 3.5, prominent: true, flashes: typed)
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -1462,7 +1463,7 @@ final class CaptureVideoView: VideoView {
         // Typing without capture: say how, instead of a beep.
         _ = controller.input.captureGesture(event)
         if controller.capturesOnRequest && !controller.input.viewOnly {
-            controller.showCaptureHint()
+            controller.showCaptureHint(typed: true)
         } else {
             super.keyDown(with: event)
         }
@@ -1503,9 +1504,9 @@ extension CaptureVideoView: NSMenuItemValidation {
 }
 
 /// A transient hint over the video (how to release capture and the like),
-/// in a pill at the top. A prominent hint (how to take control, which is
-/// easy to miss while typing goes nowhere) is larger, with a symbol and an
-/// accent edge, and briefly dims the picture inside an accent frame.
+/// in a pill at the top. A prominent hint (how to take control) is larger,
+/// with a symbol and an accent edge; one that flashes (typing went nowhere,
+/// easy to miss) also briefly dims the picture inside an accent frame.
 final class HintView: NSView {
     private let panel = NSVisualEffectView()
     private let icon = NSImageView()
@@ -1572,9 +1573,9 @@ final class HintView: NSView {
     // Never takes clicks from the video.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    /// Shows `text` for `seconds`. A prominent hint shown again while it
-    /// flashes (each key typed without control) keeps the flash on.
-    func show(_ text: String, for seconds: TimeInterval, prominent: Bool = false) {
+    /// Shows `text` for `seconds`. A hint that flashes, shown again while
+    /// it does (each key typed without control), keeps the flash on.
+    func show(_ text: String, for seconds: TimeInterval, prominent: Bool = false, flashes: Bool = false) {
         label.stringValue = text
         label.font = .systemFont(ofSize: prominent ? 14 : 13, weight: prominent ? .semibold : .medium)
         icon.isHidden = !prominent
@@ -1587,8 +1588,8 @@ final class HintView: NSView {
         flashWork?.cancel()
         fade(panel, in: true, duration: 0.15)
         hideWork = after(seconds) { $0.fade($0.panel, in: false, duration: 0.4) }
-        fade(flash, in: prominent, duration: prominent ? 0.12 : 0.15)
-        if prominent { flashWork = after(0.5) { $0.fade($0.flash, in: false, duration: 0.6) } }
+        fade(flash, in: flashes, duration: flashes ? 0.12 : 0.15)
+        if flashes { flashWork = after(0.5) { $0.fade($0.flash, in: false, duration: 0.6) } }
     }
 
     private func after(_ seconds: TimeInterval, _ body: @escaping (HintView) -> Void) -> DispatchWorkItem {
