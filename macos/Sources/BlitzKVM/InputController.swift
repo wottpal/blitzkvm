@@ -19,7 +19,9 @@ import JetKVMCore
 /// modifiers alone (⌥ fn), skips the remote and goes on to macOS, so another
 /// app's hotkey (dictation) works. And a ⌘V that another app sends (the
 /// dictation's text) pastes this Mac's clipboard on the remote computer
-/// (onPasteFromApp) instead of the remote's own.
+/// (onPasteFromApp) instead of the remote's own. A shortcut that keeps
+/// control takes the keyboard back when focus returns (focusRegained):
+/// the dictation app's window took it meanwhile.
 final class InputController {
     var send: (Data) -> Void = { _ in }
     var onCaptureChange: ((Bool) -> Void)?
@@ -52,6 +54,10 @@ final class InputController {
     private var appPasteKeys = Set<UInt16>()
     /// Events the tap let through to macOS, which then reach this app too.
     private var passedOn: [CGEventTimestamp] = []
+    /// When a shortcut that keeps control was pressed while captured (system
+    /// uptime): focus lost and back within keepsControlFor captures again.
+    private var keptControlAt: TimeInterval?
+    static let keepsControlFor: TimeInterval = 600
 
     // MARK: Capture
 
@@ -59,6 +65,7 @@ final class InputController {
         guard on != captured, !(on && viewOnly) else { return }
         captured = on
         if !on {
+            keptControlAt = nil
             releaseAll()
             removeEventTap()
         } else {
@@ -70,6 +77,26 @@ final class InputController {
             ensureEventTap()
         }
         onCaptureChange?(on)
+    }
+
+    /// The window lost focus: capture ends (nothing may stay pressed on the
+    /// remote), but a shortcut that keeps control still counts.
+    func focusLost() {
+        let kept = captured ? keptControlAt : nil
+        setCaptured(false)
+        keptControlAt = kept
+    }
+
+    /// The window has focus again: captures when a shortcut that keeps
+    /// control was pressed shortly before focus went. True when it did.
+    func focusRegained(now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
+        guard let kept = keptControlAt, now - kept < Self.keepsControlFor else {
+            keptControlAt = nil
+            return false
+        }
+        setCaptured(true)
+        keptControlAt = kept
+        return captured
     }
 
     /// True when another app (e.g. a focused password field) enabled Secure
@@ -229,9 +256,9 @@ final class InputController {
                 releaseModifiers()
                 return .drop
             }
-            if localShortcuts().contains(where: { $0.matches(keyCode: keyCode, flags: flags) }) {
+            if let shortcut = localShortcuts().first(where: { $0.matches(keyCode: keyCode, flags: flags) }) {
                 localKeys.insert(keyCode)
-                releaseModifiers()
+                pressed(shortcut)
                 return .local
             }
             return .remote
@@ -244,15 +271,22 @@ final class InputController {
                 if flags & LocalShortcut.flagsMask == 0 { localModifiers = false }
                 return .local
             }
-            if localShortcuts().contains(where: { $0.matches(flags: flags) }) {
+            if let shortcut = localShortcuts().first(where: { $0.matches(flags: flags) }) {
                 localModifiers = true
-                releaseModifiers()
+                pressed(shortcut)
                 return .local
             }
             return .remote
         default:
             return .remote
         }
+    }
+
+    /// A shortcut for this Mac: modifiers held on the remote are lifted, and
+    /// one that keeps control is remembered for focusRegained.
+    private func pressed(_ shortcut: LocalShortcut) {
+        releaseModifiers()
+        if shortcut.keepsControl { keptControlAt = ProcessInfo.processInfo.systemUptime }
     }
 
     /// Posted by another process (a dictation app, say), not typed.

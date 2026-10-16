@@ -1110,6 +1110,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func windowDidBecomeKey(_ notification: Notification) {
         window?.makeFirstResponder(videoView)
+        // Back from a shortcut that keeps control (the dictation app's
+        // window): the keyboard goes to the remote again, its ⌘V too.
+        if capturesOnRequest && input.focusRegained() { return }
         guard !captureHintShown && capturesOnRequest && !input.viewOnly else { return }
         // A click into the window captures at once; the hint is for focus
         // without one (⌘Tab, the Devices window), so it waits for that click.
@@ -1128,7 +1131,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     func windowDidResignKey(_ notification: Notification) {
         // Focus left mid-press (⌘Tab during a drag): release everything on
         // the remote so nothing stays stuck.
-        input.setCaptured(false)
+        input.focusLost()
     }
 
     /// Hidden windows (another tab in front, minimized, covered, another

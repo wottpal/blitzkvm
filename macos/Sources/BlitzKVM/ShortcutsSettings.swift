@@ -13,7 +13,13 @@ struct ShortcutsSettings: View {
         Section {
             ForEach(store.shortcuts) { shortcut in
                 LabeledContent {
-                    Button("Remove") { store.remove(shortcut) }
+                    HStack(spacing: 16) {
+                        Toggle("Keep control", isOn: Binding(get: { shortcut.keepsControl },
+                                                             set: { store.setKeepsControl($0, for: shortcut) }))
+                            .toggleStyle(.checkbox)
+                            .help("The window takes the keyboard back when it's in front again, after the app this shortcut opens")
+                        Button("Remove") { store.remove(shortcut) }
+                    }
                 } label: {
                     KeyCaps(keys: shortcut.keys)
                         .accessibilityLabel(shortcut.title)
@@ -35,7 +41,7 @@ struct ShortcutsSettings: View {
         } header: {
             Text("Shortcuts for This Mac")
         } footer: {
-            SettingsFooter("While a window has the keyboard, these stay on this Mac instead of going to the remote computer, like ⌥ fn for a dictation app.")
+            SettingsFooter("While a window has the keyboard, these stay on this Mac instead of going to the remote computer, like ⌥ fn for a dictation app. With Keep control, the window takes the keyboard back when it's in front again.")
         }
         .animation(.snappy(duration: 0.2), value: store.shortcuts)
         .animation(.snappy(duration: 0.2), value: recorder.prompt)

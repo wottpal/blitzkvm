@@ -66,6 +66,35 @@ final class InputControllerTests: XCTestCase {
         XCTAssertEqual(input.route(.flagsChanged, keyCode: 0x3A, flags: option, fromApp: false), .remote)
     }
 
+    func testAShortcutThatKeepsControlCapturesAgainWhenFocusReturns() {
+        let dictation = LocalShortcut(keyCode: nil, modifiers: option | fn, keepsControl: true)
+        let (input, _) = captured([dictation])
+        XCTAssertEqual(input.route(.flagsChanged, keyCode: 63, flags: option | fn, fromApp: false), .local)
+        // The dictation app's window takes focus, then hands it back.
+        input.focusLost()
+        XCTAssertFalse(input.captured)
+        XCTAssertTrue(input.focusRegained())
+        XCTAssertTrue(input.captured)
+        // Again within the time (its window comes back to say it's done).
+        input.focusLost()
+        XCTAssertTrue(input.focusRegained())
+        // Not after it, nor once released on purpose (⌃⌘).
+        input.focusLost()
+        XCTAssertFalse(input.focusRegained(now: ProcessInfo.processInfo.systemUptime + InputController.keepsControlFor))
+        input.setCaptured(true)
+        _ = input.route(.flagsChanged, keyCode: 63, flags: option | fn, fromApp: false)
+        input.setCaptured(false)
+        XCTAssertFalse(input.focusRegained())
+    }
+
+    func testAShortcutThatDoesntKeepControlLeavesFocusAlone() {
+        let (input, _) = captured([LocalShortcut(keyCode: nil, modifiers: option | fn)])
+        _ = input.route(.flagsChanged, keyCode: 63, flags: option | fn, fromApp: false)
+        input.focusLost()
+        XCTAssertFalse(input.focusRegained())
+        XCTAssertFalse(input.captured)
+    }
+
     func testAnotherAppsPasteIsHandledHere() {
         let (input, _) = captured([])
         var pastes = 0

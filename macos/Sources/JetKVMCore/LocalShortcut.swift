@@ -10,13 +10,27 @@ public struct LocalShortcut: Codable, Equatable, Hashable, Identifiable {
     public var modifiers: UInt64
     /// How the key was labeled when recorded ("D", "Space").
     public var keyLabel: String?
+    /// The window takes the keyboard back when it's in front again after
+    /// the shortcut (a dictation app's window came and went).
+    public var keepsControl: Bool
 
-    public init(keyCode: UInt16?, modifiers: UInt64, keyLabel: String? = nil) {
+    public init(keyCode: UInt16?, modifiers: UInt64, keyLabel: String? = nil, keepsControl: Bool = false) {
         self.keyCode = keyCode
         self.modifiers = modifiers & Self.flagsMask
         self.keyLabel = keyLabel
+        self.keepsControl = keepsControl
     }
 
+    // Shortcuts saved before keepsControl existed decode without it.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(keyCode: try container.decodeIfPresent(UInt16.self, forKey: .keyCode),
+                  modifiers: try container.decode(UInt64.self, forKey: .modifiers),
+                  keyLabel: try container.decodeIfPresent(String.self, forKey: .keyLabel),
+                  keepsControl: try container.decodeIfPresent(Bool.self, forKey: .keepsControl) ?? false)
+    }
+
+    /// The keys pressed: one shortcut per combination.
     public var id: String { "\(keyCode.map(String.init) ?? "-"):\(modifiers)" }
 
     // CGEventFlags bits (device independent).

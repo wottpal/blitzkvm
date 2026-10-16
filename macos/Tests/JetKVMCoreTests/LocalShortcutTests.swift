@@ -11,6 +11,16 @@ final class LocalShortcutTests: XCTestCase {
         XCTAssertEqual(LocalShortcut(keyCode: 2, modifiers: all | LocalShortcut.function, keyLabel: "D").title, "⌃⌥⇧⌘ fn D")
     }
 
+    func testShortcutsSavedBeforeKeepControlStillDecode() throws {
+        let saved = Data(#"[{"modifiers":8912896},{"keyCode":2,"modifiers":786432,"keyLabel":"D"}]"#.utf8)
+        let shortcuts = try JSONDecoder().decode([LocalShortcut].self, from: saved)
+        XCTAssertEqual(shortcuts.map(\.title), ["⌥ fn", "⌃⌥ D"])
+        XCTAssertEqual(shortcuts.map(\.keepsControl), [false, false])
+        var kept = shortcuts[0]
+        kept.keepsControl = true
+        XCTAssertEqual(try JSONDecoder().decode(LocalShortcut.self, from: JSONEncoder().encode(kept)), kept)
+    }
+
     func testMatchingIgnoresDeviceBitsAndCapsLock() {
         let shortcut = LocalShortcut(keyCode: 49, modifiers: LocalShortcut.option, keyLabel: "Space")
         let leftOptionDeviceBit: UInt64 = 0x20

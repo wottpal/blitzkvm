@@ -24,13 +24,19 @@ final class LocalShortcuts: ObservableObject {
     }
 
     func add(_ shortcut: LocalShortcut) {
-        guard !shortcuts.contains(shortcut) else { return }
+        guard !shortcuts.contains(where: { $0.id == shortcut.id }) else { return }
         shortcuts.append(shortcut)
         save()
     }
 
     func remove(_ shortcut: LocalShortcut) {
-        shortcuts.removeAll { $0 == shortcut }
+        shortcuts.removeAll { $0.id == shortcut.id }
+        save()
+    }
+
+    func setKeepsControl(_ on: Bool, for shortcut: LocalShortcut) {
+        guard let index = shortcuts.firstIndex(where: { $0.id == shortcut.id }) else { return }
+        shortcuts[index].keepsControl = on
         save()
     }
 
