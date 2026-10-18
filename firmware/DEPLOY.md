@@ -6,9 +6,9 @@ This is a JetKVM app built from the fork [wottpal/kvm](https://github.com/wottpa
 
 | | |
 |---|---|
-| Binary | `bin/jetkvm_app` of `wottpal/kvm` at tag `release/0.5.9-fork.8` (`make build_release VERSION=0.5.9`) |
-| SHA-256 | `663c28be2ef170d732824570f1449dab5ebb3ff8a7022b930d543ae05978e9b8` (the build installed on the device on 2026-10-15; your build may differ) |
-| Size | 35,253,096 bytes |
+| Binary | `bin/jetkvm_app` of `wottpal/kvm` at tag `release/0.5.9-fork.9` (`make build_release VERSION=0.5.9`) |
+| SHA-256 | `7ac763ebd33f67b0c37fcc7dd28888916a88680c4db7b8be48a3a1dbc9706660` (the build installed on the device on 2026-10-18; your build may differ) |
+| Size | 35,257,208 bytes |
 | Type | ELF 32-bit ARM EABI5, dynamically linked, interpreter `/lib/ld-uClibc.so.0`; NEEDED `librockit.so`, `librockchip_mpp.so.1`, `librga.so` (from `/oem/usr/lib` on the device) |
 | Reported version | `0.5.9` (`make build_release`, not a `-dev` build) |
 | Toolchain | `kvm-native-buildkit` from `jetkvm/rv1106-system` release `v0.2.8` (the "latest" asset at build time) |
@@ -21,10 +21,11 @@ Encoder defaults are compiled in. The environment of the app process overrides t
 | `JETKVM_VENC_MIN_QP` | `minQp` | `18` | 8-40 | Frame/I QP floor (Rockchip default is about 26-28) |
 | `JETKVM_VENC_MAX_QP` | `maxQp` | `42` | minQp-51 | QP ceiling (I-frame ceiling = max-2) |
 | `JETKVM_VENC_AQ` | `aq` | `0` / false | 0/1 | `1`/true keeps Rockchip texture AQ (+8 QP on text) |
-| `JETKVM_VENC_MAX_FPS` | `maxFps` | `0` | 0-120 | Encode at min(maxFps, source fps); 0 = source fps. Frames are dropped evenly in the capture loop and RC/GOP use the encode rate. |
+| `JETKVM_VENC_MAX_FPS` | `maxFps` | `0` | 0-120 | Encode at min(maxFps, source fps); 0 = source fps. Frames are dropped evenly in the capture loop; rate control and the GOP keep the channel's frame rate, so a live change costs no keyframe (fork D18). |
 | (none) | `bitrateKbps` | `0` | 0 or 100-50000 | VBR target; 0 = derived from the quality factor |
 | (none) | `maxBitrateKbps` | `0` | 0 or 100-50000, >= target | VBR max; 0 = 1.5x the target |
 | `JETKVM_VENC_STILL_QP` | `stillQp` | `8` | 1-51 | QP of the still refresh keyframe and the keyframe QP floor; `minQp` or more turns the refresh off. 0 is rejected: rockit treats a zero floor as unset. |
+| (none) | `paceKbps` | `0` | 0 or 100-50000 | Frame pacing (fork D18): a due frame is left out while the encoded bytes run more than 40 ms ahead of this rate; 0 = off |
 
 **Logging:** the native subprocess never loads the config, so it logs at ERROR unless `JETKVM_LOG_*` env says otherwise. `setDefaultLogLevel` only changes the main process. The encoder lines below are therefore emitted at a dedicated always-on level (C `log_notice`, shown as `INF`), and the patch's RC failures are logged as errors. Each encoder (re)start logs `configured VENC GOP` and `configured VENC RC`. Each runtime change logs `encoder params set`, followed by `applied VENC params live`, or `live VENC update failed, restarting the stream` if it fell back. For IDR verification, `JETKVM_LOG_INFO=native` adds `VENC IDR frame: N bytes` for every IDR.
 
