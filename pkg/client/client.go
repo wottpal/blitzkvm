@@ -212,12 +212,14 @@ type Client struct {
 	queuedCandidates []webrtc.ICECandidateInit
 
 	// Pointer routing: reliable while any button is down or changed, and for
-	// the first report after the HID handshake.
+	// the first report after the HID handshake. pointer paces moves off a
+	// LAN (pointerPacer).
 	pointerMu         sync.Mutex
 	lastButtons       byte
 	lastX, lastY      int32
 	lastRelButtons    byte
 	pointerReliableOK bool
+	pointer           *pointerPacer
 
 	// Held non-modifier keys drive the 50 ms keepalive ticker.
 	keysMu       sync.Mutex
@@ -314,6 +316,7 @@ func New(cfg Config) (*Client, error) {
 		featuresProbed: make(chan struct{}),
 	}
 	c.ch.Store(&channels{})
+	c.pointer = newPointerPacer(c.sendPointer)
 	return c, nil
 }
 
@@ -840,6 +843,7 @@ func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closeCh)
 		c.cancel()
+		c.pointer.stop()
 		c.noteTransportDebug("client_close")
 		c.signalMu.Lock()
 		if c.signalConn != nil {
@@ -1090,22 +1094,28 @@ func (c *Client) ReleaseAllKeys() error {
 // SendAbsPointer sends an absolute pointer report. Moves with no buttons go on
 // the unreliable channel (a stale move is worthless); reports while a button
 // is held or changing go reliable, as in the upstream web UI, so clicks and
-// drags are never lost or reordered against a release.
+// drags are never lost or reordered against a release. Off a LAN, moves are
+// paced to the device's frame rate (pointerPacer); button changes are not.
 func (c *Client) SendAbsPointer(x, y int32, buttons byte) error {
-	ch := c.ch.Load()
 	c.pointerMu.Lock()
-	reliable := buttons != 0 || buttons != c.lastButtons || !c.pointerReliableOK
+	change := buttons != c.lastButtons || !c.pointerReliableOK
+	reliable := buttons != 0 || change
 	c.lastButtons = buttons
 	c.lastX, c.lastY = x, y
 	c.pointerReliableOK = true
 	c.pointerMu.Unlock()
+	return c.pointer.report(pointerReport{x: x, y: y, buttons: buttons, reliable: reliable}, change)
+}
+
+func (c *Client) sendPointer(r pointerReport) error {
+	ch := c.ch.Load()
 	dc := ch.hidUnreliable
-	if reliable || dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
+	if r.reliable || dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
 		dc = ch.hid
 	}
-	if err := c.sendHID(dc, hidrpc.Pointer{X: x, Y: y, Buttons: buttons}); err != nil {
+	if err := c.sendHID(dc, hidrpc.Pointer{X: r.x, Y: r.y, Buttons: r.buttons}); err != nil {
 		log := logging.Subsystem("client")
-		log.Debug().Err(err).Int32("x", x).Int32("y", y).Uint8("buttons", buttons).Msg("failed to send absolute pointer")
+		log.Debug().Err(err).Int32("x", r.x).Int32("y", r.y).Uint8("buttons", r.buttons).Msg("failed to send absolute pointer")
 		return err
 	}
 	return nil
@@ -1114,6 +1124,7 @@ func (c *Client) SendAbsPointer(x, y int32, buttons byte) error {
 // SendRelMouse sends a relative mouse report on the reliable channel. Moves
 // larger than ±127 are split into several reports instead of being clamped.
 func (c *Client) SendRelMouse(dx, dy int, buttons byte) error {
+	c.pointer.flush()
 	hid := c.ch.Load().hid
 	c.pointerMu.Lock()
 	c.lastRelButtons = buttons
@@ -1153,6 +1164,8 @@ func (c *Client) ReleasePointerButtons() error {
 // (in order with pointer reports, no JSON on the device's single core),
 // otherwise as a fire-and-forget JSON-RPC call.
 func (c *Client) SendWheel(wheelY, wheelX int8) error {
+	// A paced move goes first: the wheel scrolls where the pointer is.
+	c.pointer.flush()
 	if c.hidWheel.Load() {
 		return c.sendHID(c.ch.Load().hid, hidrpc.Wheel{Y: wheelY, X: wheelX})
 	}
@@ -1346,9 +1359,18 @@ func (c *Client) openDataChannels(pc *webrtc.PeerConnection) error {
 		}
 	})
 
+	// One retransmission, not none: with none, pion abandons every message as
+	// it sends it and follows each with a FORWARD-TSN, so a move cost the
+	// device's core four packets instead of about one and a half (with
+	// Tailscale on the device, 40 moves a second: 26 % against 17 % of its
+	// CPU in the app, 28 % against 18 % in tailscaled). The last position
+	// of a move also arrives after a loss now. In exchange, a lost move
+	// holds the ones behind it until it is resent (about 1.25 round trips,
+	// or 2 round trips plus 200 ms for the last one), where none skipped it
+	// after about one.
 	set.hidUnreliable, err = pc.CreateDataChannel("hidrpc-unreliable-ordered", &webrtc.DataChannelInit{
 		Ordered:        &[]bool{true}[0],
-		MaxRetransmits: &[]uint16{0}[0],
+		MaxRetransmits: &[]uint16{1}[0],
 	})
 	if err != nil {
 		return err
@@ -1586,6 +1608,7 @@ func (c *Client) collectStats(now time.Time) {
 		}
 		if local != nil && remote != nil {
 			snap.Path, snap.PathRemote = pathKind(local, remote), remote.String()
+			c.pointer.setPacing(snap.Path != PathLAN && snap.Path != PathLoopback)
 		}
 	}
 	if snap.RoundTripMs > 0 {
