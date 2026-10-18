@@ -65,6 +65,17 @@ func TestEncoderModelMatchesTheDevice(t *testing.T) {
 	}
 }
 
+// With its peak at its target, the encoder codes at the target (CBR), not at
+// its coarsest: on the device, balanced with both at 2 Mbit/s scrolled at
+// about 2 Mbit/s (plan §32).
+func TestEncoderModelPeakAtTheTarget(t *testing.T) {
+	scrolling := func(int) float64 { return 1 }
+	capped := EncoderParams{MinQP: 18, MaxQP: 42, StillQP: 8, BitrateKbps: 2000, MaxBitrateKbps: 2000}
+	if mbps, keys := modelRun(capped, 30, scrolling); !near(mbps, 2.0-float64(keys[0])*8/1e6/30, 0.02) {
+		t.Errorf("peak at the target: %.2f Mbit/s, want 2", mbps)
+	}
+}
+
 func TestEncoderModelStillRefresh(t *testing.T) {
 	// One second of scrolling, then a still screen: one keyframe at the
 	// still QP half a second later (QP 1 at maximum: about 350 kB).

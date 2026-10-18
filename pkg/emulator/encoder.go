@@ -160,10 +160,13 @@ func (m *encoderModel) frame(t time.Time, p EncoderParams, target, peak int, cha
 		key, qp, m.refreshed = true, p.StillQP, true
 	}
 	rate, depth := float64(target)*1000, float64(max(peak-target, 0))*1000*vbrWindow.Seconds()
+	// The bank holds at most depth; what accrued since the last frame comes
+	// on top, so with the peak at the target the encoder still spends the
+	// target (CBR) instead of nothing.
 	if m.last.IsZero() {
 		m.credit = depth
 	} else {
-		m.credit = min(m.credit+rate*t.Sub(m.last).Seconds(), depth)
+		m.credit = min(m.credit, depth) + rate*t.Sub(m.last).Seconds()
 	}
 	m.last = t
 	scale := m.scale * math.Pow(qpStep, float64(qp-10))
