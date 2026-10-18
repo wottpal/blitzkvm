@@ -217,12 +217,19 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         input.send = { [weak self] frame in
             guard let self else { return }
             self.engine.write(frame)
-            self.stillRefresh.inputSent(keysHeld: self.input.keysHeld)
+            self.inputSent(keysHeld: self.input.keysHeld)
         }
         input.onCaptureChange = { [weak self] in self?.captureChanged($0) }
         input.localShortcuts = { MainActor.assumeIsolated { LocalShortcuts.shared.shortcuts } }
         input.onPasteFromApp = { [weak self] in MainActor.assumeIsolated { self?.pasteFromApp() == true } }
         applyPreferences()
+    }
+
+    /// Input went to the remote: the still refresh waits for the typing to
+    /// pause, and the picture keeps presenting for its echo.
+    func inputSent(keysHeld: Bool) {
+        stillRefresh.inputSent(keysHeld: keysHeld)
+        videoView.inputSent()
     }
 
     /// Says how to get the keyboard back the first time capture engages.

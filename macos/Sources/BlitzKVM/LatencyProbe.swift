@@ -138,7 +138,7 @@ final class LatencyProbe {
                 self.currentSentUnix = Date().timeIntervalSince1970
                 self.lock.unlock()
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
-                controller.stillRefresh.inputSent(keysHeld: false) // like typing: the refresh planner sees it
+                controller.inputSent(keysHeld: false) // as the app's input does
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: false))
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + keyframeLead + 1.4) { [weak self] in self?.next() }
@@ -151,7 +151,7 @@ final class LatencyProbe {
             expectBright = known
             lock.unlock()
             controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
-            controller.stillRefresh.inputSent(keysHeld: false) // like typing: the refresh planner sees it
+            controller.inputSent(keysHeld: false) // as the app's input does
             controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: false))
             DispatchQueue.main.asyncAfter(deadline: .now() + pairGap) { [weak self] in
                 guard let self else { return }
@@ -160,7 +160,7 @@ final class LatencyProbe {
                 self.currentSentUnix = Date().timeIntervalSince1970
                 self.lock.unlock()
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
-                controller.stillRefresh.inputSent(keysHeld: false) // like typing: the refresh planner sees it
+                controller.inputSent(keysHeld: false) // as the app's input does
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: false))
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + pairGap + 1.4) { [weak self] in self?.next() }
@@ -169,11 +169,13 @@ final class LatencyProbe {
         if pointerMode {
             // The device's absolute range is 0...32767 across the remote picture.
             controller.engine.write(EngineProtocol.absolutePointer(x: Int32(targets[target].x * 32767), y: Int32(targets[target].y * 32767), buttons: 0))
+            controller.inputSent(keysHeld: false) // as the app's input does
         } else if wheelMode {
             controller.engine.write(EngineProtocol.wheel(y: target == 0 ? 1 : -1, x: 0))
+            controller.inputSent(keysHeld: false) // as the app's input does
         } else {
             controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
-            controller.stillRefresh.inputSent(keysHeld: false) // like typing: the refresh planner sees it
+            controller.inputSent(keysHeld: false) // as the app's input does
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: false))
             }

@@ -67,6 +67,7 @@ class VideoView: NSView {
     }
     /// Latest layout in physical pixels, for pointer mapping.
     var layout: VideoLayout { state.withLock { $0.layout } }
+    /// Frames drawn, each counted once however often it is drawn again.
     var presentedFrames: Int { state.withLock { $0.presented } }
     /// Frames identical to the one on screen, which were not drawn again.
     var unchangedFrames: Int { state.withLock { $0.unchanged } }
@@ -92,9 +93,15 @@ class VideoView: NSView {
         /// Renders so far, and how often the frame `representSerial` was
         /// drawn again because the window server dropped it.
         var renders: UInt64 = 0
+        /// When the last render started, and until when input keeps the
+        /// layer presenting (inputSent; `warming` while it does).
+        var lastRender: CFTimeInterval = 0
+        var warmUntil: CFTimeInterval = 0
+        var warming = false
         var representSerial: UInt64 = 0
         var represents = 0
         var presented = 0
+        var presentedSerial: UInt64 = 0
         var unchanged = 0
         /// The last frame went through the text upscaler.
         var textUpscaling = false
@@ -798,6 +805,60 @@ class VideoView: NSView {
         }
     }
 
+    /// Input keeps the layer presenting. After a pause the window server
+    /// shows the first frame a refresh or two late, or drops it (ProMotion
+    /// idles), and the echo of input after a pause is such a frame: over
+    /// Wi-Fi, a pointer move took 23 ms from decode to screen (median, p90
+    /// 49) against 7 for a key. Each input draws the frame again at once if
+    /// nothing was drawn for warmInterval, and then whenever that holds for
+    /// warmFor: the echo finds the window server awake (pointer moves 7 ms,
+    /// p90 18-23; on screen 64 -> 51 ms median, 88 -> 65 p90). Idle without
+    /// input it costs nothing.
+    private static let warmInterval: CFTimeInterval = 0.05
+    private static let warmFor: CFTimeInterval = 1
+    /// Draws while input keeps the layer warm (render queue only).
+    private var warmTimer: DispatchSourceTimer?
+
+    /// Input went to the remote: keep presenting while its echo can arrive.
+    func inputSent() {
+        let now = CACurrentMediaTime()
+        let wake = state.withLock { s -> Bool in
+            s.warmUntil = now + Self.warmFor
+            defer { s.warming = true }
+            return !s.warming || now - s.lastRender >= Self.warmInterval
+        }
+        if wake { renderQueue.async { [weak self] in self?.warm() } }
+    }
+
+    /// Draws the frame again if nothing was drawn for warmInterval, until
+    /// warmUntil (render queue only). A large change waiting to be sharpened
+    /// is left to that.
+    private func warm() {
+        let now = CACurrentMediaTime()
+        let (warm, idle) = state.withLock { s -> (Bool, Bool) in
+            s.warming = now < s.warmUntil
+            return (s.warming, s.frame != nil && now - s.lastRender >= Self.warmInterval)
+        }
+        guard warm else {
+            warmTimer?.cancel()
+            warmTimer = nil
+            return
+        }
+        if idle && !sharpenPending { redraw() }
+        guard warmTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: renderQueue)
+        timer.schedule(deadline: .now() + Self.warmInterval / 2, repeating: Self.warmInterval / 2, leeway: .milliseconds(5))
+        timer.setEventHandler { [weak self, weak timer] in
+            guard let self else {
+                timer?.cancel()
+                return
+            }
+            self.warm()
+        }
+        timer.resume()
+        warmTimer = timer
+    }
+
     private func render() {
         var timeline = RenderTimeline(renderStart: CACurrentMediaTime())
         let size = state.withLock { $0.drawableSize }
@@ -810,6 +871,7 @@ class VideoView: NSView {
         let s = state.withLock { s -> State in
             s.renderPending = false
             s.renders &+= 1
+            s.lastRender = timeline.renderStart
             return s
         }
         guard let drawable, s.drawableSize == size, let commandBuffer = commandQueue.makeCommandBuffer() else { return }
@@ -854,7 +916,7 @@ class VideoView: NSView {
         probe?.withLock { $0.committed = CACurrentMediaTime() }
         state.withLock {
             if let layout { $0.layout = layout }
-            if s.frame != nil { $0.presented += 1 }
+            if s.frame != nil && s.frameSerial != $0.presentedSerial { ($0.presented, $0.presentedSerial) = ($0.presented + 1, s.frameSerial) }
         }
         // A large change that stays on screen is drawn again, sharp: no later
         // frame may come (a still screen repeats the same picture).
