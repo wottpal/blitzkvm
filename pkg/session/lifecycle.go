@@ -587,6 +587,7 @@ func (c *Controller) newClient() (*client.Client, error) {
 		Auth:             c.auth,
 		ExpectedDeviceID: c.cfg.ExpectedDeviceID,
 		ICELoopbackOnly:  c.cfg.ICELoopbackOnly,
+		NoDirectPath:     c.cfg.NoDirectPath,
 		OfferH265:        c.cfg.OfferH265,
 		OnAccessUnit:     c.cfg.OnAccessUnit,
 		NewVideoSink:     c.cfg.NewVideoSink,

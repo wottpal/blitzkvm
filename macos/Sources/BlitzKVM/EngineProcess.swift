@@ -291,6 +291,14 @@ final class EngineProcess {
     /// test pattern, which only its H.264 encoder can produce.
     static var offerH265 = true
 
+    /// Settings › Connection: try a direct path to a device reached over the
+    /// Tailscale it runs itself (the engine's pkg/client/direct.go).
+    /// (`bool(forKey:)` also reads `-directPath NO` from the command line.)
+    static var directPath: Bool {
+        UserDefaults.standard.object(forKey: directPathKey) == nil || UserDefaults.standard.bool(forKey: directPathKey)
+    }
+    static let directPathKey = "directPath"
+
     /// `clientRefresh`: the window refreshes still pictures itself
     /// (StillRefresh) where the firmware offers it. `audio`: the device's
     /// audio comes along; `enableDeviceAudio`: the session may turn it on.
@@ -299,7 +307,8 @@ final class EngineProcess {
         let command = EngineCommand(cmd: "connect", baseURL: baseURL, password: password, deviceID: deviceID,
                                     certSHA256: certSHA256, offerH265: Self.offerH265, autoQuality: autoQuality,
                                     qualityLevel: autoQuality ? nil : qualityLevel, clientRefresh: clientRefresh,
-                                    audio: audio, enableDeviceAudio: enableDeviceAudio)
+                                    audio: audio, enableDeviceAudio: enableDeviceAudio,
+                                    noDirectPath: Self.directPath ? nil : true)
         lastConnect = command
         send(command: command)
     }

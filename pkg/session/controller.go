@@ -62,6 +62,9 @@ type Config struct {
 	// ICELoopbackOnly restricts ICE to loopback (tests against a local
 	// emulator).
 	ICELoopbackOnly bool
+	// NoDirectPath keeps a device reached over its own Tailscale on the
+	// tunnel (see client.Config.NoDirectPath).
+	NoDirectPath bool
 	// OfferH265 lets the device stream H.265; only for consumers that can
 	// decode it (see client.Config.OfferH265).
 	OfferH265 bool

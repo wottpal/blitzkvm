@@ -135,13 +135,16 @@ public struct EngineCommand: Codable, Equatable {
     /// Turn the device's audio on if it is off, once (connect; sessions that
     /// may change device settings).
     public var enableDeviceAudio: Bool?
+    /// Keep a device reached over its own Tailscale on the tunnel: no public
+    /// STUN servers, no direct path (connect).
+    public var noDirectPath: Bool?
 
     public init(id: Int64? = nil, cmd: String, baseURL: String? = nil, password: String? = nil,
                 deviceID: String? = nil, certSHA256: String? = nil, offerH265: Bool? = nil, autoQuality: Bool? = nil,
                 qualityLevel: String? = nil, method: String? = nil,
                 params: JSONValue? = nil, text: String? = nil, delay: Int? = nil, path: String? = nil, target: Int64? = nil,
                 paused: Bool? = nil, oldPassword: String? = nil, clientRefresh: Bool? = nil,
-                audio: Bool? = nil, enableDeviceAudio: Bool? = nil) {
+                audio: Bool? = nil, enableDeviceAudio: Bool? = nil, noDirectPath: Bool? = nil) {
         self.id = id
         self.oldPassword = oldPassword
         self.cmd = cmd
@@ -162,6 +165,7 @@ public struct EngineCommand: Codable, Equatable {
         self.clientRefresh = clientRefresh
         self.audio = audio
         self.enableDeviceAudio = enableDeviceAudio
+        self.noDirectPath = noDirectPath
     }
 }
 

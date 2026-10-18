@@ -293,6 +293,8 @@ type signalingMessage struct {
 
 type offerSignalData struct {
 	SD string `json:"sd"`
+	// ICEServers names STUN servers for the device (fork firmware, D19).
+	ICEServers []string `json:"iceServers,omitempty"`
 }
 
 type StorageUploadRequest struct {

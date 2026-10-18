@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// BlitzKVM › Settings…: a toolbar tab each for updates, shortcuts that stay
-/// on this Mac, and the permissions the app needs.
+/// BlitzKVM › Settings…: a toolbar tab each for updates and the connection,
+/// shortcuts that stay on this Mac, and the permissions the app needs.
 enum SettingsTab: String, CaseIterable {
     case general = "General"
     case shortcuts = "Shortcuts"
@@ -22,6 +22,7 @@ enum SettingsTab: String, CaseIterable {
         case .general:
             AnyView(SettingsPane {
                 UpdatesSection(updater: updater)
+                ConnectionSection()
             } header: {
                 AppHeader(iconSize: 64, title: "BlitzKVM", subtitle: Self.version)
             })
@@ -144,6 +145,24 @@ struct UpdatesSection: View {
     private var lastChecked: String {
         guard let date = updater.lastCheck else { return "Not checked yet" }
         return "Last checked " + date.formatted(.relative(presentation: .named).locale(.englishInUserRegion))
+    }
+}
+
+/// How BlitzKVM reaches a device away from home.
+struct ConnectionSection: View {
+    @AppStorage(EngineProcess.directPathKey) private var directPath = true
+
+    var body: some View {
+        Section {
+            Toggle(isOn: $directPath) {
+                Text("Connect directly over the internet")
+                Text("For a JetKVM you reach over the Tailscale it runs itself. Public STUN servers (Cloudflare, Google) learn both ends' internet addresses; the stream goes direct, faster and easier on the JetKVM, or stays on Tailscale where no direct path works.")
+            }
+        } header: {
+            Text("Connection")
+        } footer: {
+            SettingsFooter("Applies from the next connection.")
+        }
     }
 }
 

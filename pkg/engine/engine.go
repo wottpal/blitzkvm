@@ -393,6 +393,7 @@ func (e *Engine) startSession(baseURL string, cmd engineipc.Command) {
 		OnAudioPacket:     e.onAudioPacket,
 		Audio:             cmd.Audio,
 		EnableDeviceAudio: cmd.EnableDeviceAudio,
+		NoDirectPath:      cmd.NoDirectPath,
 	})
 	e.mu.Lock()
 	e.ctrl = ctrl

@@ -161,6 +161,9 @@ type Command struct {
 	// (connect; see session.Config.EnableDeviceAudio).
 	Audio             bool `json:"audio,omitempty"`
 	EnableDeviceAudio bool `json:"enableDeviceAudio,omitempty"`
+	// NoDirectPath keeps a device reached over its own Tailscale on the
+	// tunnel: no public STUN servers (connect; see client.Config).
+	NoDirectPath bool `json:"noDirectPath,omitempty"`
 }
 
 // Event is a JSON message from the engine. Type "snapshot" carries the

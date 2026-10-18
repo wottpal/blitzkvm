@@ -28,13 +28,13 @@ func TestPathKind(t *testing.T) {
 	}
 }
 
-func TestRouteLocalIPs(t *testing.T) {
-	local := routeLocalIPs(context.Background(), "http://127.0.0.1:8080")
-	if len(local) != 1 || !local[0].IsLoopback() {
-		t.Fatalf("routeLocalIPs(127.0.0.1) = %v, want the loopback address", local)
+func TestRouteIPs(t *testing.T) {
+	local, remote := routeIPs(context.Background(), "http://127.0.0.1:8080")
+	if len(local) != 1 || !local[0].IsLoopback() || len(remote) != 1 || !remote[0].IsLoopback() {
+		t.Fatalf("routeIPs(127.0.0.1) = %v, %v, want the loopback address twice", local, remote)
 	}
-	if got := routeLocalIPs(context.Background(), "http://"); got != nil {
-		t.Fatalf("routeLocalIPs without a host = %v, want none", got)
+	if local, remote := routeIPs(context.Background(), "http://"); local != nil || remote != nil {
+		t.Fatalf("routeIPs without a host = %v, %v, want none", local, remote)
 	}
 }
 

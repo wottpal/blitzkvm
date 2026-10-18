@@ -14,35 +14,44 @@ import (
 // Video takes the route of the address the app connected to: the LAN at
 // home, a VPN such as Tailscale away. Left to itself, ICE may pick any pair
 // that answers, for example the Tailscale pair at home, which sends the
-// whole stream through WireGuard on the JetKVM's single core.
+// whole stream through WireGuard on the JetKVM's single core. A device
+// reached over its own Tailscale also gets a direct path tried (direct.go).
 
-// routeLocalIPs returns the local addresses the system sends to baseURL's
-// host from, one per resolved address. Empty when the host doesn't resolve
-// or has no route.
-func routeLocalIPs(ctx context.Context, baseURL string) []net.IP {
+// routeIPs resolves baseURL's host and returns the addresses that have a
+// route (remote) and the local addresses the system sends to them from, one
+// per local address. Empty when the host doesn't resolve or has no route.
+func routeIPs(ctx context.Context, baseURL string) (local, remote []net.IP) {
 	u, err := url.Parse(baseURL)
 	if err != nil || u.Hostname() == "" {
-		return nil
+		return nil, nil
 	}
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, u.Hostname())
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	var local []net.IP
 	for _, addr := range addrs {
-		// Connecting a UDP socket picks a route and a source address; it
-		// sends nothing.
-		conn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: addr.IP, Port: 9, Zone: addr.Zone})
-		if err != nil {
+		ip := routeSource(&net.UDPAddr{IP: addr.IP, Port: 9, Zone: addr.Zone})
+		if ip == nil {
 			continue
 		}
-		ip := conn.LocalAddr().(*net.UDPAddr).IP
-		_ = conn.Close()
+		remote = append(remote, addr.IP)
 		if !containsIP(local, ip) {
 			local = append(local, ip)
 		}
 	}
-	return local
+	return local, remote
+}
+
+// routeSource is the local address the system sends to dst from, nil when
+// it has no route there. Connecting a UDP socket picks a route and a source
+// address; it sends nothing.
+func routeSource(dst *net.UDPAddr) net.IP {
+	conn, err := net.DialUDP("udp", nil, dst)
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP
 }
 
 // pinICE limits candidate gathering to the given local addresses.

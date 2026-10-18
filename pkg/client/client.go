@@ -76,6 +76,9 @@ type Config struct {
 	// local emulator, where a machine's many interfaces (VPNs, bridges) slow
 	// ICE down needlessly.
 	ICELoopbackOnly bool
+	// NoDirectPath keeps a device reached over its own Tailscale on the
+	// tunnel: no public STUN servers, no direct path attempt (direct.go).
+	NoDirectPath bool
 	// OfferH265 also offers H.265. JetKVM streams H.265 whenever the offer
 	// contains it (codec preference "auto"), so only enable this when the
 	// consumer can decode H.265.
@@ -210,6 +213,10 @@ type Client struct {
 	remoteMu         sync.Mutex
 	remoteApplied    bool
 	queuedCandidates []webrtc.ICECandidateInit
+	// directKey is set while this connection tries a direct path (direct.go):
+	// the device's tailnet candidates are then demoted, and the client's own
+	// are not sent.
+	directKey string
 
 	// Pointer routing: reliable while any button is down or changed, and for
 	// the first report after the HID handshake. pointer paces moves off a
@@ -361,7 +368,7 @@ func (c *Client) peer() *webrtc.PeerConnection {
 // TWCC) and our own NACK generator.
 // Offering only what we can decode matters: JetKVM picks H.265 whenever the
 // offer mentions it.
-func (c *Client) newAPI(local []net.IP) (*webrtc.API, error) {
+func (c *Client) newAPI(local, direct []net.IP) (*webrtc.API, error) {
 	feedback := []webrtc.RTCPFeedback{
 		{Type: "goog-remb"},
 		{Type: "ccm", Parameter: "fir"},
@@ -417,6 +424,13 @@ func (c *Client) newAPI(local []net.IP) (*webrtc.API, error) {
 	se.SetICETimeouts(4*time.Second, 8*time.Second, time.Second)
 	if c.cfg.ICELoopbackOnly {
 		restrictICEToLoopback(&se)
+	} else if len(direct) > 0 {
+		pinICE(&se, append(slices.Clip(local), direct...))
+		// Pairs of host candidates, the tunnel's among them, wait for the
+		// server-reflexive ones (direct.go); those may be nominated at once.
+		se.SetHostAcceptanceMinWait(directHostWait)
+		se.SetSrflxAcceptanceMinWait(0)
+		se.SetPrflxAcceptanceMinWait(0)
 	} else if len(local) > 0 {
 		pinICE(&se, local)
 	}
@@ -495,11 +509,21 @@ func (c *Client) connect(ctx context.Context) error {
 	c.signalMode.Store(uint32(SignalingModeWebSocket))
 	c.emitLifecycle(LifecycleEvent{Type: "signaling_mode", Signaling: SignalingModeWebSocket})
 
-	api, err := c.newAPI(routeLocalIPs(ctx, c.cfg.BaseURL))
+	local, remote := routeIPs(ctx, c.cfg.BaseURL)
+	direct := c.directPath(local, remote)
+	api, err := c.newAPI(local, direct)
 	if err != nil {
 		return err
 	}
-	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	var pcConfig webrtc.Configuration
+	var offerICEServers []string
+	if direct != nil {
+		offerICEServers = stunServers()
+	}
+	if len(offerICEServers) > 0 {
+		pcConfig.ICEServers = []webrtc.ICEServer{{URLs: offerICEServers}}
+	}
+	pc, err := api.NewPeerConnection(pcConfig)
 	if err != nil {
 		return err
 	}
@@ -539,7 +563,7 @@ func (c *Client) connect(ctx context.Context) error {
 			return
 		}
 		init := candidate.ToJSON()
-		if init.Candidate == "" {
+		if init.Candidate == "" || c.directKey != "" && tailnetCandidate(init.Candidate) != nil {
 			return
 		}
 		localMu.Lock()
@@ -579,11 +603,15 @@ func (c *Client) connect(ctx context.Context) error {
 	if err := pc.SetLocalDescription(offer); err != nil {
 		return err
 	}
-	rawOffer, err := json.Marshal(pc.LocalDescription())
+	localOffer := *pc.LocalDescription()
+	if c.directKey != "" {
+		localOffer.SDP = withoutTailnetCandidates(localOffer.SDP)
+	}
+	rawOffer, err := json.Marshal(localOffer)
 	if err != nil {
 		return err
 	}
-	if err := c.writeSignal(signalingMessage{Type: "offer", Data: offerSignalData{SD: signaling.EncodeSDP(rawOffer)}}); err != nil {
+	if err := c.writeSignal(signalingMessage{Type: "offer", Data: offerSignalData{SD: signaling.EncodeSDP(rawOffer), ICEServers: offerICEServers}}); err != nil {
 		return err
 	}
 	localMu.Lock()
@@ -620,6 +648,12 @@ func (c *Client) connect(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-connected:
+	}
+	if c.directKey != "" {
+		path := selectedPath(pc)
+		noteDirectOutcome(c.directKey, path, time.Now())
+		log := logging.Subsystem("client")
+		log.Info().Str("path", path).Msg("direct path attempt")
 	}
 	go c.monitorStats()
 	c.emitLifecycle(LifecycleEvent{Type: "connected"})
@@ -712,6 +746,9 @@ func (c *Client) readSignaling(conn *websocket.Conn, pc *webrtc.PeerConnection, 
 				fail(err)
 				continue
 			}
+			if c.directKey != "" {
+				answer.SDP = demoteTailnetSDP(answer.SDP)
+			}
 			select {
 			case answerCh <- answer:
 			default:
@@ -732,6 +769,9 @@ func (c *Client) readSignaling(conn *websocket.Conn, pc *webrtc.PeerConnection, 
 // addRemoteCandidate applies a trickled candidate, queueing it until the
 // remote description is set: the device may trickle before its answer.
 func (c *Client) addRemoteCandidate(pc *webrtc.PeerConnection, candidate webrtc.ICECandidateInit) {
+	if c.directKey != "" {
+		candidate.Candidate = demoteTailnetCandidate(candidate.Candidate)
+	}
 	c.remoteMu.Lock()
 	if !c.remoteApplied {
 		c.queuedCandidates = append(c.queuedCandidates, candidate)
@@ -1655,6 +1695,43 @@ func (c *Client) runHIDHandshake(dc *webrtc.DataChannel) {
 	}
 }
 
+// directPath returns the physical addresses to gather on as well when this
+// connection tries a direct path (direct.go), and sets directKey; nil when it
+// does not.
+func (c *Client) directPath(local, remote []net.IP) []net.IP {
+	if c.cfg.NoDirectPath || c.cfg.ICELoopbackOnly {
+		return nil
+	}
+	direct := directPlan(local, remote, defaultRouteIPs())
+	if direct == nil {
+		return nil
+	}
+	key := directCacheKey(c.cfg.BaseURL, direct)
+	if directBlocked(key, time.Now()) {
+		return nil
+	}
+	c.directKey = key
+	return direct
+}
+
+// selectedPath names the network of pc's selected candidate pair ("" before
+// ICE selected one).
+func selectedPath(pc *webrtc.PeerConnection) string {
+	sctp := pc.SCTP()
+	if sctp == nil {
+		return ""
+	}
+	pair, err := sctp.Transport().ICETransport().GetSelectedCandidatePair()
+	if err != nil || pair == nil || pair.Local == nil || pair.Remote == nil {
+		return ""
+	}
+	local, remote := net.ParseIP(pair.Local.Address), net.ParseIP(pair.Remote.Address)
+	if local == nil || remote == nil {
+		return ""
+	}
+	return pathKind(local, remote)
+}
+
 // restrictICEToLoopback limits candidate gathering to 127.0.0.1.
 func restrictICEToLoopback(se *webrtc.SettingEngine) {
 	se.SetIncludeLoopbackCandidate(true)
@@ -1701,6 +1778,13 @@ const (
 	// FeatureBrowserAccess: getBrowserAccessState and setBrowserAccessState,
 	// a switch that makes the device refuse web browsers (D16).
 	FeatureBrowserAccess = "browserAccess"
+	// FeatureFramePacing: setVideoEncoderParams' paceKbps, which leaves
+	// captured frames out while the encoded bytes run ahead of it, and frame
+	// rate changes without a keyframe (D18).
+	FeatureFramePacing = "framePacing"
+	// FeatureSTUNServers: STUN servers named in a local session request are
+	// used, so the device offers its public address (D19, direct.go).
+	FeatureSTUNServers = "stunServers"
 )
 
 // probeFirmwareFeatures asks which protocol additions the firmware has (the
