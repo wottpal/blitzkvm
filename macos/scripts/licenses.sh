@@ -30,7 +30,8 @@ section() { printf '\n## %s\n\n' "$1"; }
 
 	goroot=$(cd "$root" && go env GOROOT)
 	section "Go standard library and runtime $(cd "$root" && go env GOVERSION) (in the helper)"
-	cat "$goroot/LICENSE"
+	# Homebrew's Go keeps LICENSE next to GOROOT (libexec), not in it.
+	if [ -f "$goroot/LICENSE" ]; then cat "$goroot/LICENSE"; else cat "$goroot/../LICENSE"; fi
 	printf '\n'
 	cat "$goroot/PATENTS"
 
