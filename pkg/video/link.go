@@ -57,9 +57,19 @@ const (
 	QueueWindow = 100 * time.Millisecond
 	// rateWindow is how far back frame dispersions count for the delivery
 	// rate; rateMinPackets the fewest packets a frame needs to count (fewer
-	// are too short to time against jitter and Wi-Fi aggregation).
+	// are too short to time against jitter and Wi-Fi aggregation). Over
+	// Tailscale, frames of 4-7 packets measured the same rate as larger ones
+	// (3.8 against 3.7-3.9 Mbit/s), and at the lowest levels, which send
+	// few larger frames, they are most of the evidence.
 	rateWindow     = 10 * time.Second
-	rateMinPackets = 8
+	rateMinPackets = 4
+	// rateWarmup leaves the stream's first frames out of the rate, the
+	// session's first keyframe among them: the device sends it while it sets
+	// up the session (it spread at 1.4 Mbit/s over a path that then measured
+	// 3.8), and as the largest frame it would outweigh the rest. A longer
+	// warm-up keeps a new session at its first guess longer: over the
+	// emulated DERP relay, 1.5 s left balanced overrunning the relay's queue.
+	rateWarmup = 500 * time.Millisecond
 	// maxDelayStep is the largest change in delay between two frames that
 	// is believed: a larger one (an encoder restart that moved the RTP
 	// clock) starts the baseline over. A real queue that grew this much at
@@ -104,10 +114,12 @@ type LinkEstimate struct {
 	// Rate is the rate the path delivered frames at (bits per second): the
 	// median of the frame dispersions of the last rateWindow, weighted by
 	// the frames' bytes, so a keyframe outweighs small frames. RateBytes is
-	// the bytes those frames carried (the weight of the evidence); both are
-	// zero without frames of rateMinPackets or more.
-	Rate      float64
-	RateBytes int
+	// the bytes those frames carried and RateFrames their number (the weight
+	// of the evidence); all are zero without frames of rateMinPackets or
+	// more.
+	Rate       float64
+	RateBytes  int
+	RateFrames int
 	// Delivered is the rate packets arrived at over the last QueueWindow
 	// (bits per second), retransmissions included. While a queue stands,
 	// the link is busy all along and this is its rate now, which Rate,
@@ -168,7 +180,7 @@ func (e *LinkEstimator) addDelayLocked(at time.Time, delay time.Duration) {
 func (e *LinkEstimator) finishLocked() {
 	f := e.cur
 	e.cur.open = false
-	if !f.open || f.packets < rateMinPackets || !f.last.After(f.first) {
+	if !f.open || f.packets < rateMinPackets || !f.last.After(f.first) || f.first.Sub(e.origin) < rateWarmup {
 		return
 	}
 	bps := float64(f.bytes-f.firstBytes) * 8 / f.last.Sub(f.first).Seconds()
@@ -198,6 +210,7 @@ func (e *LinkEstimator) Estimate(now time.Time) LinkEstimate {
 		est.QueueFrames = len(recent)
 	}
 	rates := dropBefore(slices.Clone(e.rates), now.Add(-rateWindow))
+	est.RateFrames = len(rates)
 	for _, r := range rates {
 		est.RateBytes += r.bytes
 	}

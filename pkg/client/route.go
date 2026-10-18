@@ -77,6 +77,8 @@ const (
 var (
 	tailscale4 = netip.MustParsePrefix("100.64.0.0/10")
 	tailscale6 = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+	// tailscale4via6 maps a subnet router's IPv4 subnets into tailscale6.
+	tailscale4via6 = netip.MustParsePrefix("fd7a:115c:a1e0:b1a::/64")
 )
 
 // pathKind names the network a candidate pair runs over. Tailscale is
@@ -95,6 +97,20 @@ func pathKind(local, remote net.IP) string {
 	default:
 		return PathInternet
 	}
+}
+
+// InTailnet reports whether addr, an IP address such as
+// StatsSnapshot.PathRemote, is a Tailscale node's own address: as the path's
+// remote end, the JetKVM itself runs tailscaled. A subnet router's 4via6
+// addresses reach a device behind it. (A device whose LAN sits in the
+// carrier-grade NAT range would read as one too.)
+func InTailnet(addr string) bool {
+	ip, err := netip.ParseAddr(addr)
+	if err != nil {
+		return false
+	}
+	ip = ip.Unmap()
+	return tailscale4.Contains(ip) || (tailscale6.Contains(ip) && !tailscale4via6.Contains(ip))
 }
 
 func inTailnet(ip net.IP) bool {

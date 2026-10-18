@@ -34,11 +34,23 @@ import (
 //     exceeds what the link delivers is left before scrolling overruns it,
 //     and a step up needs a measured rate that carries the next level with
 //     room to spare. A still screen sends single-packet frames, which
-//     measure nothing, so idle time never earns a step up.
+//     measure nothing, so idle time never earns a step up. Off a LAN the
+//     encoder's peak bitrate is also held below the rate (peakShare), so
+//     scrolling at any level stays below what the link delivers (keyframes
+//     and refreshes are not held to it).
 //   - Loss (more than 2 %, or a loss NACKs could not repair) remains as a
 //     backstop, on the client's once-a-second statistics. The round trip
 //     no longer counts: it shows a queue seconds after the one-way delay
 //     does, and a queue on the way to the device is not the video's.
+//
+// When the JetKVM itself is the Tailscale peer (the path's remote end is a
+// tailnet address), every packet also passes tailscaled's WireGuard on the
+// device's single core: about 1.1 ms of CPU a packet against 0.45 ms for
+// the rest of the send path, so the device saturates at about half the rate
+// its bursts drain at, and saturated, it stalls the stream for hundreds of
+// milliseconds (plan §32). Such a path starts no higher than balanced and
+// its peaks stay below deviceTunnelShare of the rate, whatever the round
+// trip.
 //
 // Steps up come one at a time after a stretch without congestion, which
 // doubles when the link flaps between two levels. Off a LAN, the still
@@ -70,6 +82,9 @@ type QualityLevel struct {
 	// StillQP is the QP of the keyframe the patched firmware sends once the
 	// screen has been still for half a second; >= MinQP turns it off.
 	StillQP int
+	// PeakKbps caps the encoder's bitrate (patched firmware) below the
+	// level's own peak, 1.5× its target; 0 = no cap.
+	PeakKbps int
 }
 
 // qualityLadder is ordered from lowest to highest. The values come from the
@@ -85,12 +100,15 @@ type QualityLevel struct {
 //   - The bitrate sets quality while the screen moves: scrolling 1080 px/s
 //     gives 49.8 dB at ~8 Mbit/s (factor 3, QP 10) and 46.9 dB at 4.2 Mbit/s
 //     (factor 1, QP 16).
-//   - Below ~3 Mbit/s, 30 fps keeps each frame sharper than 60 fps at a
-//     lower bitrate (46.3 dB at 2.3 Mbit/s vs 44.1 at 2.9), so frame rate
-//     goes down before the bitrate does.
+//   - Every level encodes up to 60 fps. A lower rate gives each moving frame
+//     more bits (+1.5-2 dB while scrolling at low and minimal), but every
+//     change, a key's echo or the pointer, waits for the next encoded frame:
+//     over Tailscale with scrolling, a key took 117 ms at 15 fps and 89-93
+//     ms at 60 or more (median). And a live frame rate change costs a keyframe (firmware
+//     D06), so levels that differ only in bitrate and QP change for free.
 var qualityLadder = []QualityLevel{
-	{Name: "minimal", Factor: 0.25, MaxFPS: 15, MinQP: 26, StillQP: 26},
-	{Name: "low", Factor: 0.5, MaxFPS: 30, MinQP: 21, StillQP: 17},
+	{Name: "minimal", Factor: 0.25, MaxFPS: 60, MinQP: 26, StillQP: 26},
+	{Name: "low", Factor: 0.5, MaxFPS: 60, MinQP: 21, StillQP: 17},
 	{Name: "balanced", Factor: 1, MaxFPS: 60, MinQP: 18, StillQP: 8},
 	{Name: "high", Factor: 2, MaxFPS: 60, MinQP: 14, StillQP: 4},
 	{Name: "maximum", Factor: 3, MaxFPS: 60, MinQP: 10, StillQP: 1},
@@ -121,8 +139,24 @@ const (
 	// 20 % low. A level is left once its target exceeds the whole rate.
 	linkUse = 0.8
 	// rateEvidence is the fewest bytes of multi-packet frames the delivery
-	// rate must rest on: one keyframe, or about a second of scrolling.
-	rateEvidence = 100_000
+	// rate must rest on, and rateMinFrames the fewest frames: about a second
+	// of scrolling, even at the lowest level. One keyframe alone is not
+	// enough.
+	rateEvidence  = 40_000
+	rateMinFrames = 5
+	// peakShare is the share of the measured rate the encoder's peak may
+	// take off a LAN; deviceTunnelShare replaces it when the JetKVM runs
+	// WireGuard itself. Over Tailscale to the device (1456×920 at 90 Hz,
+	// balanced's QP floor), peaks of 2, 2.5 and 3.9 Mbit/s against a rate
+	// of 3.7 left the device's core saturated in 20, 31 and over 40 % of
+	// scrolling, and a key's echo took 138, 195 and 258 ms (p90).
+	peakShare         = 0.9
+	deviceTunnelShare = 0.55
+	// peakChange is the least relative change of the peak cap that is
+	// applied, and peakHold the least time between two changes: each one
+	// restarts the encoder's rate control (firmware D07).
+	peakChange = 0.25
+	peakHold   = 5 * time.Second
 	// lanRTT is the round trip below which the link is a LAN.
 	lanRTT = 8 * time.Millisecond
 	// refreshBudget is the longest the still refresh may hold the link off
@@ -159,7 +193,12 @@ const (
 type qualityGovernor struct {
 	level         int
 	stillQP       int // the level's still refresh QP on this link
-	width, height int // the video's, for the levels' bitrates and keyframes
+	peakKbps      int // the encoder's peak cap on this link, 0 = none
+	peakAt        time.Time
+	deviceTunnel  bool // the JetKVM runs WireGuard itself (setPath)
+	lanPath       bool // the path is a LAN (setPath): the client may refresh whole frames
+	clientRefresh bool // the client plans still refreshes (Config.ClientRefresh, D13)
+	width, height int  // the video's, for the levels' bitrates and keyframes
 	lastChange    time.Time
 	lastUp        time.Time
 	lastDown      time.Time
@@ -191,11 +230,62 @@ func newQualityGovernor(now time.Time, rtt, baseUp time.Duration) *qualityGovern
 }
 
 // params is the current level as applied: the ladder's, with the still
-// refresh QP for the link.
+// refresh QP and the peak cap for the link.
 func (g *qualityGovernor) params() QualityLevel {
 	l := qualityLadder[g.level]
-	l.StillQP = g.stillQP
+	l.StillQP, l.PeakKbps = g.stillQP, g.peakKbps
 	return l
+}
+
+// setPath records the path a statistics sample names (client.StatsSnapshot
+// Path and PathRemote; a sample without a selected pair changes nothing),
+// and reports whether that lowered the level: with Tailscale on the JetKVM,
+// a session that hasn't changed level yet starts no higher than balanced,
+// since the device can't send high's bitrate through tailscaled.
+func (g *qualityGovernor) setPath(kind, remote string) bool {
+	if remote == "" {
+		return false
+	}
+	g.deviceTunnel = client.InTailnet(remote)
+	g.lanPath = kind == client.PathLAN || kind == client.PathLoopback
+	if g.deviceTunnel && g.lastChange.IsZero() && g.level > 2 {
+		g.level, g.stillQP = 2, qualityLadder[2].StillQP
+		return true
+	}
+	return false
+}
+
+// rated reports a delivery rate measured on enough frames to act on.
+func rated(link video.LinkEstimate) bool {
+	return link.RateBytes >= rateEvidence && link.RateFrames >= rateMinFrames
+}
+
+// updatePeak sets the encoder's peak cap off a LAN to the share of the
+// measured rate the path takes, and reports whether it changed. Small
+// changes, and changes within peakHold of the last, wait. Tailscale on the
+// JetKVM costs its CPU per packet, however short the round trip, so such a
+// path keeps its cap on a LAN too.
+func (g *qualityGovernor) updatePeak(now time.Time, link video.LinkEstimate) bool {
+	if g.onLAN() && !g.deviceTunnel {
+		// A LAN's rate is the device's send path, not a limit.
+		cleared := g.peakKbps > 0
+		g.peakKbps = 0
+		return cleared
+	}
+	if !rated(link) {
+		return false
+	}
+	share := peakShare
+	if g.deviceTunnel {
+		share = deviceTunnelShare
+	}
+	kbps := int(share * link.Rate / 1000)
+	if g.peakKbps > 0 && (now.Sub(g.peakAt) < peakHold ||
+		math.Abs(float64(kbps-g.peakKbps)) < peakChange*float64(g.peakKbps)) {
+		return false
+	}
+	g.peakKbps, g.peakAt = kbps, now
+	return true
 }
 
 // observe takes the latest transport sample and link estimate and returns
@@ -206,7 +296,7 @@ func (g *qualityGovernor) observe(now time.Time, s client.StatsSnapshot, link vi
 	if lossy || queued {
 		g.cleanSince = now
 	}
-	measured := link.RateBytes >= rateEvidence
+	measured := rated(link)
 	carried := g.carried(link.Rate)
 	lan := g.onLAN()
 	switch {
@@ -333,7 +423,7 @@ func (g *qualityGovernor) up(now time.Time, to int, link video.LinkEstimate, why
 // a rate not yet measured, keeps the ladder's.
 func (g *qualityGovernor) stillQPFor(level int, link video.LinkEstimate) int {
 	l := qualityLadder[level]
-	if link.RateBytes < rateEvidence || g.onLAN() {
+	if !rated(link) || g.onLAN() {
 		return l.StillQP
 	}
 	width, height := cmp.Or(g.width, 1920), cmp.Or(g.height, 1080)
@@ -343,6 +433,15 @@ func (g *qualityGovernor) stillQPFor(level int, link video.LinkEstimate) int {
 		if keyframeBytesQP10*float64(width*height)/(1920*1080)*math.Pow(qpStep, float64(qp-10)) <= budget {
 			break
 		}
+	}
+	// A client that plans refreshes sends only region refreshes off a LAN
+	// path (RefreshPlanner.isLANLike), which the device codes at the QP
+	// floor whatever stillQp is, but which stillQp at the floor turns off. Under a peak cap, moving content is
+	// coded far above the floor: on balanced over Tailscale, a still picture
+	// after scrolling stayed at 44 dB, against 50 refreshed. One step below
+	// the floor keeps them, and other keyframes nearly at the floor's size.
+	if g.clientRefresh && !g.lanPath && qp >= l.MinQP && l.StillQP < l.MinQP {
+		qp = l.MinQP - 1
 	}
 	return qp
 }
@@ -435,10 +534,10 @@ func (c *Controller) applyLevel(ctx context.Context, cl *client.Client, l Qualit
 		clientRefresh := c.cfg.ClientRefresh
 		c.mu.RUnlock()
 		clientRefresh = clientRefresh && cl.HasFirmwareFeature(ctx, client.FeatureRefreshRegions)
-		target := factorKbps(l.Factor, w, h)
+		target, peak := l.bitrates(w, h)
 		// Firmware from before the still refresh ignores stillQp.
 		update := map[string]any{
-			"minQp": l.MinQP, "maxFps": l.MaxFPS, "bitrateKbps": target, "maxBitrateKbps": target * 3 / 2,
+			"minQp": l.MinQP, "maxFps": l.MaxFPS, "bitrateKbps": target, "maxBitrateKbps": peak,
 			"stillQp": l.StillQP,
 		}
 		if clientRefresh {
@@ -449,7 +548,7 @@ func (c *Controller) applyLevel(ctx context.Context, cl *client.Client, l Qualit
 			return err
 		}
 		c.setStateFor(cl, func(s *Snapshot) { s.ClientRefresh, s.MinQP, s.StillQP = clientRefresh, l.MinQP, l.StillQP })
-		log.Info().Str("level", l.Name).Int("kbps", target).Int("maxFps", l.MaxFPS).Int("minQp", l.MinQP).Int("stillQp", l.StillQP).
+		log.Info().Str("level", l.Name).Int("kbps", target).Int("peakKbps", peak).Int("maxFps", l.MaxFPS).Int("minQp", l.MinQP).Int("stillQp", l.StillQP).
 			Bool("clientRefresh", clientRefresh).Msg("stream quality (live)")
 		return nil
 	}
@@ -513,19 +612,30 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 	case <-timer.C:
 	}
 	baseUp := upAfterCleanStock
-	if live, err := c.encoderParams(ctx, cl); err == nil && live {
+	live, err := c.encoderParams(ctx, cl)
+	if err == nil && live {
 		baseUp = upAfterClean
 	}
+	c.mu.RLock()
+	clientRefresh := c.cfg.ClientRefresh
+	c.mu.RUnlock()
+	clientRefresh = clientRefresh && live && cl.HasFirmwareFeature(ctx, client.FeatureRefreshRegions)
 	videoSize := func() [2]int {
 		c.mu.RLock()
 		defer c.mu.RUnlock()
 		return [2]int{c.snapshot.VideoWidth, c.snapshot.VideoHeight}
 	}
 	size := videoSize()
-	gov := newQualityGovernor(time.Now(), time.Duration(cl.Stats().RoundTripMs*float64(time.Millisecond)), baseUp)
+	stats := cl.Stats()
+	gov := newQualityGovernor(time.Now(), time.Duration(stats.RoundTripMs*float64(time.Millisecond)), baseUp)
 	gov.width, gov.height = size[0], size[1]
-	// The session's first keyframe has usually measured the link by now.
-	gov.observe(time.Now(), cl.Stats(), cl.LinkEstimate())
+	gov.clientRefresh = clientRefresh
+	gov.setPath(stats.Path, stats.PathRemote)
+	// The rate may be measured by now (the stream's first frames are not
+	// counted); otherwise the round trip's guess stands until it is.
+	link := cl.LinkEstimate()
+	gov.observe(time.Now(), cl.Stats(), link)
+	gov.updatePeak(time.Now(), link)
 	_ = c.applyLevel(ctx, cl, gov.params())
 
 	log := logging.Subsystem("quality")
@@ -551,10 +661,19 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 				gov.width, gov.height = s[0], s[1]
 			}
 			link := cl.LinkEstimate()
-			level, why := gov.observe(now, cl.Stats(), link)
+			stats := cl.Stats()
+			if gov.setPath(stats.Path, stats.PathRemote) {
+				changed = true
+			}
+			level, why := gov.observe(now, stats, link)
 			if why != "" {
 				log.Info().Str("why", why).Str("level", qualityLadder[level].Name).Dur("queue", link.Queue).
 					Float64("rateMbps", link.Rate/1e6).Msg("stream quality changes")
+				changed = true
+			}
+			if gov.updatePeak(now, link) {
+				log.Info().Int("peakKbps", gov.peakKbps).Float64("rateMbps", link.Rate/1e6).Bool("deviceTunnel", gov.deviceTunnel).
+					Msg("stream peak follows the link")
 				changed = true
 			}
 			if changed {
@@ -562,6 +681,20 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 			}
 		}
 	}
+}
+
+// bitrates are a live level's bitrate target and peak in kbps at the video's
+// size: the factor's, with the peak at 1.5× the target. A lower PeakKbps
+// replaces the peak, and the target where it is lower still (the firmware
+// takes at least 100 kbps).
+func (l QualityLevel) bitrates(width, height int) (target, peak int) {
+	target = factorKbps(l.Factor, width, height)
+	peak = target * 3 / 2
+	if l.PeakKbps > 0 && l.PeakKbps < peak {
+		peak = max(l.PeakKbps, 100)
+		target = min(target, peak)
+	}
+	return target, peak
 }
 
 // factorKbps mirrors the firmware's bitrate for a quality factor

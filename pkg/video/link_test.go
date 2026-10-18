@@ -62,6 +62,13 @@ func (p *path) frames(from, to, interval time.Duration, n int) {
 
 func (p *path) estimate() LinkEstimate { return p.est.Estimate(p.arrived) }
 
+// warm sends single-packet frames through rateWarmup, so the frames sent
+// after it count for the rate, and returns when it ends.
+func (p *path) warm() time.Duration {
+	p.frames(0, rateWarmup, frame60, 1)
+	return rateWarmup
+}
+
 const frame60 = time.Second / 60
 
 func TestLinkEstimatorIdleLinkHasNoQueueAndNoRate(t *testing.T) {
@@ -85,8 +92,9 @@ func TestLinkEstimatorDeliveryRateIsTheSlowestHop(t *testing.T) {
 	} {
 		p := newPath(t, c.bps)
 		p.sendGap = c.sendGap
-		p.send(0, 200) // a 240 kB keyframe
-		p.frames(time.Second, 2*time.Second, frame60, 1)
+		w := p.warm()
+		p.send(w, 200) // a 240 kB keyframe
+		p.frames(w+time.Second, w+2*time.Second, frame60, 1)
 		if est := p.estimate(); math.Abs(est.Rate-c.want) > 0.01*c.want || est.RateBytes != 240_000 {
 			t.Errorf("%s: rate %.2f Mbit/s from %d bytes, want %.2f", c.name, est.Rate/1e6, est.RateBytes, c.want/1e6)
 		}
@@ -98,9 +106,10 @@ func TestLinkEstimatorRateIgnoresBurstsDeliveredAtOnce(t *testing.T) {
 	// together (Wi-Fi aggregation): the byte-weighted median keeps the
 	// keyframe's rate.
 	p := newPath(t, 4e6)
-	p.send(0, 150)
+	w := p.warm()
+	p.send(w, 150)
 	p.bps = 1e10
-	p.frames(time.Second, 2*time.Second, 100*time.Millisecond, 8)
+	p.frames(w+time.Second, w+2*time.Second, 100*time.Millisecond, 8)
 	if est := p.estimate(); math.Abs(est.Rate-4e6) > 0.01*4e6 {
 		t.Fatalf("rate %.2f Mbit/s, want 4", est.Rate/1e6)
 	}
@@ -120,8 +129,8 @@ func TestLinkEstimatorTellsADrainingBurstFromAGrowingQueue(t *testing.T) {
 
 	// 8 Mbit/s of scrolling into the same link: the queue grows.
 	p = newPath(t, 4e6)
-	p.frames(0, time.Second, frame60, 1)
-	p.frames(time.Second, time.Second+300*time.Millisecond, frame60, 14)
+	p.frames(0, rateWarmup+time.Second, frame60, 1)
+	p.frames(rateWarmup+time.Second, rateWarmup+time.Second+300*time.Millisecond, frame60, 14)
 	growing := p.estimate()
 	if growing.Queue < 100*time.Millisecond || growing.QueueGrowth <= 0 || growing.QueueFrames < 2 {
 		t.Errorf("overload: %+v, want a queue that grows", growing)
@@ -180,5 +189,20 @@ func TestLinkEstimatorUnwrapsTheRTPClock(t *testing.T) {
 	p.frames(0, 2*time.Second, frame60, 1)
 	if est := p.estimate(); est.Queue > time.Millisecond {
 		t.Fatalf("queue %v across the wrap, want none", est.Queue)
+	}
+}
+
+// The session's first frames leave the device while it sets the session up:
+// they don't count for the rate.
+func TestLinkEstimatorRateSkipsTheStreamsFirstFrames(t *testing.T) {
+	p := newPath(t, 1.4e6)
+	p.send(0, 58) // the first keyframe, slow
+	if est := p.estimate(); est.Rate != 0 || est.RateFrames != 0 {
+		t.Fatalf("the first keyframe counted: %+v", est)
+	}
+	p.bps = 4e6
+	p.frames(rateWarmup+100*time.Millisecond, rateWarmup+1100*time.Millisecond, 100*time.Millisecond, 5)
+	if est := p.estimate(); math.Abs(est.Rate-4e6) > 0.01*4e6 || est.RateFrames != 10 {
+		t.Fatalf("rate %.2f Mbit/s from %d frames, want 4 from 10", est.Rate/1e6, est.RateFrames)
 	}
 }

@@ -37,3 +37,17 @@ func TestRouteLocalIPs(t *testing.T) {
 		t.Fatalf("routeLocalIPs without a host = %v, want none", got)
 	}
 }
+
+func TestInTailnetIsATailscaleNodesOwnAddress(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"100.64.0.20":                  true,
+		"fd7a:115c:a1e0::20":           true,
+		"fd7a:115c:a1e0:b1a::c0a8:128": false, // 4via6: a subnet router's
+		"192.168.1.40":                 false,
+		"":                             false,
+	} {
+		if got := InTailnet(addr); got != want {
+			t.Errorf("InTailnet(%q) = %v, want %v", addr, got, want)
+		}
+	}
+}

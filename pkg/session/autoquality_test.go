@@ -37,7 +37,7 @@ func feedLink(g *qualityGovernor, start time.Time, n int, step time.Duration, ne
 // measured is a link estimate that has measured rate (bit/s) on enough
 // frames, with no queue.
 func measured(rate float64) video.LinkEstimate {
-	return video.LinkEstimate{Rate: rate, RateBytes: 1_000_000, QueueFrames: 6}
+	return video.LinkEstimate{Rate: rate, RateBytes: 1_000_000, RateFrames: 60, QueueFrames: 6}
 }
 
 // clean: 4 Mbit/s, 2 ms RTT, no loss.
@@ -531,5 +531,129 @@ func TestQualityFlappingBacksOffStepUps(t *testing.T) {
 	later, _ := feedLink(g, now, 15, time.Second, cleanAt30)   // 45 s: the doubled delay has passed
 	if len(ups) != 1 || len(early) != 0 || len(later) != 1 {
 		t.Fatalf("ups %v, early %v, later %v", ups, early, later)
+	}
+}
+
+// Every level encodes at the same frame rate: a lower one delays every
+// change, and changing it live costs the device a keyframe.
+func TestQualityLevelsKeepTheFrameRate(t *testing.T) {
+	for _, l := range qualityLadder {
+		if l.MaxFPS != qualityLadder[0].MaxFPS {
+			t.Errorf("%s encodes at %d fps, %s at %d", l.Name, l.MaxFPS, qualityLadder[0].Name, qualityLadder[0].MaxFPS)
+		}
+	}
+}
+
+// Off a LAN the encoder's peak follows the measured rate; small changes
+// and changes soon after the last wait; a LAN has no cap.
+func TestQualityPeakFollowsTheLink(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 60*time.Millisecond)
+	if !g.updatePeak(start, measured(4e6)) || g.params().PeakKbps != 3600 {
+		t.Fatalf("peak %d kbps at 4 Mbit/s, want 3600", g.params().PeakKbps)
+	}
+	if g.updatePeak(start.Add(peakHold), measured(4.4e6)) {
+		t.Fatalf("a 10%% change moved the peak to %d", g.peakKbps)
+	}
+	if g.updatePeak(start.Add(time.Second), measured(2e6)) {
+		t.Fatalf("the peak moved within peakHold, to %d", g.peakKbps)
+	}
+	if !g.updatePeak(start.Add(peakHold), measured(2e6)) || g.peakKbps != 1800 {
+		t.Fatalf("peak %d kbps at 2 Mbit/s, want 1800", g.peakKbps)
+	}
+	// Balanced's target (4 Mbit/s) and peak follow the cap.
+	if target, peak := g.params().bitrates(1920, 1080); target != 1800 || peak != 1800 {
+		t.Fatalf("balanced under an 1800 kbps cap: target %d, peak %d", target, peak)
+	}
+
+	lan := at1080p(start, 2*time.Millisecond)
+	if lan.updatePeak(start, measured(4e6)) || lan.params().PeakKbps != 0 {
+		t.Fatalf("a LAN capped the peak at %d", lan.params().PeakKbps)
+	}
+	if target, peak := lan.params().bitrates(1920, 1080); target != 10976 || peak != 16464 {
+		t.Fatalf("maximum on a LAN: target %d, peak %d", target, peak)
+	}
+}
+
+// When the JetKVM runs WireGuard itself, its CPU saturates at about half the
+// rate its bursts drain at: such a path starts no higher than balanced and
+// its peak stays at deviceTunnelShare of the rate.
+func TestQualityDeviceTunnelStaysBelowTheDevicesCeiling(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 30*time.Millisecond)
+	if g.level != 3 {
+		t.Fatalf("a 30 ms round trip started at %d, want high", g.level)
+	}
+	// A sample without a selected pair says nothing.
+	if g.setPath("", "") || g.deviceTunnel {
+		t.Fatal("an empty path changed the governor")
+	}
+	if !g.setPath(client.PathTailscale, "100.64.0.20") || g.level != 2 {
+		t.Fatalf("a device tunnel started at %d, want balanced", g.level)
+	}
+	g.updatePeak(start, measured(3.7e6))
+	if g.peakKbps != 2035 {
+		t.Fatalf("peak %d kbps at 3.7 Mbit/s, want 2035", g.peakKbps)
+	}
+
+	// The device's CPU limits a tailnet path at LAN round trips too.
+	lan := at1080p(start, 2*time.Millisecond)
+	if !lan.setPath(client.PathTailscale, "100.64.0.20") || lan.level != 2 {
+		t.Fatalf("a device tunnel at 2 ms started at %d, want balanced", lan.level)
+	}
+	if !lan.updatePeak(start, measured(8e6)) || lan.peakKbps != 4400 {
+		t.Fatalf("a device tunnel at 2 ms: peak %d kbps, want 4400", lan.peakKbps)
+	}
+	// A subnet router: the device's LAN address, no tailscaled on it.
+	router := at1080p(start, 30*time.Millisecond)
+	if router.setPath(client.PathTailscale, "192.168.1.40") || router.level != 3 {
+		t.Fatalf("a subnet router path started at %d, want high", router.level)
+	}
+}
+
+// The session's first keyframe measures the device at its busiest: the
+// start level waits for a rate measured on several frames.
+func TestQualityStartWaitsForMoreThanTheFirstKeyframe(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 60*time.Millisecond)
+	first := video.LinkEstimate{Rate: 1.4e6, RateBytes: 120_000, RateFrames: 1, QueueFrames: 1}
+	if level, why := g.observe(start, cleanStats(client.StatsSnapshot{}, 60), first); why != "" || level != 2 {
+		t.Fatalf("one keyframe moved the start to %d (%s)", level, why)
+	}
+	if g.updatePeak(start, first) {
+		t.Fatalf("one keyframe capped the peak at %d", g.peakKbps)
+	}
+}
+
+// A client that refreshes regions keeps them on where the device's own
+// refresh keyframe would not fit the link: they come at the QP floor.
+func TestQualityClientRegionRefreshStaysOnOffALAN(t *testing.T) {
+	start := time.Unix(0, 0)
+	for _, c := range []struct {
+		clientRefresh bool
+		level, qp     int
+	}{{false, 1, 21}, {true, 1, 20}} {
+		g := at1080p(start, 60*time.Millisecond)
+		g.clientRefresh = c.clientRefresh
+		g.observe(start, cleanStats(client.StatsSnapshot{}, 60), measured(3.8e6))
+		if p := g.params(); g.level != c.level || p.StillQP != c.qp {
+			t.Errorf("client refresh %v: level %d still QP %d, want %d and %d", c.clientRefresh, g.level, p.StillQP, c.level, c.qp)
+		}
+	}
+	// A LAN path at a longer round trip (mesh Wi-Fi): the client may refresh
+	// whole frames there, so the budget's verdict stands.
+	lan := at1080p(start, 60*time.Millisecond)
+	lan.clientRefresh = true
+	lan.setPath(client.PathLAN, "192.168.1.40")
+	lan.observe(start, cleanStats(client.StatsSnapshot{}, 60), measured(3.8e6))
+	if p := lan.params(); p.StillQP != p.MinQP {
+		t.Errorf("a LAN path: still QP %d, want the floor %d (off)", p.StillQP, p.MinQP)
+	}
+	// The lowest level's refresh stays off.
+	g := at1080p(start, 60*time.Millisecond)
+	g.clientRefresh = true
+	g.observe(start, cleanStats(client.StatsSnapshot{}, 60), measured(0.5e6))
+	if p := g.params(); g.level != 0 || p.StillQP != p.MinQP {
+		t.Errorf("minimal: level %d still QP %d", g.level, p.StillQP)
 	}
 }
