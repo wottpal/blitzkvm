@@ -97,12 +97,14 @@ final class JetKVMSetupModel: ObservableObject {
             // Only the BlitzKVM firmware answers this.
             let hasEncoderControl = (try? await engine.call("getVideoEncoderParams", as: JSONValue.self)) != nil
             var installed: String?
+            var guardVerdict: InstallGuard.Verdict?
             if ssh, let shell {
                 installed = JetKVMSSH.sha256(fromSumOutput: try await shell.run("sha256sum /userdata/jetkvm/bin/jetkvm_app"))
+                guardVerdict = await settleGuard(shell)
             }
             firmware.value = FirmwareState.evaluate(hasEncoderControl: hasEncoderControl, appVersion: version.appVersion,
                                                     installedSHA256: installed, bundled: builds.map(\.build))
-            firmware.error = nil
+            firmware.error = guardVerdict.flatMap(Self.message)
         } catch {
             firmware.error = Self.describe(error)
         }
@@ -171,7 +173,8 @@ final class JetKVMSetupModel: ObservableObject {
 
     /// Uploads a bundled build next to the installed one, checks it, and
     /// restarts the JetKVM, which moves it into place as it does an update.
-    /// The installed build is kept as `jetkvm_app.backup`.
+    /// The installed build is kept as `jetkvm_app.backup`, and the boot guard
+    /// (InstallGuard) puts it back if the new one doesn't start.
     func installFirmware(_ build: FirmwareBuild) {
         guard let bundled = builds.first(where: { $0.build == build }), !firmware.isWorking else { return }
         Task {
@@ -190,15 +193,68 @@ final class JetKVMSetupModel: ObservableObject {
                     throw SetupError("The upload arrived damaged. Nothing was installed.")
                 }
                 firmware.progress = "Restarting the JetKVM…"
+                var arm = ""
+                if let guardScript = Self.guardScript {
+                    _ = try await shell.run(InstallGuard.installCommand, input: guardScript)
+                    arm = InstallGuard.armCommand + " && "
+                }
+                // The reboot outlives the SSH session only with its output
+                // redirected: a write to the closed channel kills it.
                 _ = try await shell.run("cp -f /userdata/jetkvm/bin/jetkvm_app /userdata/jetkvm/jetkvm_app.backup && "
-                    + "mv -f \(part) /userdata/jetkvm/jetkvm_app.update && sync && "
+                    + "mv -f \(part) /userdata/jetkvm/jetkvm_app.update && \(arm)sync && "
                     + "(sleep 1; reboot) > /dev/null 2>&1 &")
                 try await waitForRestart()
                 firmware.progress = nil
                 refresh()
+                if !arm.isEmpty { followGuard(shell) }
             } catch {
                 firmware.progress = nil
                 firmware.error = Self.describe(error)
+            }
+        }
+    }
+
+    /// The boot guard script this app ships (Support/InstallGuard.sh).
+    private static let guardScript = Bundle.main.url(forResource: "InstallGuard", withExtension: "sh")
+
+    /// Reads the boot guard's verdict on the new build and settles it: takes
+    /// the guard off the JetKVM once the build proved itself, or after a
+    /// rollback (whose log stays, so the row explains it until the next
+    /// install). nil when SSH didn't answer.
+    private func settleGuard(_ shell: JetKVMShell) async -> InstallGuard.Verdict? {
+        guard let output = try? await shell.run(InstallGuard.statusCommand) else { return nil }
+        let verdict = InstallGuard.verdict(statusOutput: output)
+        switch verdict {
+        case .pending, .none:
+            break
+        case .healthy:
+            _ = try? await shell.run(InstallGuard.removeCommand)
+        case .rolledBack, .rollbackFailed:
+            _ = try? await shell.run(InstallGuard.disarmCommand)
+        }
+        return verdict
+    }
+
+    /// What the firmware row says about a verdict, if anything.
+    private static func message(_ verdict: InstallGuard.Verdict) -> String? {
+        switch verdict {
+        case .rolledBack: "The new firmware didn't start, so the JetKVM went back to the one before."
+        case .rollbackFailed: "The new firmware didn't start, and there was no earlier one to go back to."
+        case .pending, .none, .healthy: nil
+        }
+    }
+
+    /// Waits for the boot guard's verdict on a new build (about 6 minutes
+    /// after the restart, longer when it puts the backup back), in the
+    /// background: the install itself is done.
+    private func followGuard(_ shell: JetKVMShell) {
+        Task {
+            for _ in 0..<30 {
+                try? await Task.sleep(for: .seconds(30))
+                guard !firmware.isWorking else { return }
+                guard let verdict = await settleGuard(shell), verdict != .pending else { continue }
+                if Self.message(verdict) != nil { refresh() }
+                return
             }
         }
     }

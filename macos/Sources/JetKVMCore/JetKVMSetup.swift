@@ -255,6 +255,61 @@ public enum JetKVMSSH {
     }
 }
 
+/// The boot guard of a firmware install (`Support/InstallGuard.sh`, a copy of
+/// wottpal/kvm's `scripts/fork/install_guard.sh`): armed before the restart
+/// that installs a build, it puts `jetkvm_app.backup` back when the new app
+/// doesn't answer after a boot, or the JetKVM keeps restarting. An install
+/// over Tailscale can't strand the JetKVM that way.
+public enum InstallGuard {
+    public static let script = "/userdata/init.d/S99install-guard"
+    public static let marker = "/userdata/install-guard.armed"
+    public static let log = "/userdata/install-guard.log"
+
+    /// Installs the script from standard input (and drops an earlier log).
+    public static let installCommand = "rm -f \(log) && cat > \(script) && chmod +x \(script)"
+    /// Arms it for the next boot.
+    public static let armCommand = "echo 0 > \(marker)"
+    /// Prints whether it is armed (with its boot count), then its log's last
+    /// line.
+    public static let statusCommand =
+        "if [ -f \(marker) ]; then echo \"armed $(cat \(marker))\"; else echo disarmed; fi; tail -n 1 \(log) 2>/dev/null"
+    /// Takes it off the JetKVM, leaving its log.
+    public static let disarmCommand = "rm -f \(marker) \(script)"
+    /// Takes it off the JetKVM with its log.
+    public static let removeCommand = "rm -f \(marker) \(script) \(log)"
+
+    public enum Verdict: Equatable {
+        /// Not there, or nothing to act on.
+        case none
+        /// Armed, and not yet sure of the new build.
+        case pending
+        /// The new build answered after its restart and again 5 minutes later.
+        case healthy
+        /// The new build didn't, and the guard put the backup back.
+        case rolledBack
+        /// The new build didn't, and there was no backup to put back.
+        case rollbackFailed
+    }
+
+    /// Reads `statusCommand`'s output.
+    public static func verdict(statusOutput: String) -> Verdict {
+        let lines = statusOutput.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        let state = lines.first ?? "", last = lines.count > 1 ? lines[1] : ""
+        switch state {
+        case "disarmed":
+            if last.contains("rollback failed") { return .rollbackFailed }
+            return last.contains("rollback:") ? .rolledBack : .none
+        case "armed 0":
+            return last.hasSuffix("app healthy") ? .healthy : .pending
+        case let armed where armed.hasPrefix("armed "):
+            return .pending
+        default:
+            return .none
+        }
+    }
+}
+
 /// How far JetKVM Setup is, as of its last check: kept with the device, so
 /// the Devices window shows it without connecting. nil: not checked.
 public struct SetupSummary: Codable, Equatable {

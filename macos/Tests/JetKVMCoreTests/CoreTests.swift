@@ -572,6 +572,37 @@ final class JetKVMSetupTests: XCTestCase {
         }
     }
 
+    func testInstallGuardVerdict() {
+        XCTAssertEqual(InstallGuard.verdict(statusOutput: "disarmed\n"), .none)
+        XCTAssertEqual(InstallGuard.verdict(statusOutput: "armed 0\n"), .pending, "armed, the restart still to come")
+        XCTAssertEqual(InstallGuard.verdict(statusOutput: "armed 1\nSun Oct 18 13:43:15 UTC 2026 boot 1: app answering\n"), .pending)
+        XCTAssertEqual(InstallGuard.verdict(statusOutput: "armed 0\nSun Oct 18 13:48:25 UTC 2026 boot 1: app healthy\n"), .healthy)
+        XCTAssertEqual(InstallGuard.verdict(statusOutput: "disarmed\nSun Oct 18 13:46:01 UTC 2026 rollback: boot 1: app not answering\n"),
+                       .rolledBack)
+        XCTAssertEqual(InstallGuard.verdict(statusOutput: "disarmed\nSun Oct 18 13:46:01 UTC 2026 rollback failed: no /userdata/jetkvm/jetkvm_app.backup\n"),
+                       .rollbackFailed)
+        XCTAssertEqual(InstallGuard.verdict(statusOutput: ""), .none)
+    }
+
+    /// The app ships the fork's guard unchanged, and BusyBox's sh can parse it.
+    func testBundledInstallGuard() throws {
+        let macos = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let bundled = macos.appendingPathComponent("Support/InstallGuard.sh")
+        let check = Process()
+        check.executableURL = URL(fileURLWithPath: "/bin/sh")
+        check.arguments = ["-n", bundled.path]
+        try check.run()
+        check.waitUntilExit()
+        XCTAssertEqual(check.terminationStatus, 0, "sh -n \(bundled.path)")
+        let script = try String(contentsOf: bundled, encoding: .utf8)
+        for path in [InstallGuard.marker, InstallGuard.log, "/userdata/jetkvm/jetkvm_app.backup"] {
+            XCTAssertTrue(script.contains(path), path)
+        }
+        let fork = macos.appendingPathComponent("../../kvm/scripts/fork/install_guard.sh")
+        guard FileManager.default.fileExists(atPath: fork.path) else { throw XCTSkip("no wottpal/kvm checkout next to this one") }
+        XCTAssertEqual(script, try String(contentsOf: fork, encoding: .utf8), "Support/InstallGuard.sh differs from the fork's guard")
+    }
+
     func testFirmwareManifest() throws {
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../Support/Firmware.json")
         let builds = try FirmwareBuild.manifest(Data(contentsOf: url))

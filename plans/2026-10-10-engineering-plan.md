@@ -1665,7 +1665,7 @@ On desktop content, 1.0× froze hotel Wi-Fi for 1.4 s and the relay for 1.9 / 2.
 ### Open
 
 - **LAN:** frame pacing stays off on a LAN, untested there, as do the other LAN candidates (`plans/2026-10-18-lan-improvements.md`): the rig was only reachable remotely.
-- **JetKVM Setup** installs firmware without the boot guard; a remote install from the app could use it.
+- ~~**JetKVM Setup** installs firmware without the boot guard~~ Done: it ships the guard (`Support/InstallGuard.sh`, a copy of the fork's, kept identical by a test), arms it for every install, and takes it off once the new build has answered twice, 5 minutes apart; a rollback shows in the firmware row. Tested over Tailscale on the device: reinstalling fork.9 armed it, the guard confirmed the build 5 minutes after the restart, and the next check removed it; a simulated rollback showed in the row.
 - **No-direct networks:** a symmetric NAT on both ends (hotel Wi-Fi, carrier-grade NAT) leaves only the tunnel; a TURN relay would cost the stream a third party.
 
 ## Appendix A: Key sources

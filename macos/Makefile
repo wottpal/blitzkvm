@@ -77,6 +77,7 @@ app: engine swift icon firmware licenses
 	mkdir -p "$(APP)/Contents/Resources/Firmware"
 	cp build/firmware/Firmware.json build/firmware/*.xz "$(APP)/Contents/Resources/Firmware/"
 	cp build/licenses/Licenses.txt "$(APP)/Contents/Resources/Licenses.txt"
+	cp Support/InstallGuard.sh "$(APP)/Contents/Resources/InstallGuard.sh"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.blitzkvm.engine "$(APP)/Contents/Helpers/blitzkvm-engine"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" "$(SPARKLE)/Autoupdate"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" "$(SPARKLE)/Updater.app"
