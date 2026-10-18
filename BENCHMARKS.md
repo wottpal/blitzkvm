@@ -21,6 +21,7 @@ What BlitzKVM and its firmware measure on real hardware: input latency, picture 
 |---|---|---|---|
 | Latency | Key press to screen, 2400×1012@60, full screen / window | 91.2 / 96.0 ms | **77.5 / 78.8 ms** |
 | Latency | Pointer move to screen, full screen / window | 57.4 / 65.0 ms | **53.0 / 57.7 ms** |
+| Latency | Pointer move to screen over home Wi-Fi, 1456×920@90, window (median / p90) | 59.0 / 83.6 ms (0.3.2) | **45.6 / 53.0 ms** |
 | Latency | Key press to screen, 1280×720@120 | — | **47.0 ms** |
 | Text | Light text, PSNR against the exact test image (still) | 32.6 dB | **60.5 dB** |
 | Color | Colored text, RGB PSNR as displayed | 28.1 dB | **51.4 dB** |
@@ -51,6 +52,23 @@ The latency probe presses a key on the target (or moves the pointer), finds the 
 | Key → screen, window | 96.0 ms | **78.8 ms** |
 | Pointer → screen, full screen | 57.4 ms | **53.0 ms** |
 | Pointer → screen, window | 65.0 ms | **57.7 ms** |
+
+### Over home Wi-Fi (1456×920, 90 Hz)
+
+Measured 2026-10-18 at home: the MacBook on Wi-Fi, the JetKVM wired, a round trip of 5–35 ms (spikes to 150), its lowest of a minute 6–9 ms; firmware fork.9; `latency.html`. 30–60 samples per variant and round, interleaved, medians of 60–90.
+
+| | 0.3.2 | Now (0.3.3) |
+|---|---|---|
+| Pointer → screen, median / p75 / p90 | 59.0 / 73.2 / 83.6 ms | **45.6 / 51.1 / 53.0 ms** |
+| Key → screen, median / p75 / p90 | 69.1 / 76.5 / 80.2 ms | **61.8 / 64.2 / 78.8 ms** |
+
+Three changes, each measured on its own:
+
+- **Wi-Fi counts as a LAN.** The governor took a LAN for a round trip under 8 ms, so this Wi-Fi was a remote link half the time: sessions started at high, a peak cap and frame pacing came and went, and one run fell to balanced. A device in the Mac's own subnet over Wi-Fi or Ethernet now counts while its lowest round trip of a minute stays under 30 ms; sessions run at maximum.
+- **Maximum encodes every captured frame on a LAN** (with frame pacing firmware, fork.9: 90 fps here, up to the encoder's 1080p60 pixel rate), where every level used to stop at 60. At the engine (input sent → frame arrived), automatic quality: keys 60.0 → 55.0 ms median (p75 67.0 → 59.5), pointer 43.0 → 39.5 ms (p90 54.0 → 47.0). Moving frames lost 0.1–0.2 dB (50.9 → 50.8 dB), the device kept 56–59 % of its CPU idle (62–64 % at 60 fps).
+- **Input keeps the picture presenting.** After a pause macOS shows the first frame a refresh or two late, or drops it, and the answer to input after a pause is such a frame: pointer moves took 23 ms from decode to screen (median; p90 49) against 7 for keys. For a second after each input the window draws the frame again whenever nothing was drawn for 50 ms. Same engine, app only: pointer → screen 70.0 / 85.5 / 93.0 → 54.1 / 62.3 / 70.7 ms; keys unchanged.
+
+Against 0.2.4, at the engine, nothing had got slower (pointer 43 → 42 ms, keys 60 → 57 ms median); pointer moves without the retransmission 0.2.5 gave them stalled the pointer for seconds once.
 
 ### Where the time goes
 

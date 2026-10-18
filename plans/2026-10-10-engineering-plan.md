@@ -712,6 +712,7 @@ The independent review (`plans/2026-10-10-engineering-plan-review.md`, merged in
 | 2026-10-12 | The app is **BlitzKVM**: bundle ID `xyz.scio.blitzkvm`, Go module and repository `github.com/wottpal/blitzkvm`, helper `blitzkvm-engine`, legacy client `blitzkvm-legacy`, app-side environment variables `BLITZKVM_*`. The device, its firmware and its protocol keep the JetKVM name. Settings, the device library, the Keychain service and the Accessibility and Local Network grants start fresh under the new bundle ID |
 | 2026-10-18 | Every quality level encodes up to 60 fps (minimal and low were 15 and 30); off a LAN the encoder's peak follows the measured rate, at 0.55× when the JetKVM runs Tailscale itself (§32) |
 | 2026-10-18 | A JetKVM reached over its own Tailscale gets a direct path tried, through public STUN servers (on by default, Settings › Connection); off a LAN frames are paced at 1.25× the peak cap on firmware with D18 (§33) |
+| 2026-10-18 | A LAN path to the device's own subnet counts as a LAN while its lowest round trip of a minute stays under 30 ms (Wi-Fi); maximum on a LAN encodes every captured frame up to 1080p60's pixel rate; input keeps the picture presenting for a second (§34) |
 
 ## 18. PM to-dos
 
@@ -1667,6 +1668,51 @@ On desktop content, 1.0× froze hotel Wi-Fi for 1.4 s and the relay for 1.9 / 2.
 - **LAN:** frame pacing stays off on a LAN, untested there, as do the other LAN candidates (`plans/2026-10-18-lan-improvements.md`): the rig was only reachable remotely.
 - ~~**JetKVM Setup** installs firmware without the boot guard~~ Done: it ships the guard (`Support/InstallGuard.sh`, a copy of the fork's, kept identical by a test), arms it for every install, and takes it off once the new build has answered twice, 5 minutes apart; a rollback shows in the firmware row. Tested over Tailscale on the device: reinstalling fork.9 armed it, the guard confirmed the build 5 minutes after the restart, and the next check removed it; a simulated rollback showed in the row.
 - **No-direct networks:** a symmetric NAT on both ends (hotel Wi-Fi, carrier-grade NAT) leaves only the tunnel; a TURN relay would cost the stream a third party.
+
+## 34. Home Wi-Fi: a LAN that doesn't look like one (2026-10-18)
+
+**Ask (PM):** back home on Wi-Fi, the pointer felt slower than before the slow-link work. Find out, and improve latency end to end on an imperfect Wi-Fi LAN without regressions elsewhere.
+
+**Setup:** the MacBook (M4 Max) on home Wi-Fi, the JetKVM wired, the Mac mini in Match Window at 1456×920, 90 Hz; firmware fork.9. The app's latency probe missed whole runs while a fullscreen app on another Space hid its window, so most A/Bs ran at the engine instead: a test session records the stream while it sends input, and ffmpeg finds the first frame that shows it (input sent → frame arrived; no app, no local display).
+
+### Findings
+
+| # | Finding | Evidence |
+|---|---|---|
+| H1 | No regression since 0.2.4 at the engine: pointer 43 → 42 ms, keys 60 → 57 ms (median, 90 samples each) | engine A/B, 0.2.4's engine against 0.3.2's |
+| H2 | This Wi-Fi's round trip swings 5-35 ms (spikes to 150), its lowest of a minute 6-9 ms. The governor's LAN test (under 8 ms) failed half the time: sessions started at high, a peak cap and pacing came and went, one run fell to balanced. Its baseline also reset to whatever the sample was when a minute had passed, a spike included | stats every 5 s, governor log |
+| H3 | Every level stopped at 60 fps while the source ran at 90: a change landing in a dropped frame waited a capture period more | `getVideoEncoderParams` (source 90) |
+| H4 | Pointer moves took 23 ms from decode to screen (median, p90 49) against 7 for keys: after a pause the window server shows the first frame a refresh or two late or drops it, and a single pointer move is exactly that frame. Re-presenting on a dropped present (§33) only fixed the worst of it | app probe stages: render start p90 33 ms for pointer moves, 1 ms for keys |
+| H5 | Taking pointer moves back to no retransmission (as before 0.2.5) stalled the pointer for seconds once (p99 2.9 s) | engine A/B |
+
+### Changes
+
+- **Governor:** a LAN path to the device's own subnet (`client.StatsSnapshot.PathOnLink`: a private address over a physical interface, in that interface's subnet) counts as a LAN while the lowest round trip of the last minute stays under `lanPathRTT` (30 ms); a routed private network (another site, a VLAN) and loopback, where the emulator's impaired links run, keep `lanRTT`. The baseline is a sliding minimum, and a new path starts its own. A session that turns out to be on a LAN before any step but its start (no loss) goes to the top; that start is no step up, so a step down after it doesn't count as flapping.
+- **Governor:** the top level on a LAN (not through Tailscale on the device), on firmware with frame pacing (D18, where a frame rate change costs no keyframe), encodes every captured frame (`maxFps` 0) up to the encoder's 1080p60 pixel rate (`sourceRatePixels`); larger fast modes and older firmware keep 60. Parameters are applied again whenever they change, also when the link turns LAN or not.
+- **App:** input keeps the layer presenting (`VideoView.inputSent`): it draws the frame again at once if nothing was drawn for 50 ms, and so on for a second after the last input; a large change waiting to be sharpened (100 ms) is left to that. One timer per burst of input. A frame drawn again counts once in `presentedFrames` (the watchdog's "none reached the screen"). The latency probe goes through the same hook (`DeviceWindowController.inputSent`), so its pointer mode now also drives the refresh planner as real input does, and its `present_times` include the warm-up's presents.
+
+### Results
+
+To screen, 0.3.2 against 0.3.3 (app and engine), 60 samples each, interleaved:
+
+| | 0.3.2 | 0.3.3 |
+|---|---|---|
+| Pointer, median / p75 / p90 | 59.0 / 73.2 / 83.6 ms | **45.6 / 51.1 / 53.0 ms** |
+| Key, median / p75 / p90 | 69.1 / 76.5 / 80.2 ms | **61.8 / 64.2 / 78.8 ms** |
+
+Each change alone: the source rate at maximum (engine, fixed level) keys 60 → 57 ms median and 67 → 59 at p75, pointer p75/p90 50/54 → 44/50 ms, moving frames 50.9 → 50.8 dB, device idle 62-64 → 56-59 %; with automatic quality and the LAN detection keys 60 → 55, pointer 43 → 39.5 ms (p90 54 → 47); the input warm-up alone (same engine) pointer to screen 70 → 54 ms median, 93 → 71 p90, keys unchanged.
+
+### Decisions (worth revisiting)
+
+- `lanPathRTT` 30 ms: generous for Wi-Fi (lowest of a minute 6-9 ms here), and only to the device's own subnet: a routed private network (a site-to-site WAN, a VLAN behind the home router) keeps the 8 ms test, as before.
+- Source-rate encoding only at the top level, only on a LAN and only with D18; the pixel-rate bound is the encoder's nominal 1080p60, not measured at 1080p90/120.
+- The warm-up draws at most 20 frames a second for a second after input; idle without input it draws nothing.
+- Pointer moves keep one retransmission.
+
+### Open
+
+- Frame pacing on a LAN stays off and untested (now including home Wi-Fi).
+- The probe needs its window on screen; a fullscreen app on another Space silently turns every sample into a miss.
 
 ## Appendix A: Key sources
 

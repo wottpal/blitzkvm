@@ -27,6 +27,8 @@ The slow-link work (engineering plan §32, release 0.2.5) left LAN sessions unch
 
 **Ship if:** key and pointer get at least 3 ms faster (median), moving frames lose less than about 1 dB, and the device keeps headroom.
 
+**Status (engineering plan §34):** shipped in 0.3.3 at maximum on a LAN, up to 1080p60's pixel rate. At 1456×920, 90 Hz over Wi-Fi: keys 3 ms faster (median, 8 ms at p75), pointer moves 4-6 ms at p75-p90, moving frames 0.1-0.2 dB lower, device idle 56-59 % instead of 62-64 %.
+
 ## 2. The app's decode → screen tail
 
 **Seen:** on a ProMotion MacBook under heavy motion, decode → on screen had a p90 of 43 ms. Rendering started about 26 ms late in one frame of ten (median 0.7 ms). Pointer samples showed the presented frame up to about 400 ms after the decoded one (p90), with either helper. Still pages showed none of it.
@@ -35,7 +37,7 @@ The slow-link work (engineering plan §32, release 0.2.5) left LAN sessions unch
 
 **Scope:** this is network-independent, so it would help the LAN and every other link. It is the follow-up session "Investigate the app's decode-to-screen latency tail".
 
-**Status (engineering plan §33):** the pointer's tail was macOS dropping the first present after an idle stretch; the app now draws such a frame again (pointer → screen p90 421 → 141 ms). The 43 ms p90 under heavy motion did not come back on the emulator (display → presented p90 18 ms). A display-link hint made scrolling worse and was dropped.
+**Status (engineering plan §33):** the pointer's tail was macOS dropping the first present after an idle stretch; the app now draws such a frame again (pointer → screen p90 421 → 141 ms). Since 0.3.3 input also keeps the window presenting for a second (§34): pointer → screen over Wi-Fi 70 → 54 ms median, 93 → 71 p90. The 43 ms p90 under heavy motion did not come back on the emulator (display → presented p90 18 ms). A display-link hint made scrolling worse and was dropped.
 
 **Test:** reproduce on the emulator with timing per render step (`BLITZKVM_GPU_TIMING=1`). Ship only a change that improves presented-ms p90 without touching the text upscaler's output (its GPU tests are bit-exact).
 
