@@ -89,6 +89,11 @@ class VideoView: NSView {
         var largeChange = false
         var lastLargeChange: CFTimeInterval?
         var renderPending = false
+        /// Renders so far, and how often the frame `representSerial` was
+        /// drawn again because the window server dropped it.
+        var renders: UInt64 = 0
+        var representSerial: UInt64 = 0
+        var represents = 0
         var presented = 0
         var unchanged = 0
         /// The last frame went through the text upscaler.
@@ -201,6 +206,8 @@ class VideoView: NSView {
     /// through FSR; typing and the pointer go through the upscaler directly.
     private static let largeChangeShare = 0.1
     private static let sharpenDelay: CFTimeInterval = 0.1
+    /// How often a frame whose drawable was dropped is drawn again.
+    private static let maxRepresents = 3
 
     private static let shaderSource = """
     #include <metal_stdlib>
@@ -802,9 +809,28 @@ class VideoView: NSView {
         let drawable = size.width > 0 && size.height > 0 ? metalLayer.nextDrawable() : nil
         let s = state.withLock { s -> State in
             s.renderPending = false
+            s.renders &+= 1
             return s
         }
         guard let drawable, s.drawableSize == size, let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        // After a pause, the window server sometimes drops the first drawable
+        // presented (presentedTime 0) and keeps showing the one before; with
+        // no newer frame, the change stayed off screen until the next one
+        // (a pointer move on a still screen: about 340 ms, in a third of
+        // the moves). It is drawn again then, a few times at most (a window
+        // that is not on screen has every drawable dropped).
+        let renderID = s.renders, renderSerial = s.frameSerial
+        drawable.addPresentedHandler { [weak self] d in
+            guard d.presentedTime == 0, let self else { return }
+            let again = self.state.withLock { s -> Bool in
+                guard s.renders == renderID, s.frame != nil else { return false }
+                if s.representSerial != renderSerial { (s.representSerial, s.represents) = (renderSerial, 0) }
+                guard s.represents < Self.maxRepresents else { return false }
+                s.represents += 1
+                return true
+            }
+            if again { self.redraw() }
+        }
         timeline.drawable = CACurrentMediaTime()
         let layout = encode(s, into: drawable.texture, commandBuffer: commandBuffer)
         let upscaled = state.withLock { $0.textUpscaling }
