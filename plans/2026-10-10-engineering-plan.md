@@ -710,6 +710,7 @@ The independent review (`plans/2026-10-10-engineering-plan-review.md`, merged in
 | 2026-10-10 | HTTPS: pin the device CA the chain is signed up to, on first use; publicly trusted devices pin to public trust |
 | 2026-10-10 | Serial console is line-based (Return sends the line + device terminator), not a full terminal emulator |
 | 2026-10-12 | The app is **BlitzKVM**: bundle ID `xyz.scio.blitzkvm`, Go module and repository `github.com/wottpal/blitzkvm`, helper `blitzkvm-engine`, legacy client `blitzkvm-legacy`, app-side environment variables `BLITZKVM_*`. The device, its firmware and its protocol keep the JetKVM name. Settings, the device library, the Keychain service and the Accessibility and Local Network grants start fresh under the new bundle ID |
+| 2026-10-18 | Every quality level encodes up to 60 fps (minimal and low were 15 and 30); off a LAN the encoder's peak follows the measured rate, at 0.55× when the JetKVM runs Tailscale itself (§32) |
 
 ## 18. PM to-dos
 
@@ -1513,6 +1514,87 @@ On stock firmware this cost at most 0.5 s, its GOP. The fork sends keyframes onl
 - On the device through `lte-congested` the governor started at "balanced", not "low" as on the emulator: check its start rate on real cellular links.
 - Temporal SVC (TSVC2) so a lost top-layer frame needs no keyframe (VideoToolbox can't recover via intra refresh or recovery-point SEI).
 - The device send path (0.45 ms a packet) still bounds large frames.
+
+## 32. Slow links over Tailscale: latency first (2026-10-18)
+
+**Ask (PM):** away from home, over Tailscale on an ordinary connection, automatic quality settles on the lowest level and clicks and pointer moves lag. Cut latency while keeping quality (small compromises allowed); leave the LAN modes alone unless a change is strictly better there.
+
+**Setup:** the client Mac (M4 Max) on hotel-grade Wi-Fi (24 Mbit/s down, 338 ms round trip under load), the JetKVM at home running Tailscale itself (`tailscaled` on the device, a direct path, 38 ms round trip), Match Window at 1456×920, 90 Hz.
+
+**Method:**
+- A UDP probe on the device (paced streams and packet trains to the Mac over Tailscale), per-process CPU from `/proc` (also every 100 ms), and `tailscale debug --cpu-profile`.
+- The latency probe against `tools/latency-probe/latency_motion.html`: the quality pattern scrolls behind the probe square for 2 s every 6 s, so a third of the samples land in heavy motion. `tools/quality-bench/motion_score.py` scores recordings of it (PSNR-Y of moving frames and of the picture each still phase settles at).
+- `keylog_server.py` on the target logs when each key reaches the browser, to tell the input's delay from the picture's.
+- An engine build that traced every RTP packet and the governor's inputs, and recorded the stream the app decoded (not committed).
+
+### Findings
+
+| # | Finding | Evidence |
+|---|---|---|
+| T1 | The path carries about 9 Mbit/s sustained (a queue builds from about 6) and takes bursts of 120 packets at about 15 Mbit/s without loss | UDP probe from the device |
+| T2 | `tailscaled` on the JetKVM costs about 1.1 ms of the single core per 1,200-byte packet, 12 % of the CPU per Mbit/s, against 0.45 ms for the rest of the send path (pion, SRTP). Its cipher is already NEON assembly (83 µs a packet); the rest is syscalls and Go's scheduler | CPU at paced rates (13 % at 1, 48 % at 4, 68 % at 6 Mbit/s); profile |
+| T3 | On a still screen at 60 fps the device already spends about 30 % of its CPU (video process 14, `tailscaled` 9, app 6; 18 % at 30 fps, 39 % at 90). Scrolling at balanced (peaks to 3.9 Mbit/s) leaves it 0 % idle for 1.2-1.4 s of every 2 s burst, and saturated, the stream stalls for 100-300 ms, then bursts | 100 ms CPU samples; packet trace |
+| T4 | Input is not the slow part: under load, keys reach the target's browser within 0-7 ms of the fastest, and it handles them in 2-5 ms. The whole tail is in the picture's path | key log against the probe's send times |
+| T5 | The governor started from the session's first keyframe, which the device sends while it sets up the session (1.4-2.9 Mbit/s over a path that then measured 3.7): it started at minimal. There, frames rarely reach the 8 packets a rate sample needed, the 100 KB of evidence never came again, and it never stepped up | trace: 21 frames of 8+ packets in 80 s |
+| T6 | The lower levels' frame rate caps cost latency: key → decoded with scroll bursts, minimal (15 fps) 117-127 ms median, low (30 fps) 110 ms; at the source rate 89 and 93 ms | probe at fixed levels |
+| T7 | Every live frame rate change costs a keyframe (firmware D06: the GOP length in frames changes): 68 KB here, and the still refresh's 135 KB half a second later. The ladder's 60 → 30 → 15 fps steps sent them into links that were already congested | `maxFps` flips on a still page |
+| T8 | Capping balanced's peak keeps its sharpness and loses the tail: at a 2 Mbit/s cap 40.4 / 52.6 dB (moving / still) and 97 / 138 ms (key → decoded, median / p90), against 42.7 / 52.6 dB and 96 / 258 ms uncapped; 2.5 Mbit/s already 195 ms p90 | cap sweep, scored recordings |
+| T9 | Off a LAN the still-refresh budget set balanced's still QP to its QP floor, which also turns the client's region refreshes off: a still picture after scrolling stayed at 44 dB, against about 50 refreshed | scored recordings |
+| T10 | Pointer moves load the device more than expected: with `maxRetransmits: 0` pion abandons every message as it sends it and follows it with a FORWARD-TSN, so a move on the unreliable channel cost four packets through `tailscaled` (and the app's SCTP and HID work). About 100 moves a second took the device's app and `tailscaled` from 16 % to 71 % of its CPU, enough to stall the picture | SCTP trace (206 moves: 205 abandoned, 298 FORWARD-TSNs); tunnel packet counters; CPU |
+
+### Changes (engine, app tooling)
+
+- **Every level encodes up to 60 fps** (minimal and low were 15 and 30). Levels now differ in bitrate and QP only, so changing level costs no keyframe.
+- **Peak follows the link off a LAN:** the encoder's peak bitrate (and its target, where higher) is held at 0.9× the measured delivery rate, or 0.55× when the JetKVM itself is the Tailscale peer (the selected pair's remote address is a Tailscale node's own address; a subnet router's 4via6 addresses are not). It changes on a 25 % difference, at most every 5 s (each change restarts the encoder's rate control). A LAN keeps 1.5× the target, except a path through Tailscale on the JetKVM, whose CPU cost is per packet whatever the round trip.
+- **Device tunnel:** such a path starts no higher than balanced.
+- **Rate evidence:** the delivery rate leaves out the stream's first 0.5 s (the session's first keyframe; a longer warm-up kept new sessions at their first guess longer, and over the emulated DERP relay balanced then overran the relay's queue), counts frames of 4 packets or more (over Tailscale, 4-7-packet frames measured the same rate as larger ones, and at minimal they keep coming: 463 in 80 s), and needs 5 frames and 40 KB instead of 100 KB.
+- **Pointer (client):** absolute moves go on the unreliable channel with one retransmission instead of none (no FORWARD-TSN per message; a lost last position arrives after all, while a lost move holds the ones behind it for about 1.25 round trips instead of about one), and off a LAN at most 60 a second, the newest last. A button change never waits and sends a waiting move first; wheel and relative reports do too. About 100 moves a second now cost the device 41 % instead of 71 %.
+- **Region refreshes stay on:** with the client planning refreshes, a level's still QP off a LAN path goes no higher than one below its floor (minimal keeps its refresh off; a LAN path, where the client also sends whole-frame refreshes, keeps the budget's verdict).
+- **Emulator:** an encoder with its peak at its target codes at the target (CBR); the model coded such frames at its coarsest.
+- **Tools:** the latency probe's window floats and lets the pointer pass through (so do self-tests'), the probe counts as a test run (no library or update checks; it reads a saved device's password), `--quality` sets the level for a window, and the report has each sample's send time (`sent_unix`). `latency_motion.html`, `keylog_server.py`, `motion_score.py`.
+
+### Results
+
+Over Tailscale with scroll bursts, automatic quality, in the app (80 samples each; BENCHMARKS.md has the tables):
+
+| | Before | After |
+|---|---|---|
+| Key → decoded, median / p90 | 107.8 / 194 ms | **98.0 / 124 ms** |
+| Key → screen, median / p90 | 120.9 / 206 ms | **112.2 / 156 ms** |
+| Levels | high, minimal (from the first keyframe), low, balanced | balanced, low, balanced; peak 1.8-2.4 Mbit/s |
+| PSNR-Y moving / still | 41.7 / 43.5 dB | 40.1 / 44.4 dB |
+
+Repeated with the final build, interleaved with the old helper (60 samples each): after 92 / 110, 93 / 127, 99 / 130 and 98 / 133 ms; before 133 / 156 ms (stuck at minimal) and 99 / 212 ms. At fixed levels the frame rate alone: minimal 117 → 89 ms, low 110 → 93 ms (median), for 1.5-2 dB on moving frames. On a still page key → decoded stays 85 ms; a single pointer move 68 → 70 ms (noise).
+
+Emulator (`TestSlowLinkBenchmark`, scrolling content, median of 3 runs of 60 s, both builds with the corrected encoder model):
+
+| Profile | Frames | Delay excess p95 / p99 | Longest / total freeze |
+|---|---|---|---|
+| LAN (no impairment) | 3598 → 3597 | 17 / 92 → 18 / 92 ms | none |
+| LTE | 3585 → 3587 | 27 / 154 → 28 / 155 ms | none |
+| LTE, congested | 1783 → 3579 | 365 / 670 → 259 / 691 ms | 888 / 3296 → 832 / 3206 ms |
+| Hotel Wi-Fi | 1862 → 3580 | 91 / 251 → 78 / 155 ms | 503 → 504 ms |
+| Tailscale DERP relay | 1078 → 3449 | 95 / 513 → 54 / 420 ms | 1316 / 1316 → 326 / 653 ms (keyframe waits 1 → 0) |
+
+### Independent review (one round)
+
+**Accepted and fixed:** the floating probe window passed the operator's pointer and clicks to the target (it and self-test windows now ignore the mouse); the wheel could overtake a waiting pointer move (wheel and relative reports send it first); a device tunnel at LAN round trips started at balanced without a cap (the cap now applies); the client's and the governor's ideas of a LAN differed, so on a LAN path at a longer round trip the region-refresh change would have re-enabled whole-frame refreshes the budget had ruled out (the governor now knows the path); lowering the start level for a device tunnel found later was not applied, and a sample without a selected pair flipped the tunnel flag; 4via6 addresses counted as the device's own; a release dropped the drag's last waiting move; `--quality` took any word; the probe could no longer use a saved password; the first rated sample was applied in two steps; the emulator change had no test; stale comments and an overclaim ("can't queue at any level": keyframes and refreshes are not held to the cap).
+
+**Not adopted:** keeping 15 and 30 fps for manual low and minimal on a LAN (one ladder, no keyframe per level change; LAN automatic quality stays at maximum anyway); a 3-packet rate threshold (4 keeps the samples consistent, and minimal at 60 fps still produced them).
+
+### Decisions (worth revisiting)
+
+- The ladder's frame rate caps are gone (§21 had lowered the frame rate before the bitrate, for sharper moving frames): moving frames lose 1.5-2 dB at minimal and low; every change shows 20-30 ms sooner. This also applies on a LAN when someone picks low or minimal, or automatic quality steps down there.
+- `deviceTunnelShare` 0.55 is measured on one device, one Tailscale version (1.104.1) and one mode (1456×920 at 90 Hz, 60 fps). A faster `tailscaled` or a direct path would let it rise.
+- On a LAN, automatic quality, the peak (1.5× the target) and the pointer's rate are unchanged; pointer moves use one retransmission everywhere.
+
+### Open
+
+- **A direct path for the video.** With Tailscale on the JetKVM, WireGuard costs more CPU than the rest of the send path (T2), and the device's CPU, not the internet, caps the stream at about 2-2.5 Mbit/s. A WebRTC path beside the tunnel (STUN on both ends; signalling stays on Tailscale, the media is DTLS-SRTP anyway) would roughly triple the headroom. Both ends here map endpoint-independently (Tailscale's `netcheck`), so hole punching should work. It needs the firmware to take STUN servers for local sessions (today only cloud sessions do), ICE in the engine that prefers the direct pair, and a fallback to the tunnel.
+- **Firmware:** a GOP counted in the channel's frames, so a frame rate change no longer costs a keyframe; frame dropping by bit budget (a leaky bucket in the capture loop), so small changes always go out at the full rate while heavy motion drops frames instead of queueing.
+- **Client:** under heavy motion, decode → on screen has a p90 of 43 ms on this Mac (render start waits 26 ms in one frame of ten); still pages show none of it. To investigate on its own; it affects every link.
+- **Client, pointer:** the latency probe's pointer samples showed the presented frame up to 400 ms after the decoded one (p90), with either helper; investigate with the render tail above.
+- **Region refreshes off a LAN in pieces:** after a long pause the client refreshes everything that changed at once (about 100 KB for a full frame at balanced); in thirds, a keystroke would wait at most a third as long.
 
 ## Appendix A: Key sources
 

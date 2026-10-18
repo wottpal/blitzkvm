@@ -28,6 +28,7 @@ What BlitzKVM and its firmware measure on real hardware: input latency, picture 
 | Bandwidth | A still screen | 1.4 Mbit/s | **0.07 Mbit/s** |
 | Motion | Scrolling 1080 px/s | 42.4 dB (QP floor 24; stock can't be scored while scrolling) | **48.5 dB at 60 fps** |
 | Slow links | Hotel Wi-Fi profile: dropped frames / keyframe requests per minute | 283 / 12 | **20 / 0** |
+| Slow links | Key → decoded over Tailscale with Tailscale on the JetKVM, scrolling now and then (median / p90) | 107.8 / 194 ms | **98.0 / 124 ms** |
 | Input | Input stuck after a 3 s network hiccup | +3.5 s, up to 60 s | **≤ 0.7 s** |
 | Audio | Device CPU and traffic while the target is silent | — | **0.1 %, no packets** |
 
@@ -138,15 +139,17 @@ With bandwidth to spare, 60 fps costs almost nothing in sharpness; when it is ti
 | 1 | 45.3 dB at 4.2 Mbit/s | 46.8 dB at 2.4 Mbit/s |
 | 2 | 46.5 dB at 6.0 Mbit/s | 47.2 dB at 2.3 Mbit/s |
 
-So the automatic quality ladder (`pkg/session/autoquality.go`) lowers the frame rate before it lowers sharpness:
+The automatic quality ladder (`pkg/session/autoquality.go`) used to lower the frame rate before sharpness (low 30 fps, minimal 15). Over Tailscale that delayed every change by up to a frame (a key: 117 ms at 15 fps against 89 ms at the source rate, median), and every frame rate change cost a keyframe, so since 2026-10-18 every level encodes up to 60 fps ([below](#over-tailscale-on-the-jetkvm)):
 
 | Level | Bitrate factor | fps | QP floor | Still refresh QP |
 |---|---|---|---|---|
 | maximum | 3 (≈11 Mbit/s at 1080p) | 60 | 10 | 1 |
 | high | 2 | 60 | 14 | 4 |
 | balanced | 1 | 60 | 18 | 8 |
-| low | 0.5 | 30 | 21 | 17 |
-| minimal | 0.25 | 15 | 26 | off |
+| low | 0.5 | 60 | 21 | 17 |
+| minimal | 0.25 | 60 | 26 | off |
+
+Off a LAN the encoder's peak follows the measured delivery rate (0.9× it, 0.55× with Tailscale on the JetKVM), and the still refresh QP the rate's budget.
 
 ## Slow links
 
@@ -172,6 +175,63 @@ Changes: AES-128-CM SRTP, an 8192-packet replay window, NACK repeats paced by th
 Through the same link model, the real device measured key → screen at 78 ms (no impairment), 122 ms (LTE), 186 ms (hotel Wi-Fi) and 192 ms (DERP relay).
 
 **Input after a network hiccup:** keyboard, pointer and RPC share one SCTP association, whose retransmission timeout doubles on every miss up to 60 s, so after a hiccup the picture came back at once while input waited out the timer. Dropping all traffic for 3.3 s every 20 s, input stayed stuck 3.5 s longer than video with pion's default; with the timeout capped at 1 s on both ends (engine, firmware D09), 0.7 s.
+
+### Over Tailscale, on the JetKVM
+
+Measured 2026-10-18 from a MacBook (M4 Max) on hotel-grade Wi-Fi (24 Mbit/s down, 338 ms under load) to the JetKVM at home, with Tailscale installed on the JetKVM (`tailscaled` 1.104.1, a direct path, 38 ms round trip), Match Window at 1456×920, 90 Hz. The target showed `latency_motion.html`: the quality pattern scrolls behind the probe's square for 2 s every 6 s, so a third of the samples land in heavy motion. Key → decoded, 40–80 samples per row.
+
+**The JetKVM's CPU is the bottleneck, not the internet.** The path carried about 9 Mbit/s sustained (a UDP probe from the device), but every packet of the picture also passes WireGuard in `tailscaled` on the device's single core:
+
+| Measure | Value |
+|---|---|
+| `tailscaled` CPU per 1,200-byte packet | about 1.1 ms (12 % of the core per Mbit/s); the rest of the send path (pion, SRTP) 0.45 ms |
+| Device CPU on a still screen at 60 fps | about 30 % (video process 14, `tailscaled` 9, app 6); 18 % at 30 fps, 39 % at 90 |
+| Scrolling at balanced (peaks to 3.9 Mbit/s) | 0 % idle for 1.2–1.4 s of every 2 s burst; the stream stalls 100–300 ms, then bursts |
+| Keys reaching the target under that load | within 0–7 ms of the fastest; the delay is all in the picture |
+
+**Frame rate and peaks, fixed levels:**
+
+| Level | fps | Peak | Key → decoded, median / p90 | PSNR-Y moving / still |
+|---|---|---|---|---|
+| minimal | 15 | 1.3 Mbit/s | 117–127 / 145–167 ms | 34.8 / ~37 dB |
+| minimal | source (90) | 1.3 Mbit/s | 89 / 100 ms | 33.0 / ~37 dB |
+| low | 30 | 2.2 Mbit/s | 110 / 141 ms | 38.3 / 49.6 dB |
+| low | source (90) | 2.2 Mbit/s | 93 / 115 ms | 36.8 / 49.5 dB |
+| balanced | 60 | 3.9 Mbit/s | 96 / 258 ms | 42.7 / 52.6 dB |
+| balanced | 60 | 2.5 Mbit/s | 99 / 195 ms | |
+| balanced | 60 | 2.0 Mbit/s | 97 / 138 ms | 40.4 / 52.6 dB |
+| high | 60 | 7.3 Mbit/s | 103 / 813 ms | 48.7 / 53.2 dB |
+
+PSNR from recordings through the engine with the device's own still refresh; "still" is the picture each still phase settles at. A live frame rate change also cost a keyframe (68 KB here, then the still refresh's 135 KB).
+
+**Automatic quality, in the app** (80 samples; the probe types every 1.1 s, so the long-pause refresh never comes in either run):
+
+| | Before | After |
+|---|---|---|
+| Key → decoded, median / p90 | 107.8 / 194 ms | **98.0 / 124 ms** |
+| Key → screen, median / p90 | 120.9 / 206 ms | **112.2 / 156 ms** |
+| Levels | high, then minimal from the session's first keyframe (1.6 Mbit/s), low, balanced | balanced, low, balanced; peak 1.8–2.4 Mbit/s |
+| PSNR-Y moving / still | 41.7 / 43.5 dB | 40.1 / 44.4 dB |
+
+Before, the governor took the rate from the session's first keyframe, which the device sends while it sets up the session (1.4–2.9 Mbit/s over a path that then measured 3.7), and at minimal (15 fps) frames rarely reached the 8 packets a rate sample needed, so it could stay there. Changes: every level at up to 60 fps, the peak cap, the rate leaving out the stream's first 0.5 s (its first keyframe) and counting frames of 4+ packets, and region refreshes kept on off a LAN (plan §32). On a still page key → decoded is 85 ms, of which the round trip is 38 ms.
+
+The same changes through the link model (`TestSlowLinkBenchmark`, scrolling content, median of 3 runs of 60 s; the emulator models a network bottleneck, not the device's CPU; both builds with its encoder model corrected for a peak at the target):
+
+| Profile | Frames | Delay excess p95 / p99 | Longest / total freeze |
+|---|---|---|---|
+| LAN (no impairment) | 3598 → 3597 | 17 / 92 → 18 / 92 ms | none |
+| LTE | 3585 → 3587 | 27 / 154 → 28 / 155 ms | none |
+| LTE, congested | 1783 → 3579 | 365 / 670 → 259 / 691 ms | 888 / 3296 → 832 / 3206 ms |
+| Hotel Wi-Fi | 1862 → 3580 | 91 / 251 → 78 / 155 ms | 503 → 504 ms |
+| Tailscale DERP relay | 1078 → 3449 | 95 / 513 → 54 / 420 ms | 1316 / 1316 → 326 / 653 ms (keyframe waits 1 → 0) |
+
+**Pointer moves cost the device more than the picture's packets.** Each absolute move is a message on the unreliable data channel. With `maxRetransmits: 0`, pion abandons every message as it sends it and follows it with a FORWARD-TSN, so one move cost about four packets through `tailscaled`. The app now sends moves with one retransmission and, off a LAN, at most 60 a second (the device encodes at most 60 fps; button changes go at once). Moving the pointer continuously, cursor hidden, balanced on a still screen:
+
+| Pointer moves | Device tunnel packets in / out per s | Device CPU, app + `tailscaled` |
+|---|---|---|
+| none | 3 / 63 | 16 % |
+| about 40 a second, before / after | 108 / 130 → 45 / 84 | 54 → 35 % |
+| about 100 a second, before / after | 225 / 173 → 62 / 93 | 71 → 41 % |
 
 ## Audio
 
