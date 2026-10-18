@@ -29,6 +29,7 @@ What BlitzKVM and its firmware measure on real hardware: input latency, picture 
 | Motion | Scrolling 1080 px/s | 42.4 dB (QP floor 24; stock can't be scored while scrolling) | **48.5 dB at 60 fps** |
 | Slow links | Hotel Wi-Fi profile: dropped frames / keyframe requests per minute | 283 / 12 | **20 / 0** |
 | Slow links | Key → decoded over Tailscale with Tailscale on the JetKVM, scrolling now and then (median / p90) | 107.8 / 194 ms | **98.0 / 124 ms** |
+| Slow links | Away from home, a JetKVM running Tailscale: quality level and key → screen with scroll bursts (median) | low or minimal, 101.5 ms (via Tailscale) | **high or maximum, 92.5 ms** (direct) |
 | Input | Input stuck after a 3 s network hiccup | +3.5 s, up to 60 s | **≤ 0.7 s** |
 | Audio | Device CPU and traffic while the target is silent | — | **0.1 %, no packets** |
 
@@ -232,6 +233,52 @@ The same changes through the link model (`TestSlowLinkBenchmark`, scrolling cont
 | none | 3 / 63 | 16 % |
 | about 40 a second, before / after | 108 / 130 → 45 / 84 | 54 → 35 % |
 | about 100 a second, before / after | 225 / 173 → 62 / 93 | 71 → 41 % |
+
+### A direct path past Tailscale on the JetKVM
+
+Measured 2026-10-18 as above (the Mac away from home, the JetKVM at home running Tailscale, 1456×920 at 90 Hz), with the BlitzKVM firmware fork.9: the app asks public STUN servers for both ends' internet addresses and ICE connected through both routers at once (30–35 ms round trip; the link then measured 10–14 Mbit/s). The tunnel runs are the same build with Settings › Connection off (`-directPath NO`), interleaved, 30 samples each.
+
+| | Direct (via internet) | Tunnel (via Tailscale) |
+|---|---|---|
+| Key → decoded / screen, still page, median | 78.7 / 88.0 ms | 82.5 / 97.5 ms |
+| Pointer → decoded, still page, median | 68–69 ms | 68 ms |
+| Key → decoded / screen with scroll bursts, automatic quality, median | 85.9 / 92.5 ms | 94.0 / 101.5 ms |
+| Levels with scroll bursts | high, maximum | low, minimal, low |
+| Connect | 1.4–1.6 s | 1.4 s |
+
+**The JetKVM's CPU, motion at high (fixed), 10 s:**
+
+| | Direct | Tunnel |
+|---|---|---|
+| Idle | 58–64 % | 1–11 % |
+| `tailscaled` | 0.3–0.5 % | 39–44 % |
+| The app (pion, SRTP) | 23–28 % | 37–43 % |
+| Frames delivered | 60 fps | 50–54 fps |
+
+Where no direct path works (here forced with an unreachable STUN server), the session connects over Tailscale after 2.8 s instead of 1.4, and the app doesn't try that device on that network again for 30 minutes.
+
+Tailscale's own path changed during the day: after idle stretches it was relayed through DERP (50 ms), and it went direct (33–48 ms) only after some traffic.
+
+### Keyframes on quality changes (firmware D18)
+
+Four live frame rate changes on a still screen (`maxFps` 60 → 30 → 60 → 15 → 60): fork.8 sent a keyframe pair for each (the IDR from the GOP's restart, about 68 KB here, and the still refresh half a second later, about 135 KB); fork.9, whose GOP counts the channel's frames, sends none.
+
+### The app: a dropped first present
+
+After an idle stretch macOS sometimes drops the first frame presented (`presentedTime` 0) and keeps showing the one before; with nothing newer coming, a single pointer move stayed off screen until the next change, about 340 ms later, in a third of the moves. The app now draws such a frame again (at most three times). Pointer → screen on a still page (30 samples): median / p90 82.5 / 421 ms before, 93 / 141 ms after; decoding unchanged at 70 / 80 ms. A 120 Hz display-link hint, tried to keep the display from idling, made scrolling worse (display → presented 42 ms median against 3) and was dropped.
+
+### Frame pacing (firmware D18)
+
+The governor paces frames at 1.25× its peak cap off a LAN. Through the link model (`TestSlowLinkBenchmark`, scrolling content, 30 s, median of 4 runs, seed 11):
+
+| Profile | Delay excess p95 / p99, pacing off | at 1.25× the peak | Frames |
+|---|---|---|---|
+| LTE | 28 / 153 ms | 19 / 81 ms | 1786 → 1755 |
+| LTE, congested | 271 / 601 ms | 261 / 608 ms | 1778 → 1766 |
+| Hotel Wi-Fi | 101 / 249 ms | 98 / 271 ms | 1772 → 1768 |
+| Tailscale DERP relay | 211 / 455 ms | 245 / 477 ms | 1713 → 1678 |
+
+Pacing at 1.0× the peak cut the relay's p95 to 53 ms but froze desktop content after keyframes (hotel Wi-Fi 1.4 s, the relay 1.9 s), most likely where the measured rate ran low. On the device, key → decoded with scroll bursts stayed within noise either way (88–93 ms median).
 
 ## Audio
 

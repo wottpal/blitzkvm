@@ -35,6 +35,8 @@ The slow-link work (engineering plan §32, release 0.2.5) left LAN sessions unch
 
 **Scope:** this is network-independent, so it would help the LAN and every other link. It is the follow-up session "Investigate the app's decode-to-screen latency tail".
 
+**Status (engineering plan §33):** the pointer's tail was macOS dropping the first present after an idle stretch; the app now draws such a frame again (pointer → screen p90 421 → 141 ms). The 43 ms p90 under heavy motion did not come back on the emulator (display → presented p90 18 ms). A display-link hint made scrolling worse and was dropped.
+
 **Test:** reproduce on the emulator with timing per render step (`BLITZKVM_GPU_TIMING=1`). Ship only a change that improves presented-ms p90 without touching the text upscaler's output (its GPU tests are bit-exact).
 
 ## 3. Firmware: drop frames by bit budget instead of an even cap
@@ -47,6 +49,8 @@ The slow-link work (engineering plan §32, release 0.2.5) left LAN sessions unch
 
 **Test:** emulator model and the slow-link benchmark first, then the probe with `BLITZKVM_PROBE_KEYFRAME_LEAD` on the rig. Installing it means a firmware build, a reboot and a new FORK.md divergence.
 
+**Status (engineering plan §33):** in the firmware as D18 (`paceKbps`, fork.9), with the GOP counted in the channel's frames so frame rate changes cost no keyframe. The governor paces only off a LAN; on a LAN it stays off until a LAN A/B on the rig.
+
 ## 4. Lower priority
 
 **Larger RTP packets on the LAN:** pion packetizes at 1,200 bytes and every packet costs the device about 0.45 ms of CPU. Packets closer to the 1,500-byte MTU would mean about 20 % fewer packets for large frames. This needs pion's outbound MTU raised on the device (§31 ruled it out as a constant change inside pion). It should be measured as keyframe send time before it is worth a fork of pion.
@@ -55,4 +59,4 @@ The slow-link work (engineering plan §32, release 0.2.5) left LAN sessions unch
 
 - **Peak bitrate cap:** a LAN's measured rate is the device's send path, not a bottleneck, so a cap would only cost sharpness.
 - **Pacing pointer moves to 60 a second:** the device's CPU is not the limit on a LAN, and pacing holds some moves back by up to 16 ms.
-- **A direct path that bypasses Tailscale:** it only matters when Tailscale runs on the JetKVM.
+- **A direct path that bypasses Tailscale:** it only matters when Tailscale runs on the JetKVM (done, §33).

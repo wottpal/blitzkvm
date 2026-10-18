@@ -711,6 +711,7 @@ The independent review (`plans/2026-10-10-engineering-plan-review.md`, merged in
 | 2026-10-10 | Serial console is line-based (Return sends the line + device terminator), not a full terminal emulator |
 | 2026-10-12 | The app is **BlitzKVM**: bundle ID `xyz.scio.blitzkvm`, Go module and repository `github.com/wottpal/blitzkvm`, helper `blitzkvm-engine`, legacy client `blitzkvm-legacy`, app-side environment variables `BLITZKVM_*`. The device, its firmware and its protocol keep the JetKVM name. Settings, the device library, the Keychain service and the Accessibility and Local Network grants start fresh under the new bundle ID |
 | 2026-10-18 | Every quality level encodes up to 60 fps (minimal and low were 15 and 30); off a LAN the encoder's peak follows the measured rate, at 0.55× when the JetKVM runs Tailscale itself (§32) |
+| 2026-10-18 | A JetKVM reached over its own Tailscale gets a direct path tried, through public STUN servers (on by default, Settings › Connection); off a LAN frames are paced at 1.25× the peak cap on firmware with D18 (§33) |
 
 ## 18. PM to-dos
 
@@ -1595,6 +1596,77 @@ Emulator (`TestSlowLinkBenchmark`, scrolling content, median of 3 runs of 60 s, 
 - **Client:** under heavy motion, decode → on screen has a p90 of 43 ms on this Mac (render start waits 26 ms in one frame of ten); still pages show none of it. To investigate on its own; it affects every link.
 - **Client, pointer:** the latency probe's pointer samples showed the presented frame up to 400 ms after the decoded one (p90), with either helper; investigate with the render tail above.
 - **Region refreshes off a LAN in pieces:** after a long pause the client refreshes everything that changed at once (about 100 KB for a full frame at balanced); in thirds, a keystroke would wait at most a third as long.
+
+## 33. A direct path past the device's Tailscale, frame pacing, the dropped present (2026-10-18)
+
+**Ask (PM):** do the three follow-ups of §32 (a direct path for the video, the firmware's GOP and budget-based frame dropping, the app's decode → screen tail), install the firmware and verify everything end to end, all remotely.
+
+**Setup:** as §32: the client Mac away from home, the JetKVM at home with Tailscale on it, Match Window 1456×920 at 90 Hz. Release candidates of fork.9 went onto the device over Tailscale behind a boot guard that restores the previous build when the new app doesn't answer within 150 s of a boot (now `scripts/fork/install_guard.sh` in the fork, tested on the device in all five of its cases before use).
+
+### Findings
+
+| # | Finding | Evidence |
+|---|---|---|
+| D1 | Tailscale itself was often relayed: after idle stretches `tailscale ping` went through DERP (Frankfurt, 50 ms), and it went direct (33–48 ms) only after a while of traffic. Both NATs map endpoint-independently | `tailscale ping`, `netcheck` on both ends |
+| D2 | With the device offering its public address, ICE found a server-reflexive pair through both NATs at once: 30–35 ms round trip, a measured rate of 10–14 Mbit/s against the tunnel's CPU cap near 2.5 | engine log (`direct path attempt path=internet`), governor log |
+| D3 | Every live `maxFps` change sent a keyframe pair (the IDR, then the still refresh half a second later): MPP restarts the GOP when its length changes, and the GOP counted encoded frames | four flips on a still page: four pairs before, none with the GOP in the channel's frames |
+| D4 | macOS sometimes drops the first drawable presented after an idle stretch (`presentedTime` 0) and keeps showing the one before. With no newer frame the change stayed off screen until the next one, about 340 ms later, in a third of single pointer moves | per-render trace: render queue wait p99 336 ms; 12 of 338 renders never presented |
+| D5 | A 120 Hz display-link hint (to keep the display from idling) made scrolling worse: display → presented 42 ms median against 3 | render trace, the emulator's scroll pattern |
+| D6 | Under the emulator's scrolling, render start waits p99 0.2 ms and display → presented is p90 18 ms; §32's 43 ms p90 did not come back, and the pointer's 400 ms tail was D4 | render trace |
+
+### Changes
+
+- **Direct path (engine `pkg/client/direct.go`, firmware D19):** when the route to the device is a tailnet address and the device is a Tailscale node itself (not a subnet router's LAN or 4via6 address), the offer names public STUN servers (Cloudflare, Google; `BLITZKVM_STUN_SERVERS` replaces them), the client also gathers on its physical default route (not over an exit node or another tunnel), and the device's tailnet candidates are demoted below every other kind (answer SDP and trickled ones). Host pairs, the tunnel's among them, wait 1.5 s before nomination; server- and peer-reflexive ones wait for nothing. A device and network where the tunnel won anyway are not tried again for 30 minutes. Settings › Connection (on by default) and the IPC's `noDirectPath` turn it off. At home with the tailnet name this finds the LAN path too.
+- **Firmware D19:** a local session request may name up to 4 `stun:`/`stuns:` URLs; TURN and anything else is ignored.
+- **Firmware D18:** `paceKbps`, a leaky bucket in the capture loop that leaves due frames out while the encoded bytes run more than 40 ms ahead of it (a frame left out spends its `maxFps` turn: the first build kept the credit, so frames would have burst at the source rate after a pause); and the GOP counted in the channel's frames, so a frame rate change costs no keyframe.
+- **Governor:** with `framePacing`, the pace is `paceOverPeak` (1.25) × the peak cap off a LAN (at most 50,000 kbps), and 0 on a LAN; it is sent with every live level, so a manual level turns it off.
+- **Emulator:** `FramePacing` models D18 (`pacedOut`, `sent`), and the slow-link benchmark runs with it.
+- **App:** a frame whose drawable was dropped is drawn again, at most 3 times, if no newer render followed (`VideoView.render`).
+
+### Results
+
+Over the internet against the tunnel, interleaved, 30 samples each (BENCHMARKS.md has the tables):
+
+| | Direct | Tunnel |
+|---|---|---|
+| Key → decoded / screen, still page, median | 78.7 / 88.0 ms | 82.5 / 97.5 ms |
+| Pointer → decoded, still page, median | 68–69 ms | 68 ms |
+| Key → decoded / screen, scroll bursts, automatic quality, median | 85.9 / 92.5 ms | 94.0 / 101.5 ms |
+| Levels with scroll bursts | high, maximum | low, minimal, low |
+| Device at high with motion: idle, `tailscaled`, fps | 58–64 %, 0.5 %, 60 | 1–11 %, 39–44 %, 50–54 |
+| Connect | 1.4–1.6 s | 1.4 s; 2.8 s where no direct path works |
+
+The dropped present: pointer → screen 82.5 / 421 ms (median / p90) before, 93 / 141 ms after, key → decoded unchanged (70 / 80 ms).
+
+Frame pacing, in the emulator (`TestSlowLinkBenchmark`, 30 s runs, seed 11; scrolling the median of 4, desktop of 2):
+
+| Profile, scrolling | Off | 1.0× the peak | 1.25× the peak |
+|---|---|---|---|
+| LTE: delay excess p95 / p99, frames | 28 / 153 ms, 1786 | 18 / 83 ms, 1746 | 19 / 81 ms, 1755 |
+| LTE, congested: p95 / p99, longest / total freeze | 271 / 601 ms, 705 / 1705 ms | 222 / 560 ms, 1186 / 2303 ms | 261 / 608 ms, 688 / 1681 ms |
+| Hotel Wi-Fi: p95 / p99, freeze | 101 / 249 ms, 605 ms | 99 / 248 ms, 582 ms | 98 / 271 ms, 623 ms |
+| DERP relay: p95 / p99, freeze | 211 / 455 ms, 1302 ms | 53 / 438 ms, 1196 ms | 245 / 477 ms, 853 / 1295 ms |
+
+On desktop content, 1.0× froze hotel Wi-Fi for 1.4 s and the relay for 1.9 / 2.5 s, against none and 0.3 / 0.6 s at 1.25×: most likely where the measured rate ran low, so a keyframe held the frames behind it longer than the link would have. On the device (direct path and tunnel, scroll bursts, automatic quality) key → decoded stayed within noise with pacing on or off (88-93 ms median).
+
+### Independent review (one round)
+
+**Accepted and fixed:** the boot guard probed `/device`, which needs a login on a device with a password (it now probes `/device/status`), counted a corrupt marker as nothing, and reset its count before a crash loop could show (it now waits for a second check 5 minutes later); a check from the device that beat its trickled candidate made that candidate peer-reflexive at full priority, so the tunnel could win (the client no longer sends its own tailnet candidates: the device learns that address from the client's checks); the pace had no ceiling (the firmware takes at most 50,000 kbps); the pacing bucket's clock could step back (both threads read it before the lock); a STUN URL pion can't parse failed the whole session, on the device and with `BLITZKVM_STUN_SERVERS` (both now keep only what pion parses, and no `stuns:`); docs said the direct path needs the BlitzKVM firmware (at home it finds the LAN with any), that its failure cache lasts per network (it lasts per window), and overstated its protection; tests for the settings that keep the tunnel and for the STUN filter; the route probe's code was duplicated; the generated code's protoc header.
+
+**Not adopted:** skipping the attempt on firmware without `stunServers` (at home it still finds the LAN path); a pion virtual-network test of the candidate race (the change removes the race by construction); a D19 model in the emulator (STUN means nothing on loopback).
+
+### Decisions (worth revisiting)
+
+- The direct path is on by default. It tells Cloudflare's and Google's STUN servers both ends' public addresses (README, Privacy); the off switch is in Settings.
+- The fallback costs 1.5 s at connect, once per device and network every 30 minutes; a shorter host wait would race the STUN round trip on slow links.
+- A path through Tailscale relays (DERP) is not distinguished from a direct Tailscale path: both get the attempt.
+- Pacing runs at 1.25× the peak cap off a LAN (the peak is 0.9× the measured rate, so the pace is about 1.1× it): pacing below the link's rate costs more than it saves. Its gain is the tail on LTE; on the device no gain showed in the probe.
+
+### Open
+
+- **LAN:** frame pacing stays off on a LAN, untested there, as do the other LAN candidates (`plans/2026-10-18-lan-improvements.md`): the rig was only reachable remotely.
+- **JetKVM Setup** installs firmware without the boot guard; a remote install from the app could use it.
+- **No-direct networks:** a symmetric NAT on both ends (hotel Wi-Fi, carrier-grade NAT) leaves only the tunnel; a TURN relay would cost the stream a third party.
 
 ## Appendix A: Key sources
 
