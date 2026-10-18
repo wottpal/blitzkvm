@@ -28,6 +28,26 @@ func TestPathKind(t *testing.T) {
 	}
 }
 
+func TestOnLink(t *testing.T) {
+	ip := net.ParseIP
+	cases := []struct {
+		local, remote string
+		want          bool
+	}{
+		// The loopback interface's subnet is 127.0.0.0/8.
+		{"127.0.0.1", "127.0.0.2", true},
+		{"127.0.0.1", "203.0.113.7", false},
+		// No interface has the local address: routed, unless link-local.
+		{"192.0.2.1", "192.0.2.2", false},
+		{"192.0.2.1", "fe80::2", true},
+	}
+	for _, c := range cases {
+		if got := onLink(ip(c.local), ip(c.remote)); got != c.want {
+			t.Errorf("onLink(%s, %s) = %v, want %v", c.local, c.remote, got, c.want)
+		}
+	}
+}
+
 func TestRouteIPs(t *testing.T) {
 	local, remote := routeIPs(context.Background(), "http://127.0.0.1:8080")
 	if len(local) != 1 || !local[0].IsLoopback() || len(remote) != 1 || !remote[0].IsLoopback() {

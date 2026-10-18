@@ -131,16 +131,21 @@ func inTailnet(ip net.IP) bool {
 	return tailscale4.Contains(addr) || tailscale6.Contains(addr)
 }
 
-var tunnelInterfaces sync.Map // local IP string -> bool
+// localInterface is what a local address's interface says about a path.
+type localInterface struct {
+	tunnel bool       // a tunnel interface (utun, tun, wg, ipsec, ppp)
+	subnet *net.IPNet // the address's own subnet; nil if no interface has it
+}
 
-// isTunnelInterface reports whether ip belongs to a tunnel interface (utun,
-// tun, wg, ipsec, ppp), cached per address.
-func isTunnelInterface(ip net.IP) bool {
+var localInterfaces sync.Map // local IP string -> localInterface
+
+// interfaceOf looks up the interface that has ip, cached per address.
+func interfaceOf(ip net.IP) localInterface {
 	key := ip.String()
-	if v, ok := tunnelInterfaces.Load(key); ok {
-		return v.(bool)
+	if v, ok := localInterfaces.Load(key); ok {
+		return v.(localInterface)
 	}
-	tunnel := false
+	var found localInterface
 	if ifaces, err := net.Interfaces(); err == nil {
 		for _, iface := range ifaces {
 			addrs, err := iface.Addrs()
@@ -150,13 +155,24 @@ func isTunnelInterface(ip net.IP) bool {
 			for _, a := range addrs {
 				if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
 					name := iface.Name
-					tunnel = iface.Flags&net.FlagPointToPoint != 0 ||
+					found.subnet = n
+					found.tunnel = iface.Flags&net.FlagPointToPoint != 0 ||
 						strings.HasPrefix(name, "utun") || strings.HasPrefix(name, "tun") ||
 						strings.HasPrefix(name, "wg") || strings.HasPrefix(name, "ipsec") || strings.HasPrefix(name, "ppp")
 				}
 			}
 		}
 	}
-	tunnelInterfaces.Store(key, tunnel)
-	return tunnel
+	localInterfaces.Store(key, found)
+	return found
+}
+
+// isTunnelInterface reports whether ip belongs to a tunnel interface.
+func isTunnelInterface(ip net.IP) bool { return interfaceOf(ip).tunnel }
+
+// onLink reports whether remote lies in the subnet of local's interface: no
+// router between the two.
+func onLink(local, remote net.IP) bool {
+	subnet := interfaceOf(local).subnet
+	return remote.IsLinkLocalUnicast() || subnet != nil && subnet.Contains(remote)
 }

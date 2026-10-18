@@ -59,9 +59,10 @@ import (
 // doubles when the link flaps between two levels. Off a LAN, the still
 // refresh (the largest burst the device sends) is coded coarser, or not
 // sent, when the measured rate would take longer than refreshBudget to
-// deliver it. On a LAN (a round trip under lanRTT) the measured rate is the
-// device's send path, not a limit, so only a real queue or loss leaves
-// maximum.
+// deliver it. On a LAN (onLAN: a round trip under lanRTT, or a Wi-Fi or
+// Ethernet one to the device's subnet) the measured rate is the device's
+// send path, not a limit, so only a real queue or loss leaves maximum, and
+// maximum encodes every captured frame (sourceRatePixels).
 //
 // On firmware with the desktop encoder patch (setVideoEncoderParams) a level
 // is applied live, without restarting the encoder: bitrate, QP floor, encode
@@ -80,7 +81,7 @@ import (
 type QualityLevel struct {
 	Name   string
 	Factor float64 // setStreamQualityFactor: 1 = the web UI's "High" (4 Mbit/s target at 1080p)
-	MaxFPS int     // encode frame rate cap; 0 = source rate (patched firmware)
+	MaxFPS int     // encode frame rate cap; 0 = the source rate (patched firmware)
 	MinQP  int     // QP floor (patched firmware); lower = sharper, larger keyframes
 	// StillQP is the QP of the keyframe the patched firmware sends once the
 	// screen has been still for half a second; >= MinQP turns it off.
@@ -106,11 +107,12 @@ type QualityLevel struct {
 //   - The bitrate sets quality while the screen moves: scrolling 1080 px/s
 //     gives 49.8 dB at ~8 Mbit/s (factor 3, QP 10) and 46.9 dB at 4.2 Mbit/s
 //     (factor 1, QP 16).
-//   - Every level encodes up to 60 fps. A lower rate gives each moving frame
-//     more bits (+1.5-2 dB while scrolling at low and minimal), but every
-//     change, a key's echo or the pointer, waits for the next encoded frame:
-//     over Tailscale with scrolling, a key took 117 ms at 15 fps and 89-93
-//     ms at 60 or more (median). And a live frame rate change cost a keyframe
+//   - Every level encodes up to 60 fps (maximum on a LAN every captured
+//     frame, params). A lower rate gives each moving frame more bits
+//     (+1.5-2 dB while scrolling at low and minimal), but every change, a
+//     key's echo or the pointer, waits for the next encoded frame: over
+//     Tailscale with scrolling, a key took 117 ms at 15 fps and 89-93 ms at
+//     60 or more (median). And a live frame rate change cost a keyframe
 //     before firmware D18, so levels that differ only in bitrate and QP
 //     change for free on any firmware.
 var qualityLadder = []QualityLevel{
@@ -171,8 +173,24 @@ const (
 	// restarts the encoder's rate control (firmware D07).
 	peakChange = 0.25
 	peakHold   = 5 * time.Second
-	// lanRTT is the round trip below which the link is a LAN.
-	lanRTT = 8 * time.Millisecond
+	// lanRTT is the round trip below which the link is a LAN. A LAN path to
+	// the device's own subnet (client.StatsSnapshot.PathOnLink) is one too
+	// while its lowest round trip stays below lanPathRTT: Wi-Fi's power save
+	// and retries keep it above lanRTT (5-35 ms at home, its lowest of a
+	// minute 6-9 ms) though the device's send path is still what limits it.
+	lanRTT     = 8 * time.Millisecond
+	lanPathRTT = 30 * time.Millisecond
+	// sourceRatePixels bounds the pixel rate at which the top level encodes
+	// every captured frame on a LAN, on firmware where a frame rate change
+	// costs no keyframe (D18, with frame pacing): the encoder's own, 1080p60;
+	// the ladder caps the rest at 60 fps. At 1456×920, 90 Hz over Wi-Fi,
+	// keys showed 3 ms sooner (median; 8 ms at p75) and pointer moves 4-6 ms
+	// at p75-p90, moving frames lost 0.1-0.2 dB and the device kept 56-59 %
+	// idle.
+	sourceRatePixels = 1920 * 1080 * 60
+	// baseWindow is how far back the round trip's baseline (its lowest)
+	// looks.
+	baseWindow = time.Minute
 	// refreshBudget is the longest the still refresh may hold the link off
 	// a LAN: the frames behind it (the echo of the next keystroke) wait as
 	// long. On a LAN the device's own send path takes 110-140 ms for it.
@@ -210,27 +228,38 @@ type qualityGovernor struct {
 	peakKbps      int // the encoder's peak cap on this link, 0 = none
 	paceKbps      int // the frame pacing on this link, 0 = none
 	peakAt        time.Time
-	framePacing   bool // the firmware paces frames (client.FeatureFramePacing)
-	deviceTunnel  bool // the JetKVM runs WireGuard itself (setPath)
-	lanPath       bool // the path is a LAN (setPath): the client may refresh whole frames
-	clientRefresh bool // the client plans still refreshes (Config.ClientRefresh, D13)
-	width, height int  // the video's, for the levels' bitrates and keyframes
+	framePacing   bool   // the firmware paces frames (client.FeatureFramePacing)
+	deviceTunnel  bool   // the JetKVM runs WireGuard itself (setPath)
+	lanPath       bool   // the path is a LAN (setPath): the client may refresh whole frames
+	onLink        bool   // the path is a LAN to the device's subnet (setPath, lanPathRTT)
+	path          string // the path's kind and remote address (setPath)
+	pathRemote    string
+	clientRefresh bool    // the client plans still refreshes (Config.ClientRefresh, D13)
+	width, height int     // the video's, for the levels' bitrates and keyframes
+	sourceFPS     float64 // the video's frame rate
 	lastChange    time.Time
+	started       time.Time // the start level's lastChange: no step since (observe)
 	lastUp        time.Time
 	lastDown      time.Time
 	baseUp        time.Duration
 	upDelay       time.Duration
 	cleanSince    time.Time
-	baseRTT       time.Duration
-	baseAt        time.Time
+	baseRTT       time.Duration // the lowest of rtts
+	rtts          []rttSample   // the round trips of the last baseWindow
 	congestedN    int
 	prev          client.StatsSnapshot
 	havePrev      bool
 }
 
+type rttSample struct {
+	at  time.Time
+	rtt time.Duration
+}
+
 func newQualityGovernor(now time.Time, rtt, baseUp time.Duration) *qualityGovernor {
 	// No change yet: the first step down may come at once.
-	g := &qualityGovernor{cleanSince: now, baseUp: baseUp, upDelay: baseUp, baseRTT: rtt, baseAt: now}
+	g := &qualityGovernor{cleanSince: now, baseUp: baseUp, upDelay: baseUp}
+	g.noteRTT(now, rtt)
 	// Until the link's rate is measured: maximum on a LAN, high on a short
 	// round trip, balanced elsewhere.
 	switch {
@@ -250,20 +279,31 @@ func newQualityGovernor(now time.Time, rtt, baseUp time.Duration) *qualityGovern
 func (g *qualityGovernor) params() QualityLevel {
 	l := qualityLadder[g.level]
 	l.StillQP, l.PeakKbps, l.PaceKbps = g.stillQP, g.peakKbps, g.paceKbps
+	if g.level == len(qualityLadder)-1 && g.onLAN() && !g.deviceTunnel && g.framePacing &&
+		g.width > 0 && g.height > 0 && g.sourceFPS > float64(l.MaxFPS)+1 &&
+		float64(g.width*g.height)*g.sourceFPS <= sourceRatePixels {
+		l.MaxFPS = 0 // the source rate (sourceRatePixels)
+	}
 	return l
 }
 
-// setPath records the path a statistics sample names (client.StatsSnapshot
-// Path and PathRemote; a sample without a selected pair changes nothing),
-// and reports whether that lowered the level: with Tailscale on the JetKVM,
-// a session that hasn't changed level yet starts no higher than balanced,
-// since the device can't send high's bitrate through tailscaled.
-func (g *qualityGovernor) setPath(kind, remote string) bool {
-	if remote == "" {
+// setPath records the path a statistics sample names (Path, PathRemote and
+// PathOnLink; a sample without a selected pair changes nothing), and reports
+// whether that lowered the level: with Tailscale on the JetKVM, a session
+// that hasn't changed level yet starts no higher than balanced, since the
+// device can't send high's bitrate through tailscaled.
+func (g *qualityGovernor) setPath(s client.StatsSnapshot) bool {
+	if s.PathRemote == "" {
 		return false
 	}
-	g.deviceTunnel = client.InTailnet(remote)
-	g.lanPath = kind == client.PathLAN || kind == client.PathLoopback
+	if g.pathRemote != "" && (s.Path != g.path || s.PathRemote != g.pathRemote) {
+		// Another path: the old one's round trips say nothing about it.
+		g.rtts, g.baseRTT = nil, 0
+	}
+	g.path, g.pathRemote = s.Path, s.PathRemote
+	g.deviceTunnel = client.InTailnet(s.PathRemote)
+	g.lanPath = s.Path == client.PathLAN || s.Path == client.PathLoopback
+	g.onLink = s.Path == client.PathLAN && s.PathOnLink
 	if g.deviceTunnel && g.lastChange.IsZero() && g.level > 2 {
 		g.level, g.stillQP = 2, qualityLadder[2].StillQP
 		return true
@@ -331,9 +371,17 @@ func (g *qualityGovernor) observe(now time.Time, s client.StatsSnapshot, link vi
 			to = min(to, g.carried(link.Delivered))
 		}
 		return g.down(now, to, link, "queue")
+	case lan && !lossy && !g.deviceTunnel && g.lastChange.Equal(g.started) && g.level < len(qualityLadder)-1:
+		// A LAN found after the start (the first round trips were a Wi-Fi
+		// spike) starts at the top too, as a LAN does.
+		top := len(qualityLadder) - 1
+		g.level, g.stillQP = top, g.stillQPFor(top, link)
+		g.lastChange, g.started = now, now
+		return g.level, "start"
 	case measured && !lan && g.lastChange.IsZero():
 		// The session starts at the level the link carries, instead of the
 		// round trip's guess, with the still refresh it carries.
+		g.started = now
 		if carried > g.level {
 			return g.up(now, carried, link, "start")
 		}
@@ -375,11 +423,7 @@ func (g *qualityGovernor) transport(now time.Time, s client.StatsSnapshot) (cong
 	}
 	prev := g.prev
 	g.prev = s
-	rtt := time.Duration(s.RoundTripMs * float64(time.Millisecond))
-	// The baseline is the lowest RTT of the last minute (queues inflate it).
-	if rtt > 0 && (g.baseRTT == 0 || rtt < g.baseRTT || now.Sub(g.baseAt) > time.Minute) {
-		g.baseRTT, g.baseAt = rtt, now
-	}
+	g.noteRTT(now, time.Duration(s.RoundTripMs*float64(time.Millisecond)))
 	lost := float64(max(int64(s.PacketsLost)-int64(prev.PacketsLost), 0))
 	received := float64(s.BytesReceived-min(prev.BytesReceived, s.BytesReceived)) / approxPacketBytes
 	lossRate := 0.0
@@ -399,9 +443,32 @@ func (g *qualityGovernor) transport(now time.Time, s client.StatsSnapshot) (cong
 	return congested, congested && lossRate > severeLossThreshold
 }
 
-// onLAN reports a round trip below lanRTT: the measured rate is then the
+// noteRTT adds a round trip sample to the baseline: the lowest of the last
+// baseWindow, which queues and Wi-Fi spikes don't move.
+func (g *qualityGovernor) noteRTT(now time.Time, rtt time.Duration) {
+	if rtt <= 0 {
+		return
+	}
+	g.rtts = append(g.rtts, rttSample{now, rtt})
+	keep := g.rtts[:0]
+	g.baseRTT = 0
+	for _, s := range g.rtts {
+		if now.Sub(s.at) > baseWindow {
+			continue
+		}
+		keep = append(keep, s)
+		if g.baseRTT == 0 || s.rtt < g.baseRTT {
+			g.baseRTT = s.rtt
+		}
+	}
+	g.rtts = keep
+}
+
+// onLAN reports a LAN (lanRTT, lanPathRTT): the measured rate is then the
 // device's send path, not a limit to keep below.
-func (g *qualityGovernor) onLAN() bool { return g.baseRTT > 0 && g.baseRTT < lanRTT }
+func (g *qualityGovernor) onLAN() bool {
+	return g.baseRTT > 0 && (g.baseRTT < lanRTT || g.onLink && g.baseRTT < lanPathRTT)
+}
 
 // target is a level's bitrate target in bit/s at the video's size.
 func (g *qualityGovernor) target(level int) float64 {
@@ -644,24 +711,31 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 	clientRefresh := c.cfg.ClientRefresh
 	c.mu.RUnlock()
 	clientRefresh = clientRefresh && live && cl.HasFirmwareFeature(ctx, client.FeatureRefreshRegions)
-	videoSize := func() [2]int {
+	// The bitrate follows the resolution (the firmware's formula), the
+	// source rate the frame rate.
+	type videoMode struct {
+		width, height int
+		fps           float64
+	}
+	currentMode := func() videoMode {
 		c.mu.RLock()
 		defer c.mu.RUnlock()
-		return [2]int{c.snapshot.VideoWidth, c.snapshot.VideoHeight}
+		return videoMode{c.snapshot.VideoWidth, c.snapshot.VideoHeight, c.snapshot.VideoFPS}
 	}
-	size := videoSize()
 	stats := cl.Stats()
 	gov := newQualityGovernor(time.Now(), time.Duration(stats.RoundTripMs*float64(time.Millisecond)), baseUp)
-	gov.width, gov.height = size[0], size[1]
+	mode := currentMode()
+	gov.width, gov.height, gov.sourceFPS = mode.width, mode.height, mode.fps
 	gov.clientRefresh = clientRefresh
 	gov.framePacing = live && cl.HasFirmwareFeature(ctx, client.FeatureFramePacing)
-	gov.setPath(stats.Path, stats.PathRemote)
+	gov.setPath(stats)
 	// The rate may be measured by now (the stream's first frames are not
 	// counted); otherwise the round trip's guess stands until it is.
 	link := cl.LinkEstimate()
 	gov.observe(time.Now(), cl.Stats(), link)
 	gov.updatePeak(time.Now(), link)
-	_ = c.applyLevel(ctx, cl, gov.params())
+	applied := gov.params()
+	_ = c.applyLevel(ctx, cl, applied)
 
 	log := logging.Subsystem("quality")
 	ticker := time.NewTicker(qualityTick)
@@ -679,15 +753,14 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 			if !on {
 				return
 			}
-			// The bitrate follows the resolution (the firmware's formula).
 			changed := false
-			if s := videoSize(); s != size {
-				size, changed = s, true
-				gov.width, gov.height = s[0], s[1]
+			if m := currentMode(); m != mode {
+				mode, changed = m, true
+				gov.width, gov.height, gov.sourceFPS = m.width, m.height, m.fps
 			}
 			link := cl.LinkEstimate()
 			stats := cl.Stats()
-			if gov.setPath(stats.Path, stats.PathRemote) {
+			if gov.setPath(stats) {
 				changed = true
 			}
 			level, why := gov.observe(now, stats, link)
@@ -701,8 +774,10 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 					Msg("stream peak follows the link")
 				changed = true
 			}
-			if changed {
-				_ = c.applyLevel(ctx, cl, gov.params())
+			// The link turning LAN or not changes the parameters too.
+			if p := gov.params(); changed || p != applied {
+				applied = p
+				_ = c.applyLevel(ctx, cl, p)
 			}
 		}
 	}

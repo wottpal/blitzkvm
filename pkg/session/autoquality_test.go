@@ -106,6 +106,175 @@ func cleanStats(prev client.StatsSnapshot, rtt float64) client.StatsSnapshot {
 	return prev
 }
 
+// onLinkLAN is a statistics sample's path over Wi-Fi or Ethernet to the
+// device's own subnet.
+var onLinkLAN = client.StatsSnapshot{Path: client.PathLAN, PathRemote: "192.168.1.40", PathOnLink: true}
+
+// wifi feeds clean samples at the round trips (ms), a second apart.
+func wifi(g *qualityGovernor, start time.Time, link video.LinkEstimate, rtts ...float64) time.Time {
+	s := client.StatsSnapshot{SampledAt: start}
+	now := start
+	for i, rtt := range rtts {
+		now = start.Add(time.Duration(i+1) * time.Second)
+		s = cleanStats(s, rtt)
+		g.observe(now, s, link)
+	}
+	return now
+}
+
+// Home Wi-Fi: the round trip swings between 5 and 35 ms, its lowest of a
+// minute 6-9 ms. On a LAN path to the device's subnet that is a LAN: the
+// session goes to the top even after a first sample that guessed high, and
+// the encoder is not capped.
+func TestQualityWiFiLANIsALAN(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 34*time.Millisecond)
+	if g.level != 3 {
+		t.Fatalf("a 34 ms first sample started at %d, want high", g.level)
+	}
+	g.setPath(onLinkLAN)
+	now := wifi(g, start, video.LinkEstimate{}, 24, 9, 15, 11, 16, 25)
+	if !g.onLAN() || g.level != len(qualityLadder)-1 {
+		t.Fatalf("Wi-Fi LAN (baseline %v): onLAN %v, level %d, want a LAN at maximum", g.baseRTT, g.onLAN(), g.level)
+	}
+	if g.updatePeak(now, measured(6e6)); g.params().PeakKbps != 0 || g.params().PaceKbps != 0 {
+		t.Fatalf("Wi-Fi LAN capped the peak at %d, paced at %d", g.params().PeakKbps, g.params().PaceKbps)
+	}
+
+	for _, c := range []struct {
+		name string
+		path client.StatsSnapshot
+		rtts []float64
+	}{
+		// A private network behind a router (another site, a VLAN) is held
+		// to lanRTT, as are the emulator's impaired links over loopback.
+		{"a routed private network", client.StatsSnapshot{Path: client.PathLAN, PathRemote: "10.1.2.40"}, []float64{24, 9, 15, 11, 16, 25}},
+		{"loopback", client.StatsSnapshot{Path: client.PathLoopback, PathRemote: "127.0.0.1"}, []float64{20, 20}},
+		{"a Wi-Fi LAN that never comes below lanPathRTT", onLinkLAN, []float64{34, 31, 40}},
+	} {
+		g := at1080p(start, 34*time.Millisecond)
+		g.setPath(c.path)
+		wifi(g, start, video.LinkEstimate{}, c.rtts...)
+		if g.onLAN() || g.level != 3 {
+			t.Errorf("%s (baseline %v): onLAN %v, level %d, want no LAN, high", c.name, g.baseRTT, g.onLAN(), g.level)
+		}
+	}
+}
+
+// A session that started off a LAN (the rate was measured while the round
+// trip still spiked) goes to the top once the LAN shows, as long as it hasn't
+// stepped since; a step since, or loss, keeps the ladder's way up.
+func TestQualityLANStartOverridesTheStart(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 40*time.Millisecond)
+	g.setPath(onLinkLAN)
+	if level, why := g.observe(start, cleanStats(client.StatsSnapshot{SampledAt: start}, 40), measured(6e6)); why != "start" || level != 2 {
+		t.Fatalf("the start off a LAN went to %d (%s), want balanced", level, why)
+	}
+	s := cleanStats(client.StatsSnapshot{SampledAt: start.Add(time.Second)}, 9)
+	if level, why := g.observe(start.Add(2*time.Second), s, measured(6e6)); why != "start" || level != len(qualityLadder)-1 {
+		t.Fatalf("the LAN went to %d (%s), want maximum", level, why)
+	}
+	if !g.lastUp.IsZero() {
+		t.Fatal("the LAN start counts as a step up (flapping)")
+	}
+
+	stepped := at1080p(start, 40*time.Millisecond)
+	stepped.setPath(onLinkLAN)
+	stepped.observe(start, cleanStats(client.StatsSnapshot{SampledAt: start}, 40), measured(6e6))
+	stepped.down(start.Add(time.Second), 1, measured(6e6), "loss")
+	s = cleanStats(client.StatsSnapshot{SampledAt: start.Add(time.Second)}, 9)
+	if level, why := stepped.observe(start.Add(2*time.Second), s, measured(6e6)); why != "" || level != 1 {
+		t.Fatalf("after a step down the LAN went to %d (%s), want it to stay", level, why)
+	}
+
+	lossy := at1080p(start, 40*time.Millisecond)
+	lossy.setPath(onLinkLAN)
+	prev := client.StatsSnapshot{SampledAt: start, BytesReceived: 1_000_000}
+	lossy.observe(start, prev, video.LinkEstimate{})
+	s = cleanStats(prev, 9)
+	s.PacketsLost = 50
+	if level, why := lossy.observe(start.Add(time.Second), s, video.LinkEstimate{}); why == "start" || level == len(qualityLadder)-1 {
+		t.Fatalf("a lossy LAN started at %d (%s)", level, why)
+	}
+}
+
+// A new path starts its own baseline: the LAN's round trips don't make a
+// relay a LAN.
+func TestQualityNewPathNewBaseline(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 3*time.Millisecond)
+	g.setPath(onLinkLAN)
+	if !g.onLAN() {
+		t.Fatal("3 ms on a LAN is no LAN")
+	}
+	g.setPath(onLinkLAN)
+	if !g.onLAN() {
+		t.Fatal("the same path again lost its baseline")
+	}
+	g.setPath(client.StatsSnapshot{Path: client.PathInternet, PathRemote: "203.0.113.7"})
+	if g.onLAN() || g.baseRTT != 0 {
+		t.Fatalf("a relay kept the LAN's baseline %v", g.baseRTT)
+	}
+}
+
+// On a LAN the top level encodes every captured frame where the encoder
+// keeps up (sourceRatePixels) and a frame rate change is free (D18);
+// elsewhere, and at other levels, at most 60.
+func TestQualitySourceRateAtTheTopOnALAN(t *testing.T) {
+	start := time.Unix(0, 0)
+	lan := 2 * time.Millisecond
+	for _, c := range []struct {
+		name          string
+		rtt           time.Duration
+		width, height int
+		fps           float64
+		old, tunnel   bool
+		want          int
+	}{
+		{"1456×920 at 90 Hz on a LAN", lan, 1456, 920, 90, false, false, 0},
+		{"1280×720 at 120 Hz on a LAN", lan, 1280, 720, 120, false, false, 0},
+		{"1920×1080 at 90 Hz on a LAN: over the encoder's rate", lan, 1920, 1080, 90, false, false, 60},
+		{"60 Hz on a LAN", lan, 2400, 1012, 60, false, false, 60},
+		{"60.5 Hz on a LAN", lan, 1920, 1080, 60.5, false, false, 60},
+		{"no video yet", lan, 0, 0, 90, false, false, 60},
+		{"no frame rate yet", lan, 1456, 920, 0, false, false, 60},
+		{"firmware before D18 (a keyframe a change)", lan, 1456, 920, 90, true, false, 60},
+		{"Tailscale on the device", lan, 1456, 920, 90, false, true, 60},
+		{"1456×920 at 90 Hz off a LAN", 60 * time.Millisecond, 1456, 920, 90, false, false, 60},
+	} {
+		g := newQualityGovernor(start, c.rtt, upAfterClean)
+		g.width, g.height, g.sourceFPS = c.width, c.height, c.fps
+		g.framePacing, g.deviceTunnel = !c.old, c.tunnel
+		g.level = len(qualityLadder) - 1
+		if got := g.params().MaxFPS; got != c.want {
+			t.Errorf("%s: maxFps %d, want %d", c.name, got, c.want)
+		}
+		g.level--
+		if got := g.params().MaxFPS; got != 60 {
+			t.Errorf("%s, one level down: maxFps %d, want 60", c.name, got)
+		}
+	}
+}
+
+// The baseline is the lowest round trip of the last minute: a spike after
+// the minute doesn't become it, and an old low sample leaves it.
+func TestQualityRTTBaselineSlides(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 6*time.Millisecond)
+	for i := 1; i <= 59; i++ {
+		g.noteRTT(start.Add(time.Duration(i)*time.Second), 9*time.Millisecond)
+	}
+	g.noteRTT(start.Add(61*time.Second), 150*time.Millisecond)
+	if g.baseRTT != 9*time.Millisecond {
+		t.Fatalf("baseline %v after a spike, want 9ms", g.baseRTT)
+	}
+	g.noteRTT(start.Add(125*time.Second), 20*time.Millisecond)
+	if g.baseRTT != 20*time.Millisecond {
+		t.Fatalf("baseline %v a minute after the last low sample, want 20ms", g.baseRTT)
+	}
+}
+
 func TestQualityStepsDownAtOnceWhenAQueueGrows(t *testing.T) {
 	start := time.Unix(0, 0)
 	g := at1080p(start, 30*time.Millisecond) // high
@@ -613,10 +782,10 @@ func TestQualityDeviceTunnelStaysBelowTheDevicesCeiling(t *testing.T) {
 		t.Fatalf("a 30 ms round trip started at %d, want high", g.level)
 	}
 	// A sample without a selected pair says nothing.
-	if g.setPath("", "") || g.deviceTunnel {
+	if g.setPath(client.StatsSnapshot{}) || g.deviceTunnel {
 		t.Fatal("an empty path changed the governor")
 	}
-	if !g.setPath(client.PathTailscale, "100.64.0.20") || g.level != 2 {
+	if !g.setPath(client.StatsSnapshot{Path: client.PathTailscale, PathRemote: "100.64.0.20"}) || g.level != 2 {
 		t.Fatalf("a device tunnel started at %d, want balanced", g.level)
 	}
 	g.updatePeak(start, measured(3.7e6))
@@ -626,7 +795,7 @@ func TestQualityDeviceTunnelStaysBelowTheDevicesCeiling(t *testing.T) {
 
 	// The device's CPU limits a tailnet path at LAN round trips too.
 	lan := at1080p(start, 2*time.Millisecond)
-	if !lan.setPath(client.PathTailscale, "100.64.0.20") || lan.level != 2 {
+	if !lan.setPath(client.StatsSnapshot{Path: client.PathTailscale, PathRemote: "100.64.0.20"}) || lan.level != 2 {
 		t.Fatalf("a device tunnel at 2 ms started at %d, want balanced", lan.level)
 	}
 	if !lan.updatePeak(start, measured(8e6)) || lan.peakKbps != 4400 {
@@ -634,7 +803,7 @@ func TestQualityDeviceTunnelStaysBelowTheDevicesCeiling(t *testing.T) {
 	}
 	// A subnet router: the device's LAN address, no tailscaled on it.
 	router := at1080p(start, 30*time.Millisecond)
-	if router.setPath(client.PathTailscale, "192.168.1.40") || router.level != 3 {
+	if router.setPath(client.StatsSnapshot{Path: client.PathTailscale, PathRemote: "192.168.1.40"}) || router.level != 3 {
 		t.Fatalf("a subnet router path started at %d, want high", router.level)
 	}
 }
@@ -672,7 +841,7 @@ func TestQualityClientRegionRefreshStaysOnOffALAN(t *testing.T) {
 	// whole frames there, so the budget's verdict stands.
 	lan := at1080p(start, 60*time.Millisecond)
 	lan.clientRefresh = true
-	lan.setPath(client.PathLAN, "192.168.1.40")
+	lan.setPath(client.StatsSnapshot{Path: client.PathLAN, PathRemote: "192.168.1.40"})
 	lan.observe(start, cleanStats(client.StatsSnapshot{}, 60), measured(3.8e6))
 	if p := lan.params(); p.StillQP != p.MinQP {
 		t.Errorf("a LAN path: still QP %d, want the floor %d (off)", p.StillQP, p.MinQP)

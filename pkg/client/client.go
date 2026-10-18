@@ -150,9 +150,12 @@ type StatsSnapshot struct {
 	AudioPackets uint64
 	AudioBytes   uint64
 	// Path is the network the selected candidate pair runs over (PathLAN,
-	// PathTailscale, ...); PathRemote is its remote address.
+	// PathTailscale, ...); PathRemote is its remote address. PathOnLink
+	// reports a PathLAN whose remote lies in the local interface's subnet:
+	// no router between.
 	Path           string
 	PathRemote     string
+	PathOnLink     bool
 	LastError      string
 	TransportDebug string
 }
@@ -1648,6 +1651,7 @@ func (c *Client) collectStats(now time.Time) {
 		}
 		if local != nil && remote != nil {
 			snap.Path, snap.PathRemote = pathKind(local, remote), remote.String()
+			snap.PathOnLink = snap.Path == PathLAN && onLink(local, remote)
 			c.pointer.setPacing(snap.Path != PathLAN && snap.Path != PathLoopback)
 		}
 	}
