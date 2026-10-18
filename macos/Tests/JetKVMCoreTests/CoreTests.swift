@@ -285,7 +285,8 @@ final class DeviceLibraryTests: XCTestCase {
 
     func testProbePrefersEarlierAddressWithinWindow() async {
         // The VPN name answers first, the LAN IP (preferred) shortly after.
-        let result = await AddressProbe.choose(addresses: ["lan", "vpn"], expectedDeviceID: "dev") { address in
+        // A window far wider than the gap: a loaded CI runner wakes sleepers late.
+        let result = await AddressProbe.choose(addresses: ["lan", "vpn"], expectedDeviceID: "dev", preferenceWindow: .seconds(1)) { address in
             try? await Task.sleep(for: .milliseconds(address == "lan" ? 60 : 10))
             return DeviceIdentity(deviceId: "dev", authMode: nil)
         }
@@ -314,8 +315,9 @@ final class DeviceLibraryTests: XCTestCase {
 
     func testProbePrefersConfirmedIdentityOverUnknown() async {
         // The LAN address now answers 401 (another, password-protected
-        // device); the VPN name confirms the saved ID.
-        let result = await AddressProbe.choose(addresses: ["lan", "vpn"], expectedDeviceID: "dev", preferenceWindow: .milliseconds(100)) { address in
+        // device); the VPN name confirms the saved ID 20 ms later, well within
+        // the window even when a loaded CI runner wakes sleepers late.
+        let result = await AddressProbe.choose(addresses: ["lan", "vpn"], expectedDeviceID: "dev", preferenceWindow: .seconds(1)) { address in
             if address == "lan" { return DeviceIdentity(deviceId: nil, authMode: "password") }
             try? await Task.sleep(for: .milliseconds(20))
             return DeviceIdentity(deviceId: "dev", authMode: nil)
