@@ -338,7 +338,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             controller.credentialProvider = { Keychain.password(account: $0.credentialAccount) }
         }
-        controller.onClose = { [weak self] c in self?.windows.removeAll { $0 === c } }
+        controller.onClose = { [weak self] c in
+            guard let self else { return }
+            windows.removeAll { $0 === c }
+            // Closing the last device window goes back to the Devices window
+            // (opening a device closed it).
+            if windows.isEmpty && !isSelfTest { showDevices() }
+        }
         if !isSelfTest {
             controller.onPreferencesChanged = { [weak self] c in self?.recordPreferences(c.device) }
             controller.onAddressesChanged = { [weak self] c in self?.recordAddresses(c.device) }
