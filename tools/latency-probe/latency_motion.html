@@ -1,0 +1,52 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>latency probe (motion bursts)</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000 url(pattern.png) 0 0 / 1920px 1080px repeat; overflow: hidden; cursor: none; }
+  #sq { position: fixed; left: 120px; top: 240px; width: 600px; height: 600px; background: #000; }
+  /* Marker: the probe sends keys only while it sees this mid-gray square. */
+  #mark { position: fixed; left: 900px; top: 240px; width: 300px; height: 300px; background: #808080; }
+  #n { position: fixed; right: 40px; bottom: 30px; color: #444; font: 20px monospace; background: #000; }
+</style>
+<div id="sq"></div>
+<div id="mark"></div>
+<div id="n">0</div>
+<script>
+  // The desktop-like pattern behind the probe's square scrolls in bursts,
+  // like a window scrolled now and then: #on=ms&off=ms&speed=px/s (default
+  // 2 s at 1080 px/s every 6 s; on=0 keeps it still). motion_score.py in
+  // tools/quality-bench scores a recording of it.
+  const args = Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
+  const on = +(args.on ?? 2000), off = +(args.off ?? 4000), speed = +(args.speed ?? 1080);
+  let y = 0, last = performance.now();
+  function tick(now) {
+    if (now % (on + off) < on) {
+      y = (y + speed * (now - last) / 1000) % 1080;
+      document.body.style.backgroundPosition = `0 ${-Math.round(y)}px`;
+    }
+    last = now;
+    requestAnimationFrame(tick);
+  }
+  if (on > 0) requestAnimationFrame(tick);
+  // A keydown flips the square between black and white; the counter shows
+  // how many arrived.
+  let lit = false, count = 0;
+  const sq = document.getElementById("sq"), n = document.getElementById("n");
+  const flip = () => {
+    lit = !lit;
+    sq.style.background = lit ? "#fff" : "#000";
+    n.textContent = ++count;
+  };
+  // Served by keylog_server.py, each key's arrival goes to its log (this
+  // computer's clock, and how long the browser took to handle it), to tell
+  // the input's delay from the picture's.
+  const logKeys = location.protocol === "http:";
+  addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    e.preventDefault();
+    const now = performance.now();
+    flip();
+    if (logKeys) fetch("/k", { method: "POST", body: `${Date.now()} ${(now - e.timeStamp).toFixed(1)} ${count}` });
+  });
+  addEventListener("wheel", (e) => { e.preventDefault(); flip(); }, { passive: false });
+</script>

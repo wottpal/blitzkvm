@@ -47,6 +47,10 @@ final class LatencyProbe {
     private var decodedSerial: UInt64?
     private var current: (decoded: Double, presented: Double?)?
     private var results: [(decoded: Double, presented: Double)] = []
+    /// Per sample, when its input was sent (Unix seconds), to line samples up
+    /// with other logs.
+    private var sentUnix: [Double] = []
+    private var currentSentUnix = 0.0
     /// Per sample, ms after the decoded frame: render start, drawable,
     /// committed, GPU done, presented.
     private var stages: [[Double]] = []
@@ -63,6 +67,12 @@ final class LatencyProbe {
     init(controller: DeviceWindowController, samples: Int) {
         self.controller = controller
         self.samples = samples
+        controller.capturesOnRequest = false // only the probe sends input
+        // A covered window presents nothing: stay above other apps' windows,
+        // and let the pointer pass through, so nothing you do over it reaches
+        // the remote.
+        controller.window?.level = .floating
+        controller.window?.ignoresMouseEvents = true
         controller.onFrameDecoded = { [weak self] buffer, header in
             // Engine receive -> decoded in the app (wall clock, same machine).
             let ms = (Date().timeIntervalSince1970 - Double(header.receivedUnixNano) / 1e9) * 1000
@@ -87,6 +97,7 @@ final class LatencyProbe {
         lock.lock()
         if let c = current, let p = c.presented {
             results.append((c.decoded, p))
+            sentUnix.append(currentSentUnix)
             if let st = currentStages { stages.append(st) }
         } else if sentAt != nil {
             misses += 1
@@ -113,6 +124,7 @@ final class LatencyProbe {
         expectBright = !known
         target ^= 1
         sentAt = CACurrentMediaTime()
+        currentSentUnix = Date().timeIntervalSince1970
         lock.unlock()
         if let keyframeLead, !pointerMode {
             lock.lock()
@@ -123,6 +135,7 @@ final class LatencyProbe {
                 guard let self else { return }
                 self.lock.lock()
                 self.sentAt = CACurrentMediaTime()
+                self.currentSentUnix = Date().timeIntervalSince1970
                 self.lock.unlock()
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
                 controller.stillRefresh.inputSent(keysHeld: false) // like typing: the refresh planner sees it
@@ -144,6 +157,7 @@ final class LatencyProbe {
                 guard let self else { return }
                 self.lock.lock()
                 self.sentAt = CACurrentMediaTime()
+                self.currentSentUnix = Date().timeIntervalSince1970
                 self.lock.unlock()
                 controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))
                 controller.stillRefresh.inputSent(keysHeld: false) // like typing: the refresh planner sees it
@@ -242,7 +256,7 @@ final class LatencyProbe {
 
     private func finish() {
         lock.lock()
-        let r = results, missed = misses, abortReason = aborted, st = stages, pt = presentTimes, ed = engineToDecoded
+        let r = results, sent = sentUnix, missed = misses, abortReason = aborted, st = stages, pt = presentTimes, ed = engineToDecoded
         lock.unlock()
         func stats(_ v: [Double]) -> [String: Double] {
             let s = v.sorted()
@@ -258,6 +272,7 @@ final class LatencyProbe {
             "decode_to_present_ms": stats(r.map { $0.presented - $0.decoded }),
             "engine_to_decoded_ms": stats(ed),
             "present_times": pt.map { ($0 * 1_000_000).rounded() / 1_000_000 },
+            "sent_unix": sent.map { ($0 * 1000).rounded() / 1000 },
             "raw": r.map { [($0.decoded * 10).rounded() / 10, ($0.presented * 10).rounded() / 10] },
             "stages_after_decode_ms": ["render_start", "drawable", "committed", "gpu_done", "presented"].enumerated().reduce(into: [String: Any]()) { acc, e in
                 acc[e.element] = stats(st.map { $0[e.offset] })

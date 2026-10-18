@@ -31,6 +31,9 @@ struct Options {
     var hideAfter: Double?
     var maxFreezeMs: Double?
     var qualityChanges: [(Double, String)] = []
+    /// `--quality auto|<level>`: automatic stream quality or a fixed ladder
+    /// level for this window (self-tests and latency probes never save it).
+    var quality: String?
     var toggleStatusBarAfter: Double?
     var windowSize: (Double, Double)?
     var fullScreen = false
@@ -87,6 +90,7 @@ struct Options {
                     guard p.count == 2, let s = Double(p[0]) else { return nil }
                     return (s, String(p[1]))
                 }
+            case "--quality": o.quality = next()
             case "--exercise-extras": o.exerciseExtras = true
             case "--view-only": o.viewOnly = true
             case "--scale": o.scaling = next().flatMap(ScalingMode.init(rawValue:))
@@ -155,7 +159,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.options = options
     }
 
-    private var isSelfTest: Bool { options.selfTestSeconds != nil }
+    /// Self-tests and latency probes: no update checks, library or Keychain.
+    private var isSelfTest: Bool { options.selfTestSeconds != nil || options.latencyProbe != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         updater = MainActor.assumeIsolated { Updater(start: !isSelfTest || Updater.feedOverride != nil) }
@@ -232,9 +237,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let scale = options.matchScale { device.matchScale = scale }
         if let refresh = options.matchRefresh { device.matchWindowRefresh = refresh == 0 ? nil : refresh }
         if let profile = options.profile { device.modifierProfile = profile.rawValue }
+        if let quality = options.quality {
+            guard quality == "auto" || Self.qualityLevels.contains(where: { $0.1 == quality }) else {
+                return fail("--quality: unknown level \(quality) (auto, \(Self.qualityLevels.map(\.1).joined(separator: ", ")))")
+            }
+            device.adaptiveQuality = quality == "auto"
+            if quality != "auto" { device.qualityLevel = quality }
+        }
         if isSelfTest {
-            // Self-tests never touch the device library or Keychain.
-            open(device, address: address, password: options.password)
+            // Self-tests never touch the device library or Keychain; a
+            // latency probe reads a saved device's password.
+            var password = options.password
+            if password == nil, options.latencyProbe != nil, let saved {
+                password = Keychain.password(account: saved.credentialAccount)
+            }
+            open(device, address: address, password: password)
         } else {
             connect(device)
         }

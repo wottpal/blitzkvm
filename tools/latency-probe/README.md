@@ -16,10 +16,26 @@ the user.
    "macos/build/BlitzKVM.app/Contents/MacOS/BlitzKVM" --device <address> --latency-probe 40
    ```
 
-   It connects, takes 40 samples about a second apart, prints a JSON report and exits.
+   It connects, takes 40 samples about a second apart, prints a JSON report and exits. Its window floats above other
+   windows (a covered window presents nothing), and your keyboard and pointer pass it by. Like a self-test, it
+   leaves the device library, the Keychain and update checks alone. `--quality auto|minimal|low|balanced|high|maximum`
+   sets the stream quality for the run.
 
 The page's mid-gray square is a safety marker: the probe sends a key only while it sees the marker in the video, and
 stops as soon as it is gone. So keys never reach another app on the remote when its screen changes.
+
+## Pages
+
+| Page | Use |
+|---|---|
+| `latency.html` | Black page, the default |
+| `latency_busy.html` | The probe over the quality pattern, so keyframes have a desktop's size |
+| `latency_motion.html` | The pattern scrolls behind the probe in bursts (`#on=2000&off=4000&speed=1080`: ms, ms, px/s; `#on=0` keeps it still), like scrolling now and then: latency while the stream is busy. It hides the cursor, so it is for keys, not `BLITZKVM_PROBE_POINTER`. `tools/quality-bench/motion_score.py` scores a recording of it at 1:1, full screen |
+
+`keylog_server.py`, run on the remote computer, serves this folder on `127.0.0.1:8777`; open
+`http://127.0.0.1:8777/latency_motion.html` there and every key's arrival lands in `keys.log`. Against the report's
+`sent_unix`, that splits each sample into the input's delay and the picture's (up to a constant clock offset). Copy
+`pattern.png` next to the pages on the remote computer.
 
 ## Options (environment)
 
@@ -38,5 +54,7 @@ stops as soon as it is gone. So keys never reach another app on the remote when 
 - `presented_ms`: input → that frame on screen.
 - `decode_to_present_ms` and `stages_after_decode_ms`: render start, drawable, commit, GPU done, on screen.
 - `engine_to_decoded_ms`: engine receive → decoded in the app (IPC + decode), every frame.
+- `raw`: each sample's decoded and presented times; `sent_unix`: when each sample's input was sent (Unix seconds),
+  to line samples up with other logs.
 
 Each has median, p10, p90, min, max and mean in ms.

@@ -94,8 +94,10 @@ final class SelfTest {
         self.snapshotPath = snapshotPath
         controller.capturesOnRequest = false // only inject() sends input
         controller.audio.setMuted(true) // self-tests play no sound
-        // Hidden windows stop decoding: stay above other apps' windows.
+        // Hidden windows stop decoding: stay above other apps' windows, and
+        // let the pointer pass through (only inject() sends input).
         controller.window?.level = .floating
+        controller.window?.ignoresMouseEvents = true
         // For screenshots of the window: `screencapture -l <number>`.
         AppLog.log("selftest: window number \(controller.window?.windowNumber ?? 0)")
         controller.onFrameDecoded = { [weak self] buffer, header in self?.frameDecoded(buffer, header) }
