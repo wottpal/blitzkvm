@@ -21,6 +21,9 @@ type EncoderParams struct {
 	// D13; earlier builds always do). Off, the client asks for refreshes
 	// (refreshRegions).
 	AutoRefresh bool `json:"autoRefresh"`
+	// PaceKbps leaves source frames out while the coded bytes run more than
+	// pacingWindow ahead of it (fork D18); 0 = off.
+	PaceKbps int `json:"paceKbps"`
 }
 
 // DefaultEncoderParams are the encoder patch's compiled defaults.
@@ -88,6 +91,8 @@ func (p EncoderParams) validate() error {
 		return fmt.Errorf("maxBitrateKbps must be 100-50000, or 0 for 1.5x the target, got %d", p.MaxBitrateKbps)
 	case p.StillQP < 1 || p.StillQP > 51:
 		return fmt.Errorf("stillQp must be 1-51, got %d", p.StillQP)
+	case p.PaceKbps != 0 && (p.PaceKbps < 100 || p.PaceKbps > 50000):
+		return fmt.Errorf("paceKbps must be 100-50000, or 0 for no pacing, got %d", p.PaceKbps)
 	}
 	return nil
 }
@@ -113,6 +118,9 @@ func (p EncoderParams) validate() error {
 //     device their size followed the QP floor, not the quality factor.
 //   - maxFps drops source frames; each coded frame then covers more motion,
 //     but costs the same (the device measured slightly less).
+//   - paceKbps (fork D18) drops a source frame while the coded frames'
+//     bytes, drained at paceKbps, hold more than pacingWindow of it, as the
+//     firmware's capture loop does before the encoder.
 //   - stillRefreshAfter the screen last changed (or the stream started),
 //     one keyframe at stillQp, unless stillQp >= minQp.
 //
@@ -125,6 +133,8 @@ const (
 	qpStep            = 0.95
 	vbrWindow         = time.Second
 	stillRefreshAfter = 500 * time.Millisecond
+	// pacingWindow is the firmware's PACE_WINDOW_US (D18).
+	pacingWindow = 40 * time.Millisecond
 )
 
 // encoderModel is the rate control state of one stream.
@@ -133,7 +143,9 @@ type encoderModel struct {
 	credit    float64 // bits the rate control may still spend
 	last      time.Time
 	changedAt time.Time
-	refreshed bool // the still refresh for changedAt went out
+	refreshed bool    // the still refresh for changedAt went out
+	paced     float64 // bytes in the pacing bucket at pacedAt (paceKbps)
+	pacedAt   time.Time
 }
 
 func newEncoderModel(width, height int) *encoderModel {
@@ -144,6 +156,36 @@ func newEncoderModel(width, height int) *encoderModel {
 // frame rate cap (0: the source rate).
 func (m *encoderModel) codes(t time.Time, maxFPS int) bool {
 	return maxFPS <= 0 || m.last.IsZero() || t.Sub(m.last) > time.Second/time.Duration(maxFPS)-time.Millisecond
+}
+
+// pacedOut reports whether frame pacing at kbps (0: off) leaves out the
+// source frame captured at t.
+func (m *encoderModel) pacedOut(t time.Time, kbps int) bool {
+	if kbps <= 0 {
+		return false
+	}
+	m.drain(t, kbps)
+	return m.paced > float64(kbps)*125*pacingWindow.Seconds()
+}
+
+// sent puts a coded frame of size bytes, captured at t, into the pacing
+// bucket.
+func (m *encoderModel) sent(t time.Time, kbps, size int) {
+	if kbps <= 0 {
+		return
+	}
+	m.drain(t, kbps)
+	m.paced += float64(size)
+}
+
+func (m *encoderModel) drain(t time.Time, kbps int) {
+	if !t.After(m.pacedAt) {
+		return
+	}
+	if !m.pacedAt.IsZero() {
+		m.paced = max(0, m.paced-float64(kbps)*125*t.Sub(m.pacedAt).Seconds())
+	}
+	m.pacedAt = t
 }
 
 // frame plans the coded frame captured at t: target and peak are the

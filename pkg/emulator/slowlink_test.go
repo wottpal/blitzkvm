@@ -72,7 +72,7 @@ func runSlowLink(t *testing.T, l slowLink) slowLinkRun {
 	t.Setenv("BLITZKVM_IMPAIR", l.spec)
 	cfg := Config{Width: 960, Height: 540, FPS: 30, GOP: 3600, KeyframeOnRequest: true}
 	if l.auto {
-		cfg = Config{Width: 1920, Height: 1080, FPS: 60, GOP: 3600, KeyframeOnRequest: true, EncoderPatch: true,
+		cfg = Config{Width: 1920, Height: 1080, FPS: 60, GOP: 3600, KeyframeOnRequest: true, FramePacing: true,
 			Netem: NetemConfig{Rate: deviceSendRate}}
 	}
 	switch l.content {

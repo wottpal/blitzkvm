@@ -575,6 +575,34 @@ func TestQualityPeakFollowsTheLink(t *testing.T) {
 	}
 }
 
+// Firmware that paces frames (D18) gets the pacing with the peak cap off a
+// LAN, and none on a LAN; firmware without it gets none.
+func TestQualityPacingFollowsThePeak(t *testing.T) {
+	start := time.Unix(0, 0)
+	g := at1080p(start, 60*time.Millisecond)
+	g.framePacing = true
+	if !g.updatePeak(start, measured(4e6)) || g.params().PaceKbps != int(paceOverPeak*3600) {
+		t.Fatalf("pace %d kbps under a 3600 kbps peak, want %d", g.params().PaceKbps, int(paceOverPeak*3600))
+	}
+
+	lan := at1080p(start, 2*time.Millisecond)
+	lan.framePacing, lan.peakKbps, lan.paceKbps = true, 3600, 3600
+	if !lan.updatePeak(start, measured(4e6)) || lan.params().PaceKbps != 0 {
+		t.Fatalf("a LAN paced at %d kbps", lan.params().PaceKbps)
+	}
+
+	fast := at1080p(start, 60*time.Millisecond)
+	fast.framePacing = true
+	if fast.updatePeak(start, measured(80e6)); fast.paceKbps != 50_000 {
+		t.Fatalf("pace %d kbps at 80 Mbit/s, want the firmware's 50000 at most", fast.paceKbps)
+	}
+
+	stock := at1080p(start, 60*time.Millisecond)
+	if stock.updatePeak(start, measured(4e6)); stock.params().PaceKbps != 0 {
+		t.Fatalf("firmware without frame pacing got a pace of %d kbps", stock.params().PaceKbps)
+	}
+}
+
 // When the JetKVM runs WireGuard itself, its CPU saturates at about half the
 // rate its bursts drain at: such a path starts no higher than balanced and
 // its peak stays at deviceTunnelShare of the rate.

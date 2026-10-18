@@ -119,10 +119,11 @@ func (s *Server) startTestPattern(ctx context.Context, track *webrtc.TrackLocalS
 			img, c := pat.next(i)
 			key, change = key || i%cfg.GOP == 0, max(change, c)
 			coded := time.Since(at) < interval
-			size := 0
+			size, pace := 0, 0
 			if coded && model != nil {
 				p, target, peak := s.encoderRates()
-				if coded = model.codes(at, p.MaxFPS); coded {
+				pace = p.PaceKbps
+				if coded = model.codes(at, p.MaxFPS) && !model.pacedOut(at, pace); coded {
 					key, size = model.frame(at, p, target, peak, change, key)
 				}
 			}
@@ -139,6 +140,9 @@ func (s *Server) startTestPattern(ctx context.Context, track *webrtc.TrackLocalS
 					return
 				}
 				sample.Data = padAccessUnit(payload, size)
+				if model != nil {
+					model.sent(at, pace, len(sample.Data))
+				}
 				key, change = false, 0
 			}
 			if err := track.WriteSample(sample); err != nil {

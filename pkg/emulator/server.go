@@ -125,6 +125,11 @@ type Config struct {
 	// it, and while it is off every request from a web browser (Origin,
 	// Sec-Fetch-Site or a Mozilla User-Agent) gets a 403.
 	BrowserAccess bool
+	// FramePacing models fork firmware D18 (implies EncoderPatch):
+	// getFirmwareFeatures lists framePacing, and setVideoEncoderParams'
+	// paceKbps leaves source frames out while the coded bytes run more than
+	// pacingWindow ahead of it.
+	FramePacing bool
 }
 
 type FaultConfig struct {
@@ -306,7 +311,7 @@ func NewServer(cfg Config) (*Server, error) {
 		cfg.TakeoverCloseDelay = time.Second
 	}
 	// D13 builds on the encoder patch.
-	cfg.EncoderPatch = cfg.EncoderPatch || cfg.RefreshRegions
+	cfg.EncoderPatch = cfg.EncoderPatch || cfg.RefreshRegions || cfg.FramePacing
 	s := &Server{
 		cfg:     cfg,
 		limiter: newLoginLimiter(),

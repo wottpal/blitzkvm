@@ -637,6 +637,9 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 			if !srv.cfg.RefreshRegions {
 				merged.AutoRefresh = st.EncoderParams.AutoRefresh // unknown before D13
 			}
+			if !srv.cfg.FramePacing {
+				merged.PaceKbps = st.EncoderParams.PaceKbps // unknown before D18
+			}
 			if err := merged.validate(); err != nil {
 				return failed(err.Error()), nil
 			}
@@ -654,6 +657,9 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 		}
 		if srv.cfg.BrowserAccess {
 			features = append(features, client.FeatureBrowserAccess)
+		}
+		if srv.cfg.FramePacing {
+			features = append(features, client.FeatureFramePacing)
 		}
 		if features == nil {
 			return notFound(), nil

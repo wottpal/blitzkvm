@@ -37,7 +37,10 @@ import (
 //     measure nothing, so idle time never earns a step up. Off a LAN the
 //     encoder's peak bitrate is also held below the rate (peakShare), so
 //     scrolling at any level stays below what the link delivers (keyframes
-//     and refreshes are not held to it).
+//     and refreshes are not held to it). Firmware with frame pacing (D18)
+//     also paces the frames to paceOverPeak of that peak, so a keyframe or a
+//     run of large frames thins out instead of queueing in front of the next
+//     change.
 //   - Loss (more than 2 %, or a loss NACKs could not repair) remains as a
 //     backstop, on the client's once-a-second statistics. The round trip
 //     no longer counts: it shows a queue seconds after the one-way delay
@@ -85,6 +88,9 @@ type QualityLevel struct {
 	// PeakKbps caps the encoder's bitrate (patched firmware) below the
 	// level's own peak, 1.5× its target; 0 = no cap.
 	PeakKbps int
+	// PaceKbps paces the frames (firmware D18): a captured frame is left out
+	// while the encoded bytes run more than 40 ms ahead of it; 0 = off.
+	PaceKbps int
 }
 
 // qualityLadder is ordered from lowest to highest. The values come from the
@@ -104,8 +110,9 @@ type QualityLevel struct {
 //     more bits (+1.5-2 dB while scrolling at low and minimal), but every
 //     change, a key's echo or the pointer, waits for the next encoded frame:
 //     over Tailscale with scrolling, a key took 117 ms at 15 fps and 89-93
-//     ms at 60 or more (median). And a live frame rate change costs a keyframe (firmware
-//     D06), so levels that differ only in bitrate and QP change for free.
+//     ms at 60 or more (median). And a live frame rate change cost a keyframe
+//     before firmware D18, so levels that differ only in bitrate and QP
+//     change for free on any firmware.
 var qualityLadder = []QualityLevel{
 	{Name: "minimal", Factor: 0.25, MaxFPS: 60, MinQP: 26, StillQP: 26},
 	{Name: "low", Factor: 0.5, MaxFPS: 60, MinQP: 21, StillQP: 17},
@@ -152,6 +159,13 @@ const (
 	// scrolling, and a key's echo took 138, 195 and 258 ms (p90).
 	peakShare         = 0.9
 	deviceTunnelShare = 0.55
+	// paceOverPeak sets the frame pacing (firmware D18) relative to the
+	// peak cap off a LAN: above the measured rate, so pacing only thins out
+	// what would queue. At 1.25 the emulator's scrolling over LTE had half
+	// the p99 delay (153 → 81 ms) and no link froze longer; at 1.0, a rate
+	// measured low held the frames after a keyframe longer than the link
+	// did (desktop over hotel Wi-Fi: a 1.4 s freeze, none at 1.25).
+	paceOverPeak = 1.25
 	// peakChange is the least relative change of the peak cap that is
 	// applied, and peakHold the least time between two changes: each one
 	// restarts the encoder's rate control (firmware D07).
@@ -194,7 +208,9 @@ type qualityGovernor struct {
 	level         int
 	stillQP       int // the level's still refresh QP on this link
 	peakKbps      int // the encoder's peak cap on this link, 0 = none
+	paceKbps      int // the frame pacing on this link, 0 = none
 	peakAt        time.Time
+	framePacing   bool // the firmware paces frames (client.FeatureFramePacing)
 	deviceTunnel  bool // the JetKVM runs WireGuard itself (setPath)
 	lanPath       bool // the path is a LAN (setPath): the client may refresh whole frames
 	clientRefresh bool // the client plans still refreshes (Config.ClientRefresh, D13)
@@ -233,7 +249,7 @@ func newQualityGovernor(now time.Time, rtt, baseUp time.Duration) *qualityGovern
 // refresh QP and the peak cap for the link.
 func (g *qualityGovernor) params() QualityLevel {
 	l := qualityLadder[g.level]
-	l.StillQP, l.PeakKbps = g.stillQP, g.peakKbps
+	l.StillQP, l.PeakKbps, l.PaceKbps = g.stillQP, g.peakKbps, g.paceKbps
 	return l
 }
 
@@ -268,8 +284,8 @@ func rated(link video.LinkEstimate) bool {
 func (g *qualityGovernor) updatePeak(now time.Time, link video.LinkEstimate) bool {
 	if g.onLAN() && !g.deviceTunnel {
 		// A LAN's rate is the device's send path, not a limit.
-		cleared := g.peakKbps > 0
-		g.peakKbps = 0
+		cleared := g.peakKbps > 0 || g.paceKbps > 0
+		g.peakKbps, g.paceKbps = 0, 0
 		return cleared
 	}
 	if !rated(link) {
@@ -285,6 +301,10 @@ func (g *qualityGovernor) updatePeak(now time.Time, link video.LinkEstimate) boo
 		return false
 	}
 	g.peakKbps, g.peakAt = kbps, now
+	if g.framePacing {
+		// The firmware takes 100-50,000 kbps.
+		g.paceKbps = min(max(int(paceOverPeak*float64(kbps)), 100), 50_000)
+	}
 	return true
 }
 
@@ -543,12 +563,16 @@ func (c *Controller) applyLevel(ctx context.Context, cl *client.Client, l Qualit
 		if clientRefresh {
 			update["autoRefresh"] = false
 		}
+		// Sent with every level, so a manual level turns pacing off again.
+		if cl.HasFirmwareFeature(ctx, client.FeatureFramePacing) {
+			update["paceKbps"] = l.PaceKbps
+		}
 		if err := cl.Call(ctx, "setVideoEncoderParams", map[string]any{"params": update}, nil); err != nil {
 			log.Warn().Err(err).Msg("set encoder params")
 			return err
 		}
 		c.setStateFor(cl, func(s *Snapshot) { s.ClientRefresh, s.MinQP, s.StillQP = clientRefresh, l.MinQP, l.StillQP })
-		log.Info().Str("level", l.Name).Int("kbps", target).Int("peakKbps", peak).Int("maxFps", l.MaxFPS).Int("minQp", l.MinQP).Int("stillQp", l.StillQP).
+		log.Info().Str("level", l.Name).Int("kbps", target).Int("peakKbps", peak).Int("paceKbps", l.PaceKbps).Int("maxFps", l.MaxFPS).Int("minQp", l.MinQP).Int("stillQp", l.StillQP).
 			Bool("clientRefresh", clientRefresh).Msg("stream quality (live)")
 		return nil
 	}
@@ -630,6 +654,7 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 	gov := newQualityGovernor(time.Now(), time.Duration(stats.RoundTripMs*float64(time.Millisecond)), baseUp)
 	gov.width, gov.height = size[0], size[1]
 	gov.clientRefresh = clientRefresh
+	gov.framePacing = live && cl.HasFirmwareFeature(ctx, client.FeatureFramePacing)
 	gov.setPath(stats.Path, stats.PathRemote)
 	// The rate may be measured by now (the stream's first frames are not
 	// counted); otherwise the round trip's guess stands until it is.
@@ -672,7 +697,7 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 				changed = true
 			}
 			if gov.updatePeak(now, link) {
-				log.Info().Int("peakKbps", gov.peakKbps).Float64("rateMbps", link.Rate/1e6).Bool("deviceTunnel", gov.deviceTunnel).
+				log.Info().Int("peakKbps", gov.peakKbps).Int("paceKbps", gov.paceKbps).Float64("rateMbps", link.Rate/1e6).Bool("deviceTunnel", gov.deviceTunnel).
 					Msg("stream peak follows the link")
 				changed = true
 			}

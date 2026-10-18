@@ -169,3 +169,40 @@ func TestEncoderModelFollowsTheParameters(t *testing.T) {
 		t.Errorf("frames of %d and %d B, want %.0f and %.0f", maxSize, minSize, want, want*math.Pow(qpStep, 16))
 	}
 }
+
+// Frame pacing (fork D18): scrolling that codes at 2× the pace keeps about
+// half its frames, and after a keyframe the frames are left out until the
+// pace has carried it.
+func TestEncoderModelPacesFrames(t *testing.T) {
+	m := newEncoderModel(1920, 1080)
+	const pace, frameBytes = 2000, 8_333 // 60 frames of 8.3 kB: 4 Mbit/s
+	start := time.Unix(0, 0)
+	coded := 0
+	for i := range 120 {
+		at := start.Add(time.Duration(i) * time.Second / 60)
+		if m.pacedOut(at, pace) {
+			continue
+		}
+		m.sent(at, pace, frameBytes)
+		coded++
+	}
+	if coded < 58 || coded > 64 {
+		t.Errorf("coded %d of 120 frames at twice the pace, want about 60", coded)
+	}
+
+	key := newEncoderModel(1920, 1080)
+	key.sent(start, pace, 100_000) // 0.4 s at 2 Mbit/s
+	first := time.Duration(0)
+	for i := 1; i < 60 && first == 0; i++ {
+		at := start.Add(time.Duration(i) * time.Second / 60)
+		if !key.pacedOut(at, pace) {
+			first = at.Sub(start)
+		}
+	}
+	if want := 400*time.Millisecond - pacingWindow; first < want || first > want+20*time.Millisecond {
+		t.Errorf("first frame %v after a 100 kB keyframe at 2 Mbit/s, want about %v", first, want)
+	}
+	if off := newEncoderModel(1920, 1080); off.pacedOut(start, 0) {
+		t.Error("paceKbps 0 left a frame out")
+	}
+}
