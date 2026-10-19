@@ -1714,6 +1714,45 @@ Each change alone: the source rate at maximum (engine, fixed level) keys 60 → 
 - Frame pacing on a LAN stays off and untested (now including home Wi-Fi).
 - The probe needs its window on screen; a fullscreen app on another Space silently turns every sample into a miss.
 
+## 35. Roaming between a device's addresses (2026-10-19)
+
+**Ask (PM):** a window open at home on the LAN address must keep working after the lid closes and opens elsewhere, where only the tailnet name answers, without closing and reconnecting it; and the other way round, it shouldn't stay on Tailscale once the LAN answers again.
+
+### Findings
+
+| # | Finding | Evidence |
+|---|---|---|
+| A1 | A window kept the address it opened with. The engine retried it with backoff (up to 10 s) forever; the app re-probed the other addresses only when the very first probe had found none (`reprobeAddresses`, the review fix in §21), and stopped once a session came up | `DeviceWindowController.startReprobing`, `pkg/session/lifecycle.go` |
+| A2 | Away, the stale LAN address gets the session's login every retry, password included, on whatever network now has that address. The identity check stops input, not the login | `lifecycle.go` (login before `VerifyIdentity` on password-protected devices) |
+| A3 | A session through the JetKVM's own Tailscale survives the move home: its tailnet addresses don't change and WireGuard roams, so it stays on the slower path (the device's CPU caps it at about 2–2.5 Mbit/s, §32) until something drops it | ICE pinned to the route's local address (`route.go`); §32 |
+| A4 | A session through the tailnet name with the direct path (§33) is already on the LAN at home (`Path` "lan"); moving it to the LAN address would only interrupt it | engine stats; on the emulator every session reads "lan" too, since its candidates include this Mac's LAN address |
+| A5 | The engine notices a dead path within 4 s (ICE disconnected timeout), and a connection refused at once | `client.go` `SetICETimeouts(4 s, 8 s, 1 s)` |
+
+### Changes
+
+- **App, `AddressRoaming` (JetKVMCore, pure, unit-tested):** decides from the session's phase, the video's path and an HTTP probe of the addresses (`AddressProbe.choose`, the same rules as Connect: never WebRTC, the saved device ID confirmed where the device shows it). Down (connecting, retrying): probe every 3 s, move to the answer; if that is the current address while the engine waits out its backoff, reconnect now. Connected through a later address: probe every 15 s, move to an earlier one that answers, unless the picture takes the LAN path. After the network changes (gateways or physical interfaces, from `NWPathMonitor`; a VPN tunnel coming or going is no change): probe 0.5 s later, then every 3 s for 10 s. Paused (another session, auth failure, a changed identity or certificate, rebooting): nothing, as before.
+- **Anti-flap:** an address that answers while no session comes up through it for 20 s goes last for 30 minutes or until the network changes.
+- **A move while connected waits for quiet:** no input for 2 s, nothing held, no paste, upload, running setup action, open setup sheet or display resize (15 s); the decision lapses after 15 s and the next probe decides again. A move while down happens at once.
+- Replaces `reprobeAddresses`/`startReprobing`. The path monitor's immediate reconnect when the network returns stays.
+- **Self-tests:** `--device a,b` (most preferred first) starts at `a`, unprobed, and roams only between those; the report lists the addresses in turn (`addresses`). A saved device's other addresses no longer apply to self-tests and latency probes, so a measurement over the tailnet name stays there. `emulator-serve --ice-loopback-only` (the config option existed). `make -C macos selftest-roaming`.
+
+### Results
+
+`selftest-roaming` (two emulators with one device ID, loopback ICE): starts at the down address and moves to the other in 3 s; moves back 11 s after the preferred one came up (the 15 s check), connected 0.1 s after the move; when the preferred one goes away, the session drops at once (the WebSocket closes) and the window is connected at the other address 0.8 s later.
+
+### Decisions (worth revisiting)
+
+- The address order is the preference, as for Connect; no setting turns roaming off.
+- No move while connected when the picture already takes the LAN path, though signaling stays on the tailnet name.
+- A move while down is never held back by input: the session is gone anyway.
+- Probing intervals (3 s down, 15 s up, 0.5 s and 10 s around a network change) and the anti-flap's 20 s and 30 minutes are reasoned, not measured on real network changes.
+- Password-protected devices: the probe can't confirm their identity without a login, so a move to an address answering as some JetKVM sends the login there, as Connect and the engine's retries always did; the identity check still stops input before it goes anywhere.
+- No App Nap opt-out: a window hidden long enough to be napped follows once it is shown again.
+
+### Open
+
+- Not tried on the rig across real networks (lid closed at home, opened on another network, and back); the engine's retries and the path monitor are unchanged, so the worst case is the old behavior plus probes.
+
 ## Appendix A: Key sources
 
 - `jetkvm/kvm` (`dev` @ `8f6c300`, `release/0.5.9`): https://github.com/jetkvm/kvm. REMB revert: https://github.com/jetkvm/kvm/pull/1693
