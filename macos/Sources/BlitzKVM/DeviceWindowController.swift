@@ -114,10 +114,21 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private let displayHold = Locked<(size: CGSize, until: UInt64)?>(nil)
     /// When a frame last reached the view (uptime ns).
     private let shownAt = Locked<UInt64>(0)
-    /// Set when the first probe found no address: keep probing all of them
-    /// and switch to the first that answers.
-    var reprobeAddresses = false
-    private var reprobeTimer: Timer?
+    /// False when the first probe found no address answering and the window
+    /// connects to the first one anyway (set before start()).
+    var addressAnswered = true
+    /// Which address the session uses as the Mac moves between networks
+    /// (from start()).
+    private var roaming: AddressRoaming!
+    private var roamingProbe: Task<Void, Never>?
+    /// A more preferred address answered while connected: the move waits
+    /// for a pause (see quietForMove).
+    private var pendingMove: (address: String, at: TimeInterval)?
+    private var lastNetworkKey: String?
+    /// When input last went to the remote (system uptime, seconds).
+    private var lastInputAt: TimeInterval = 0
+    /// The window moved its session to another address (self-test).
+    var onAddressMove: ((String) -> Void)?
     private lazy var displayFollower = makeDisplayFollower()
 
     static let statusBarHeight: CGFloat = 22
@@ -228,6 +239,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// Input went to the remote: the still refresh waits for the typing to
     /// pause, and the picture keeps presenting for its echo.
     func inputSent(keysHeld: Bool) {
+        lastInputAt = ProcessInfo.processInfo.systemUptime
         stillRefresh.inputSent(keysHeld: keysHeld)
         videoView.inputSent()
     }
@@ -491,32 +503,81 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         window.initialFirstResponder = view
     }
 
-    /// Probes all of the device's addresses every few seconds while not
-    /// connected and moves the session to the first one that answers (the
-    /// first probe found none, e.g. the VPN came up later).
-    private func startReprobing() {
-        guard reprobeAddresses, device.addresses.count > 1, reprobeTimer == nil else { return }
-        reprobeTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            if self.snapshot.Phase == "connected" || self.isShutDown {
-                self.reprobeTimer?.invalidate()
-                self.reprobeTimer = nil
-                return
-            }
-            let device = self.device
-            Task { @MainActor in
-                let result = await AddressProbe.choose(addresses: device.addresses, expectedDeviceID: device.deviceID,
-                                                       fetch: AddressProbe.httpFetch(certSHA256: device.certificateSHA256, log: { AppLog.log($0) }))
-                guard case .success(let (address, _)) = result, address != self.address, self.snapshot.Phase != "connected" else { return }
-                AppLog.log("\(device.name) answers at \(address); switching from \(self.address)")
-                self.address = address
-                self.window?.subtitle = address
-                self.reconnect()
+    // MARK: Roaming between addresses
+
+    private var roamingSession: AddressRoaming.Session {
+        AddressRoaming.Session(phase: snapshot.Phase, path: lastStats["Path"] as? String)
+    }
+
+    /// Every second: probes the device's addresses over HTTP when
+    /// AddressRoaming says so (the session is down, or a more preferred
+    /// address may answer) and follows its decision.
+    private func roam() {
+        let now = ProcessInfo.processInfo.systemUptime
+        applyPendingMove(at: now)
+        guard roamingProbe == nil, !isShutDown, roaming.probeDue(device.addresses, session: roamingSession, at: now) else { return }
+        let device = device
+        let order = roaming.order(device.addresses, at: now)
+        roamingProbe = Task { @MainActor [weak self] in
+            let result = await AddressProbe.choose(addresses: order, expectedDeviceID: device.deviceID,
+                                                   fetch: AddressProbe.httpFetch(certSHA256: device.certificateSHA256))
+            guard let self, !self.isShutDown else { return }
+            self.roamingProbe = nil
+            let now = ProcessInfo.processInfo.systemUptime
+            switch self.roaming.decide(self.device.addresses, answer: try? result.get().address, session: self.roamingSession, at: now) {
+            case .stay:
+                break
+            case .reconnect:
+                AppLog.log("\(device.name) answers again at \(self.address): reconnecting now")
+                self.engine.send(command: EngineCommand(cmd: "reconnect"))
+            case .move(let address):
+                self.pendingMove = (address, now)
+                self.applyPendingMove(at: now)
             }
         }
     }
 
+    /// Moves the session to the address roaming chose: at once while the
+    /// session is down; while it is up, once nothing a reconnect would cut
+    /// short is under way, within 15 s (then the next probe decides again).
+    private func applyPendingMove(at now: TimeInterval) {
+        guard let move = pendingMove else { return }
+        let connected = snapshot.Phase == "connected"
+        if connected {
+            guard now - move.at < 15 else { pendingMove = nil; return }
+            guard quietForMove(at: now) else { return }
+        }
+        pendingMove = nil
+        guard move.address != address, device.addresses.contains(move.address) else { return }
+        AppLog.log("\(device.name) answers at \(move.address); switching from \(address)\(connected ? "" : " (\(snapshot.Phase))")")
+        roaming.moved(to: move.address, at: now)
+        address = move.address
+        window?.subtitle = address
+        hud.show("Switching to \(address)", for: 3)
+        onAddressMove?(address)
+        reconnect()
+    }
+
+    /// Nothing a reconnect would cut short: no input for 2 s (nothing held
+    /// down, no word half typed), and no paste, upload, setup step or
+    /// remote display resize under way.
+    private func quietForMove(at now: TimeInterval) -> Bool {
+        let resizing = resizeRequest.map { DispatchTime.now().uptimeNanoseconds - $0.at < 15_000_000_000 } ?? false
+        return now - lastInputAt >= 2 && !input.keysHeld && NSEvent.pressedMouseButtons == 0
+            && pendingPasteID == nil && appPasteID == nil && snapshot.PasteInProgress != true
+            && (mediaWindow == nil || mediaModel.upload == nil)
+            && setupSheet == nil && setupModel?.isWorking != true && !resizing
+    }
+
+    /// What identifies the network this Mac is on: its gateways and
+    /// physical interfaces. A VPN's tunnel coming or going is no new network.
+    private static func networkKey(_ path: NWPath) -> String {
+        let interfaces = path.availableInterfaces.filter { $0.type != .other && $0.type != .loopback }.map(\.name)
+        return Set(path.gateways.map { "\($0)" } + interfaces).sorted().joined(separator: " ")
+    }
+
     func start() throws {
+        roaming = AddressRoaming(current: address, answered: addressAnswered, at: ProcessInfo.processInfo.systemUptime)
         try engine.start()
         audio.setEnabled(playsAudio)
         connectEngine()
@@ -524,10 +585,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         statusTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.input.ensureEventTap()
             self?.refreshStatus()
+            self?.roam()
         }
         stallTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.updateStallOverlay() }
         startPathMonitor()
-        startReprobing()
     }
 
     func reconnect() {
@@ -717,7 +778,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         stallTimer?.invalidate()
         setupModel?.cancel()
         ClipboardBridge.shared.unregister(self)
-        reprobeTimer?.invalidate()
+        roamingProbe?.cancel()
         pathMonitor?.cancel()
         mediaWindow?.close()
         serialWindow?.close()
@@ -726,7 +787,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     }
 
     /// When the network comes back (Wi-Fi switch, VPN up, wake from sleep),
-    /// reconnect at once instead of waiting out the retry backoff.
+    /// reconnect at once instead of waiting out the retry backoff. A new
+    /// network has roaming probe the addresses.
     private func startPathMonitor() {
         let monitor = NWPathMonitor()
         var lastStatus: NWPath.Status?
@@ -734,6 +796,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             DispatchQueue.main.async {
                 guard let self else { return }
                 defer { lastStatus = path.status }
+                let key = Self.networkKey(path)
+                if let known = self.lastNetworkKey, known != key {
+                    AppLog.log("\(self.device.name): network changed (\(key.isEmpty ? "none" : key))")
+                    self.roaming.networkChanged(at: ProcessInfo.processInfo.systemUptime)
+                }
+                self.lastNetworkKey = key
                 // Only shorten a retry already in progress: never reconnect
                 // after a takeover (it would kick the other user) or an
                 // auth failure (it would count toward the login lockout).
@@ -890,6 +958,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         if snapshot.Phase == "connected" && !wasConnected {
             wasConnected = true
+            roaming.connected()
             restartedAt = nil // back after a restart
             connectedAt = DispatchTime.now().uptimeNanoseconds
             matchRemoteToWindow()

@@ -228,10 +228,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// `--device address`: use the saved device with that address, or a new
-    /// one that is saved after the first successful connect.
-    private func connectAdHoc(_ address: String) {
+    /// one that is saved after the first successful connect. Self-tests take
+    /// a list too (`a,b`, most preferred first) and use only what it names.
+    private func connectAdHoc(_ text: String) {
+        let addresses = Device.parseAddresses(text)
+        guard let address = addresses.first else { return fail("--device: no address") }
         let saved = store.device(matchingAddress: address)
-        var device = saved ?? Device(name: address, addresses: [address])
+        var device = saved ?? Device(name: text, addresses: addresses)
         if saved == nil { adHocDeviceIDs.insert(device.id) }
         if let scaling = options.scaling { device.scaling = scaling }
         if let scale = options.matchScale { device.matchScale = scale }
@@ -251,7 +254,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if password == nil, options.latencyProbe != nil, let saved {
                 password = Keychain.password(account: saved.credentialAccount)
             }
-            open(device, address: address, password: password)
+            // Measurements stay on the route they name: roaming moves only
+            // between the addresses given (unprobed: it starts at the first).
+            device.addresses = addresses
+            open(device, address: address, password: password, answered: addresses.count == 1)
         } else {
             connect(device)
         }
@@ -294,7 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 AppLog.log("probe: no answer from \(device.addresses.joined(separator: ", ")); connecting anyway")
                 guard let first = device.addresses.first else { return }
                 let password = device.deviceID == nil ? self.options.password : (self.options.password ?? Keychain.password(account: device.credentialAccount))
-                self.open(device, address: first, password: password, reprobe: true)
+                self.open(device, address: first, password: password, answered: false)
             }
         }
     }
@@ -309,7 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func open(_ device: Device, address: String, password: String?, reprobe: Bool = false) {
+    private func open(_ device: Device, address: String, password: String?, answered: Bool = true) {
         guard let engineURL = EngineProcess.locateHelper() else {
             fail("blitzkvm-engine helper not found (set BLITZKVM_ENGINE or run `make app`)")
             return
@@ -319,7 +325,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.scalingFilterOverride = options.scalingFilter
         controller.localPointerOverride = options.localPointer
         if isSelfTest { controller.playsAudioOverride = options.expectAudio != nil }
-        controller.reprobeAddresses = reprobe
+        controller.addressAnswered = answered
         controller.showsSetupOnConnect = pendingSetup.remove(device.id) != nil || options.setup != nil
         if !isSelfTest {
             controller.onConnected = { [weak self] c in self?.recordConnection(c.device) }

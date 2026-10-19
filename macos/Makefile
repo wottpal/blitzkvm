@@ -9,6 +9,7 @@
 #   make selftest-stalls   the picture survives link stalls and hidden windows
 #   make selftest-refresh  still refreshes follow typing pauses (fork firmware D13)
 #   make selftest-audio    the device's audio plays (Opus, PCMU) and is turned on once
+#   make selftest-roaming  a window moves between a device's addresses as they answer
 #   make selftest-update   an update installs from a signed appcast; a changed archive doesn't
 #   make run DEVICE=jetkvm.local
 #   make install    copy the app to /Applications
@@ -45,7 +46,7 @@ EMULATOR_ADDR ?= 127.0.0.1:18080
 # bin/jetkvm_app; JetKVM's own release is downloaded once at build time.
 FORK_BINARY ?= $(abspath ../../kvm/bin/jetkvm_app)
 
-.PHONY: app engine swift icon firmware licenses release test selftest selftest-extras selftest-stalls selftest-refresh selftest-audio selftest-update run install notarize clean
+.PHONY: app engine swift icon firmware licenses release test selftest selftest-extras selftest-stalls selftest-refresh selftest-audio selftest-roaming selftest-update run install notarize clean
 
 engine:
 	cd .. && GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o macos/build/blitzkvm-engine ./cmd/blitzkvm-engine
@@ -178,6 +179,27 @@ selftest-audio: app
 	test $$(grep -c '"Type":"rpc.setAudioConfig","Data":"enabled=true"' build/emulator-audio-opus.jsonl) -eq 1 || { echo "the device's audio was not turned on exactly once"; exit 1; }; \
 	! grep -q 'rpc.setAudioConfig' build/emulator-audio-pcmu.jsonl build/emulator-audio-none.jsonl || { echo "a view-only window changed the device's audio"; exit 1; }
 	@echo "selftest-audio passed: Opus and PCMU decoded and played, the device's audio turned on once, view-only left it alone"
+
+# Roaming between a device's addresses: the emulator (one device ID) at two
+# addresses, standing in for the LAN address and the tailnet name. The
+# preferred one is down at first: the window starts there and moves to the
+# other, moves back once the preferred one answers (home again), and away
+# once it stops answering (the lid closed, opened elsewhere). Loopback-only
+# candidates: otherwise the video pairs with this Mac's LAN address, and a
+# picture already on the LAN never moves.
+ROAM_PREFERRED ?= 127.0.0.1:18091
+ROAM_OTHER ?= 127.0.0.1:18092
+selftest-roaming: app
+	cd .. && go build -o macos/build/emulator-serve ./test/emulator-serve
+	./build/emulator-serve serve --listen $(ROAM_OTHER) --width 1280 --height 720 --fps 30 --ice-loopback-only > /dev/null 2>&1 & other=$$!; \
+	( sleep 8; ./build/emulator-serve serve --listen $(ROAM_PREFERRED) --width 1280 --height 720 --fps 30 --ice-loopback-only > /dev/null 2>&1 & preferred=$$!; \
+		sleep 22; kill $$preferred ) & \
+	sleep 1; \
+	"$(APP)/Contents/MacOS/BlitzKVM" --device $(ROAM_PREFERRED),$(ROAM_OTHER) --selftest 42 --view-only --h264 > build/selftest-roaming.json; status=$$?; \
+	kill $$other; wait; \
+	test $$status -eq 0 && grep -q '"addresses" : "$(ROAM_PREFERRED) > $(ROAM_OTHER) > $(ROAM_PREFERRED) > $(ROAM_OTHER)"' build/selftest-roaming.json \
+		&& grep -q '"phase" : "connected"' build/selftest-roaming.json || { cat build/selftest-roaming.json; echo "selftest-roaming failed"; exit 1; }
+	@echo "selftest-roaming passed: the window moved to the address that answered, back to the preferred one once it answered, and away once it stopped"
 
 install: app
 	rm -rf "/Applications/BlitzKVM.app"

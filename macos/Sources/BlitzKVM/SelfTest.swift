@@ -86,6 +86,8 @@ final class SelfTest {
     private var hiddenAtLastFrame: TimeInterval = 0
     private var visibilityTimer: Timer?
     private let started = Date()
+    /// The addresses the window used, in turn (roaming moves it).
+    private var addresses: [String] = []
 
     init(controller: DeviceWindowController, seconds: Double, crashEngineAfter: Double?, snapshotPath: String?) {
         self.controller = controller
@@ -106,6 +108,8 @@ final class SelfTest {
             self.overlayEvents.append((Date().timeIntervalSince(self.started), content?.title))
             AppLog.log("selftest: stall overlay \(content?.title ?? "hidden")")
         }
+        addresses = [controller.address]
+        controller.onAddressMove = { [weak self] address in self?.addresses.append(address) }
         controller.onRestart = { [weak self] reason in
             self?.lock.lock()
             self?.restartReasons.append(reason)
@@ -593,6 +597,7 @@ final class SelfTest {
         let stats = controller.decoder.snapshot()
         var report: [String: Any] = [
             "device": controller.address,
+            "addresses": addresses.joined(separator: " > "),
             "phase": controller.snapshot.Phase,
             "status": controller.snapshot.Status,
             "decodedFrames": decoded,
