@@ -123,6 +123,14 @@ var qualityLadder = []QualityLevel{
 	{Name: "maximum", Factor: 3, MaxFPS: 60, MinQP: 10, StillQP: 1},
 }
 
+// gameLevel replaces maximum at the top of the ladder in Game Mode, and a
+// manual level: maximum's bitrate with a coarser QP floor, which keeps
+// keyframes and large changes smaller (about half maximum's keyframe,
+// keyframeBytesQP10 and qpStep) and so shorter in the send path, and no
+// still refresh (StillQP at the floor), whose keyframe would hold back the
+// frames behind it. MinQP and Factor are starting values.
+var gameLevel = QualityLevel{Name: "game", Factor: 3, MaxFPS: 60, MinQP: 22, StillQP: 22}
+
 const (
 	// qualityTick is how often the governor looks: often enough to answer a
 	// queue within 100-200 ms. The transport statistics behind the loss
@@ -235,6 +243,7 @@ type qualityGovernor struct {
 	path          string // the path's kind and remote address (setPath)
 	pathRemote    string
 	clientRefresh bool    // the client plans still refreshes (Config.ClientRefresh, D13)
+	gameMode      bool    // Config.GameMode: gameLevel at the top, no still refresh
 	width, height int     // the video's, for the levels' bitrates and keyframes
 	sourceFPS     float64 // the video's frame rate
 	lastChange    time.Time
@@ -274,15 +283,26 @@ func newQualityGovernor(now time.Time, rtt, baseUp time.Duration) *qualityGovern
 	return g
 }
 
-// params is the current level as applied: the ladder's, with the still
-// refresh QP and the peak cap for the link.
+// params is the current level as applied: the ladder's (gameLevel at the
+// top in Game Mode), with the still refresh QP and the peak cap for the
+// link.
 func (g *qualityGovernor) params() QualityLevel {
+	top := g.level == len(qualityLadder)-1
 	l := qualityLadder[g.level]
+	if g.gameMode && top {
+		l = gameLevel
+	}
 	l.StillQP, l.PeakKbps, l.PaceKbps = g.stillQP, g.peakKbps, g.paceKbps
-	if g.level == len(qualityLadder)-1 && g.onLAN() && !g.deviceTunnel && g.framePacing &&
+	if top && g.onLAN() && !g.deviceTunnel && g.framePacing &&
 		g.width > 0 && g.height > 0 && g.sourceFPS > float64(l.MaxFPS)+1 &&
 		float64(g.width*g.height)*g.sourceFPS <= sourceRatePixels {
 		l.MaxFPS = 0 // the source rate (sourceRatePixels)
+	}
+	if g.gameMode {
+		// No still refresh at any level. Pacing stays off on a LAN
+		// (updatePeak) and stays where Tailscale on the device or a slow
+		// link needs it.
+		l.StillQP = l.MinQP
 	}
 	return l
 }
@@ -537,10 +557,16 @@ func (g *qualityGovernor) stillQPFor(level int, link video.LinkEstimate) int {
 // its reconnects). Turning it off keeps the current level.
 func (c *Controller) SetAutoQuality(on bool) {
 	c.mu.Lock()
+	wasAuto := c.cfg.AutoQuality
 	c.cfg.AutoQuality = on
-	if !on && c.snapshot.QualityLevel != "" {
-		// Keep what automatic had chosen, also for reconnects.
-		c.cfg.QualityLevel = c.snapshot.QualityLevel
+	if !on && wasAuto && c.snapshot.QualityLevel != "" {
+		// Keep what automatic had chosen, also for reconnects; the game
+		// level stands in for maximum.
+		level := c.snapshot.QualityLevel
+		if level == gameLevel.Name {
+			level = qualityLadder[len(qualityLadder)-1].Name
+		}
+		c.cfg.QualityLevel = level
 	}
 	current := c.current
 	connected := c.snapshot.Phase == PhaseConnected
@@ -568,7 +594,131 @@ func (c *Controller) SetQualityLevel(ctx context.Context, name string) error {
 	if cl == nil {
 		return nil // applied on connect
 	}
-	return c.applyLevel(ctx, cl, qualityLadder[level])
+	return c.applyManual(ctx, cl)
+}
+
+// SetGameMode turns Game Mode on or off for this session (and its
+// reconnects). Automatic quality's governor takes it up within a
+// qualityTick; a manual level is applied here: the game level in Game Mode,
+// the configured one again after it.
+func (c *Controller) SetGameMode(ctx context.Context, on bool) error {
+	c.mu.Lock()
+	c.cfg.GameMode = on
+	c.snapshot.GameMode = on
+	auto := c.cfg.AutoQuality
+	c.mu.Unlock()
+	cl := c.clientIfConnected()
+	if cl == nil {
+		return nil // applied on connect
+	}
+	if on {
+		c.checkRelativeMouse(ctx, cl)
+	}
+	if auto {
+		return nil
+	}
+	return c.applyManual(ctx, cl)
+}
+
+// checkRelativeMouse reports whether the device's relative mouse, which
+// games read, is off. It never changes the device's USB functions.
+func (c *Controller) checkRelativeMouse(ctx context.Context, cl *client.Client) {
+	devices, err := cl.GetUSBDevices(ctx)
+	if err != nil {
+		log := logging.Subsystem("quality")
+		log.Debug().Err(err).Msg("get USB devices")
+		return
+	}
+	c.setStateFor(cl, func(s *Snapshot) { s.RelativeMouseOff = !devices.RelativeMouse })
+}
+
+// gameSavedState is what Game Mode replaced on the device while no level was
+// configured (Controller.gameSaved).
+type gameSavedState struct {
+	saved  bool
+	live   bool
+	factor float64         // stock firmware's quality factor
+	params json.RawMessage // getVideoEncoderParams
+}
+
+// applyManual applies the configured level when automatic quality is off:
+// the game level in Game Mode, otherwise the configured level, or, with none,
+// what Game Mode replaced.
+func (c *Controller) applyManual(ctx context.Context, cl *client.Client) error {
+	c.mu.RLock()
+	game, level := c.cfg.GameMode, levelIndex(c.cfg.QualityLevel)
+	c.mu.RUnlock()
+	if game {
+		if level < 0 {
+			if err := c.saveForGame(ctx, cl); err != nil {
+				return err
+			}
+		}
+		return c.applyLevel(ctx, cl, gameLevel)
+	}
+	c.mu.Lock()
+	saved := c.gameSaved
+	c.gameSaved = gameSavedState{}
+	c.mu.Unlock()
+	if level >= 0 {
+		return c.applyLevel(ctx, cl, qualityLadder[level])
+	}
+	return c.restoreFromGame(ctx, cl, saved)
+}
+
+// saveForGame keeps the device's own quality before Game Mode first changes
+// it, once: the stock quality factor is a device setting that outlives the
+// session, and live parameters are what the device ran with.
+func (c *Controller) saveForGame(ctx context.Context, cl *client.Client) error {
+	c.mu.RLock()
+	saved := c.gameSaved.saved
+	c.mu.RUnlock()
+	if saved {
+		return nil
+	}
+	live, err := c.encoderParams(ctx, cl)
+	if err != nil {
+		return err
+	}
+	state := gameSavedState{saved: true, live: live}
+	if live {
+		err = cl.Call(ctx, "getVideoEncoderParams", nil, &state.params)
+	} else {
+		state.factor, err = cl.GetStreamQualityFactor(ctx)
+	}
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.gameSaved = state
+	c.mu.Unlock()
+	return nil
+}
+
+// restoreFromGame puts back what saveForGame kept.
+func (c *Controller) restoreFromGame(ctx context.Context, cl *client.Client, saved gameSavedState) error {
+	if !saved.saved {
+		return nil
+	}
+	if saved.live {
+		if err := cl.Call(ctx, "setVideoEncoderParams", map[string]any{"params": saved.params}, nil); err != nil {
+			return err
+		}
+		// No level of ours applies, as at a new session.
+		c.setStateFor(cl, func(s *Snapshot) { s.QualityLevel, s.ClientRefresh, s.MinQP, s.StillQP = "", false, 0, 0 })
+		return nil
+	}
+	current, err := cl.GetStreamQualityFactor(ctx)
+	if err != nil {
+		return err
+	}
+	if current != saved.factor {
+		if err := cl.SetStreamQualityFactor(ctx, saved.factor); err != nil {
+			return err
+		}
+	}
+	c.setStateFor(cl, func(s *Snapshot) { s.QualityLevel, s.Quality = "", saved.factor })
+	return nil
 }
 
 func levelIndex(name string) int {
@@ -619,15 +769,17 @@ func (c *Controller) applyLevel(ctx context.Context, cl *client.Client, l Qualit
 		c.mu.RLock()
 		w, h := c.snapshot.VideoWidth, c.snapshot.VideoHeight
 		clientRefresh := c.cfg.ClientRefresh
+		game := c.cfg.GameMode
 		c.mu.RUnlock()
-		clientRefresh = clientRefresh && cl.HasFirmwareFeature(ctx, client.FeatureRefreshRegions)
+		// Game Mode has no still refresh, the device's or the client's.
+		clientRefresh = !game && clientRefresh && cl.HasFirmwareFeature(ctx, client.FeatureRefreshRegions)
 		target, peak := l.bitrates(w, h)
 		// Firmware from before the still refresh ignores stillQp.
 		update := map[string]any{
 			"minQp": l.MinQP, "maxFps": l.MaxFPS, "bitrateKbps": target, "maxBitrateKbps": peak,
 			"stillQp": l.StillQP,
 		}
-		if clientRefresh {
+		if clientRefresh || game {
 			update["autoRefresh"] = false
 		}
 		// Sent with every level, so a manual level turns pacing off again.
@@ -640,7 +792,7 @@ func (c *Controller) applyLevel(ctx context.Context, cl *client.Client, l Qualit
 		}
 		c.setStateFor(cl, func(s *Snapshot) { s.ClientRefresh, s.MinQP, s.StillQP = clientRefresh, l.MinQP, l.StillQP })
 		log.Info().Str("level", l.Name).Int("kbps", target).Int("peakKbps", peak).Int("paceKbps", l.PaceKbps).Int("maxFps", l.MaxFPS).Int("minQp", l.MinQP).Int("stillQp", l.StillQP).
-			Bool("clientRefresh", clientRefresh).Msg("stream quality (live)")
+			Bool("clientRefresh", clientRefresh).Bool("gameMode", game).Msg("stream quality (live)")
 		return nil
 	}
 	// Stock firmware: only the factor, and only when it changes (each change
@@ -668,12 +820,13 @@ func (c *Controller) applyLevel(ctx context.Context, cl *client.Client, l Qualit
 // turned off.
 func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 	c.mu.Lock()
-	auto, manual := c.cfg.AutoQuality, c.cfg.QualityLevel
+	auto, game := c.cfg.AutoQuality, c.cfg.GameMode
+	if game {
+		go c.checkRelativeMouse(ctx, cl)
+	}
 	if !auto {
 		c.mu.Unlock()
-		if level := levelIndex(manual); level >= 0 {
-			_ = c.applyLevel(ctx, cl, qualityLadder[level])
-		}
+		_ = c.applyManual(ctx, cl)
 		return
 	}
 	if c.autoRunning[cl] {
@@ -708,7 +861,7 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 		baseUp = upAfterClean
 	}
 	c.mu.RLock()
-	clientRefresh := c.cfg.ClientRefresh
+	clientRefresh, game := c.cfg.ClientRefresh, c.cfg.GameMode
 	c.mu.RUnlock()
 	clientRefresh = clientRefresh && live && cl.HasFirmwareFeature(ctx, client.FeatureRefreshRegions)
 	// The bitrate follows the resolution (the firmware's formula), the
@@ -726,7 +879,7 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 	gov := newQualityGovernor(time.Now(), time.Duration(stats.RoundTripMs*float64(time.Millisecond)), baseUp)
 	mode := currentMode()
 	gov.width, gov.height, gov.sourceFPS = mode.width, mode.height, mode.fps
-	gov.clientRefresh = clientRefresh
+	gov.clientRefresh, gov.gameMode = clientRefresh, game
 	gov.framePacing = live && cl.HasFirmwareFeature(ctx, client.FeatureFramePacing)
 	gov.setPath(stats)
 	// The rate may be measured by now (the stream's first frames are not
@@ -749,11 +902,16 @@ func (c *Controller) autoQuality(ctx context.Context, cl *client.Client) {
 		case now := <-ticker.C:
 			c.mu.RLock()
 			on := c.cfg.AutoQuality && c.current == cl
+			game := c.cfg.GameMode
 			c.mu.RUnlock()
 			if !on {
 				return
 			}
 			changed := false
+			if game != gov.gameMode {
+				// SetGameMode: the current level again, with or without it.
+				gov.gameMode, changed = game, true
+			}
 			if m := currentMode(); m != mode {
 				mode, changed = m, true
 				gov.width, gov.height, gov.sourceFPS = m.width, m.height, m.fps

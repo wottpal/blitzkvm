@@ -854,3 +854,243 @@ func TestQualityClientRegionRefreshStaysOnOffALAN(t *testing.T) {
 		t.Errorf("minimal: level %d still QP %d", g.level, p.StillQP)
 	}
 }
+
+// Game Mode replaces maximum at the top with the game level: no near-lossless
+// still refresh, no pacing on a LAN, and every captured frame where maximum
+// would encode it.
+func TestGameModeTopIsTheGameLevel(t *testing.T) {
+	start := time.Unix(0, 0)
+	for _, c := range []struct {
+		width, height int
+		fps           float64
+		wantFPS       int
+	}{
+		{1280, 720, 120, 0},
+		{1920, 1080, 60, 60},
+	} {
+		g := newQualityGovernor(start, 2*time.Millisecond, upAfterClean)
+		g.width, g.height, g.sourceFPS = c.width, c.height, c.fps
+		g.framePacing, g.gameMode = true, true
+		g.level = len(qualityLadder) - 1
+		p := g.params()
+		if p.Name != "game" || p.MaxFPS != c.wantFPS || p.MinQP != 22 || p.StillQP < p.MinQP || p.PaceKbps != 0 {
+			t.Errorf("%dx%d@%v: params %+v, want game, maxFps %d, minQp 22, no still refresh, no pacing", c.width, c.height, c.fps, p, c.wantFPS)
+		}
+	}
+}
+
+// Game Mode turns the still refresh off at every level, on a LAN and off it,
+// and no level drops below 60 fps.
+func TestGameModeNoStillRefreshAtAnyLevel(t *testing.T) {
+	start := time.Unix(0, 0)
+	for _, rtt := range []time.Duration{2 * time.Millisecond, 60 * time.Millisecond} {
+		g := newQualityGovernor(start, rtt, upAfterClean)
+		g.width, g.height, g.sourceFPS = 1920, 1080, 60
+		g.framePacing, g.clientRefresh, g.gameMode = true, true, true
+		for i := range qualityLadder {
+			g.level = i
+			// What the governor would hold off a LAN: a refresh just below the
+			// floor (stillQPFor), a peak cap and pacing.
+			g.stillQP = qualityLadder[i].MinQP - 1
+			if rtt > lanRTT {
+				g.peakKbps, g.paceKbps = 3000, 3750
+			}
+			p := g.params()
+			if p.StillQP < p.MinQP {
+				t.Errorf("rtt %v, level %d: stillQp %d below minQp %d", rtt, i, p.StillQP, p.MinQP)
+			}
+			if p.MaxFPS != 0 && p.MaxFPS < 60 {
+				t.Errorf("rtt %v, level %d: maxFps %d", rtt, i, p.MaxFPS)
+			}
+		}
+	}
+}
+
+// "game" is not a ladder level: turning automatic off keeps maximum, the
+// level Game Mode replaced, for reconnects.
+func TestGameModeAutoOffKeepsALadderLevel(t *testing.T) {
+	controller := New(Config{AutoQuality: true, GameMode: true})
+	controller.mu.Lock()
+	controller.snapshot.QualityLevel = gameLevel.Name
+	controller.mu.Unlock()
+	controller.SetAutoQuality(false)
+	controller.mu.RLock()
+	kept := controller.cfg.QualityLevel
+	controller.mu.RUnlock()
+	if kept != "maximum" {
+		t.Fatalf("automatic off kept %q, want maximum", kept)
+	}
+}
+
+// gameModeEmulator is firmware with the encoder patch, D13's client refresh
+// and D18's frame pacing.
+var gameModeEmulator = emulator.Config{EncoderPatch: true, RefreshRegions: true, FramePacing: true}
+
+func newGameModeController(t *testing.T, srv *emulator.Server, cfg Config) *Controller {
+	t.Helper()
+	cfg.BaseURL = srv.BaseURL()
+	cfg.ICELoopbackOnly = true
+	cfg.Password = "secret"
+	cfg.RPCTimeout = 2 * time.Second
+	cfg.Reconnect = true
+	return New(cfg)
+}
+
+// waitFor polls cond until it holds or 5 s have passed.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func TestControllerGameModeSetsEncoder(t *testing.T) {
+	srv, ctx, cancel := startEmulatorWith(t, gameModeEmulator)
+	defer cancel()
+	controller := newGameModeController(t, srv, Config{ClientRefresh: true})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	if got := srv.State().EncoderParams; !got.AutoRefresh {
+		t.Fatalf("device refresh off before Game Mode: %+v", got)
+	}
+
+	if err := controller.SetGameMode(ctx, true); err != nil {
+		t.Fatalf("SetGameMode: %v", err)
+	}
+	if got := srv.State().EncoderParams; got.AutoRefresh || got.StillQP < got.MinQP || got.MinQP != gameLevel.MinQP {
+		t.Fatalf("device params %+v, want autoRefresh off, stillQp >= minQp %d", got, gameLevel.MinQP)
+	}
+	if s := controller.Snapshot(); !s.GameMode || s.ClientRefresh || s.QualityLevel != "game" {
+		t.Fatalf("snapshot gameMode %v clientRefresh %v level %q", s.GameMode, s.ClientRefresh, s.QualityLevel)
+	}
+}
+
+func TestControllerGameModeRestoresTheLevel(t *testing.T) {
+	srv, ctx, cancel := startEmulatorWith(t, gameModeEmulator)
+	defer cancel()
+	controller := newGameModeController(t, srv, Config{ClientRefresh: true, QualityLevel: "balanced"})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	waitFor(t, "balanced", func() bool { return controller.Snapshot().MinQP == 18 })
+
+	if err := controller.SetGameMode(ctx, true); err != nil {
+		t.Fatalf("SetGameMode(true): %v", err)
+	}
+	if got := srv.State().EncoderParams; got.MinQP != gameLevel.MinQP {
+		t.Fatalf("game: device params %+v", got)
+	}
+	if err := controller.SetGameMode(ctx, false); err != nil {
+		t.Fatalf("SetGameMode(false): %v", err)
+	}
+	if got := srv.State().EncoderParams; got.MinQP != 18 || got.StillQP != 8 || got.AutoRefresh {
+		t.Fatalf("after game: device params %+v, want balanced with the client's refresh", got)
+	}
+	if s := controller.Snapshot(); !s.ClientRefresh || s.GameMode || s.QualityLevel != "balanced" {
+		t.Fatalf("after game: snapshot clientRefresh %v gameMode %v level %q", s.ClientRefresh, s.GameMode, s.QualityLevel)
+	}
+}
+
+// With automatic quality, Game Mode changes the running governor's level at
+// once (not at its next level change), and turning it off brings the still
+// refresh back.
+func TestControllerGameModeWithAutoQuality(t *testing.T) {
+	srv, ctx, cancel := startEmulatorWith(t, gameModeEmulator)
+	defer cancel()
+	controller := newGameModeController(t, srv, Config{ClientRefresh: true, AutoQuality: true})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	waitFor(t, "a level", func() bool { return controller.Snapshot().MinQP != 0 })
+
+	if err := controller.SetGameMode(ctx, true); err != nil {
+		t.Fatalf("SetGameMode(true): %v", err)
+	}
+	waitFor(t, "Game Mode's level", func() bool {
+		s, got := controller.Snapshot(), srv.State().EncoderParams
+		return !s.ClientRefresh && s.StillQP >= s.MinQP && !got.AutoRefresh && got.StillQP >= got.MinQP
+	})
+	if err := controller.SetGameMode(ctx, false); err != nil {
+		t.Fatalf("SetGameMode(false): %v", err)
+	}
+	waitFor(t, "the still refresh again", func() bool {
+		s, got := controller.Snapshot(), srv.State().EncoderParams
+		return s.ClientRefresh && s.StillQP < s.MinQP && s.QualityLevel != "game" && got.StillQP < got.MinQP
+	})
+}
+
+// Game Mode looks whether the device's relative mouse is on (FPS games need
+// it) and reports when it is off, without changing it.
+func TestControllerGameModeReportsRelativeMouseOff(t *testing.T) {
+	srv, ctx, cancel := startEmulator(t)
+	defer cancel()
+	controller := newGameModeController(t, srv, Config{})
+	controller.Start(ctx)
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	if err := controller.SetGameMode(ctx, true); err != nil {
+		t.Fatalf("SetGameMode: %v", err)
+	}
+	if controller.Snapshot().RelativeMouseOff {
+		t.Fatal("relative mouse reported off on the default device")
+	}
+	_ = controller.SetGameMode(ctx, false)
+	devices := `{"devices":{"absolute_mouse":true,"relative_mouse":false,"keyboard":true,"mass_storage":true,"audio":true}}`
+	if _, err := controller.Call(ctx, "setUsbDevices", []byte(devices)); err != nil {
+		t.Fatalf("setUsbDevices: %v", err)
+	}
+	if err := controller.SetGameMode(ctx, true); err != nil {
+		t.Fatalf("SetGameMode: %v", err)
+	}
+	if !controller.Snapshot().RelativeMouseOff {
+		t.Fatal("relative mouse off not reported")
+	}
+	if srv.State().USBDevices.RelativeMouse {
+		t.Fatal("Game Mode turned the relative mouse on")
+	}
+	controller.Stop()
+
+	// Connecting with Game Mode on checks too.
+	controller = newGameModeController(t, srv, Config{GameMode: true})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	waitFor(t, "relative mouse off on connect", func() bool { return controller.Snapshot().RelativeMouseOff })
+	if !controller.Snapshot().GameMode {
+		t.Fatal("snapshot without Game Mode")
+	}
+}
+
+// Stock firmware takes Game Mode as the game level's quality factor, and gets
+// its own factor back afterwards.
+func TestControllerGameModeOnStockFirmware(t *testing.T) {
+	srv, ctx, cancel := startEmulator(t)
+	defer cancel()
+	controller := newGameModeController(t, srv, Config{})
+	controller.Start(ctx)
+	defer controller.Stop()
+	waitForPhase(t, controller, PhaseConnected, 5*time.Second)
+	before := srv.State().StreamQualityFactor
+
+	if err := controller.SetGameMode(ctx, true); err != nil {
+		t.Fatalf("SetGameMode(true): %v", err)
+	}
+	var factor float64
+	raw, err := controller.Call(ctx, "getStreamQualityFactor", nil)
+	if err == nil {
+		_, err = fmt.Sscan(string(raw), &factor)
+	}
+	if err != nil || factor != gameLevel.Factor {
+		t.Fatalf("device factor = %v (%v), want %v", factor, err, gameLevel.Factor)
+	}
+	if err := controller.SetGameMode(ctx, false); err != nil {
+		t.Fatalf("SetGameMode(false): %v", err)
+	}
+	if got := srv.State().StreamQualityFactor; got != before {
+		t.Fatalf("factor after Game Mode %v, want %v", got, before)
+	}
+}
