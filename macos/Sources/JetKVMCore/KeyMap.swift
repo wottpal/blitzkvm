@@ -102,7 +102,7 @@ public enum KeyMap {
     /// (` / <) as kVK_ANSI_Grave, the opposite of their PC positions, so they
     /// are swapped back to what a PC ISO keyboard sends.
     public static func hidUsage(keyCode: UInt16, isISO: Bool, remote: ModifierProfile) -> UInt8? {
-        if isISO && remote == .pc {
+        if isISO && remote != .mac {
             if keyCode == 0x0A { return 0x35 }
             if keyCode == 0x32 { return 0x64 }
         }
@@ -117,14 +117,20 @@ public enum ModifierProfile: String, CaseIterable {
     case mac
     /// Remote is Linux/Windows: swap ⌘ and ⌃, so ⌘C on the Mac sends Ctrl+C.
     case pc
+    /// Remote is Linux/Windows, keys by position as on a PC keyboard: ⌃
+    /// stays Ctrl, ⌥ sends Windows and ⌘ sends Alt (games, PC muscle memory).
+    case pcLayout
 
     public func apply(_ usage: UInt8) -> UInt8 {
-        guard self == .pc else { return usage }
-        switch usage {
-        case 0xE0: return 0xE3
-        case 0xE3: return 0xE0
-        case 0xE4: return 0xE7
-        case 0xE7: return 0xE4
+        switch (self, usage) {
+        case (.pc, 0xE0): return 0xE3
+        case (.pc, 0xE3): return 0xE0
+        case (.pc, 0xE4): return 0xE7
+        case (.pc, 0xE7): return 0xE4
+        case (.pcLayout, 0xE2): return 0xE3
+        case (.pcLayout, 0xE3): return 0xE2
+        case (.pcLayout, 0xE6): return 0xE7
+        case (.pcLayout, 0xE7): return 0xE6
         default: return usage
         }
     }

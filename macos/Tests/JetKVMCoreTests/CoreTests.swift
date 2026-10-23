@@ -147,6 +147,20 @@ final class KeyMapTests: XCTestCase {
         XCTAssertEqual(ModifierProfile.mac.apply(0xE3), 0xE3)
         XCTAssertEqual(ModifierProfile.pc.apply(0x04), 0x04)
     }
+
+    /// Keys by position, as on a PC keyboard: ⌃ Ctrl, ⌥ Windows, ⌘ Alt.
+    func testPCLayoutProfileMatchesPCKeyPositions() {
+        let p = ModifierProfile.pcLayout
+        XCTAssertEqual(p.apply(0xE0), 0xE0, "⌃ stays Ctrl")
+        XCTAssertEqual(p.apply(0xE2), 0xE3, "⌥ sends Windows")
+        XCTAssertEqual(p.apply(0xE3), 0xE2, "⌘ sends Alt")
+        XCTAssertEqual(p.apply(0xE6), 0xE7, "right ⌥ sends right Windows")
+        XCTAssertEqual(p.apply(0xE7), 0xE6, "right ⌘ sends right Alt")
+        XCTAssertEqual(p.apply(0xE1), 0xE1)
+        XCTAssertEqual(p.apply(0x04), 0x04)
+        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x0A, isISO: true, remote: .pcLayout),
+                       KeyMap.hidUsage(keyCode: 0x0A, isISO: true, remote: .pc), "ISO keys as for any PC")
+    }
 }
 
 final class GeometryTests: XCTestCase {

@@ -657,6 +657,7 @@ struct DeviceEditor: View {
                     Picker("Operating system", selection: $device.modifierProfile) {
                         Text("macOS").tag(ModifierProfile.mac.rawValue)
                         Text("Windows or Linux").tag(ModifierProfile.pc.rawValue)
+                        Text("Windows or Linux, PC key positions").tag(ModifierProfile.pcLayout.rawValue)
                     }
                     Picker("Display", selection: $device.scaling) {
                         ForEach(ScalingMode.allCases, id: \.self) { Text($0.menuTitle).tag($0) }
@@ -669,6 +670,9 @@ struct DeviceEditor: View {
                     VStack(alignment: .leading, spacing: 6) {
                         if device.profile == .pc {
                             Footnote("⌘ and Control are swapped, so ⌘C sends Ctrl+C.")
+                        }
+                        if device.profile == .pcLayout {
+                            Footnote("Keys by position, as on a PC keyboard: Control is Ctrl, ⌥ is the Windows key, ⌘ is Alt.")
                         }
                         if device.scaling == .matchWindow {
                             Footnote("Match Window changes the remote computer’s resolution with every resize. A Mac with another monitor then stops using the JetKVM as its main display, so use it when the JetKVM is the only display.")
@@ -842,6 +846,17 @@ extension ScalingMode {
         case .fit: return "Fit"
         case .integer: return "Whole Multiple"
         default: return menuTitle
+        }
+    }
+}
+
+extension ModifierProfile {
+    /// Device menu.
+    var menuTitle: String {
+        switch self {
+        case .mac: return "Remote Is a Mac (⌘ stays ⌘)"
+        case .pc: return "Remote Is a PC (⌘ ↔ Ctrl)"
+        case .pcLayout: return "Remote Is a PC, PC Key Positions (⌥ Win, ⌘ Alt)"
         }
     }
 }

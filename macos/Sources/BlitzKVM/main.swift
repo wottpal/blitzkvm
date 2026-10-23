@@ -572,7 +572,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(extensionsItem)
         device.addItem(.separator())
         for profile in ModifierProfile.allCases {
-            let i = item(profile == .mac ? "Remote Is a Mac (⌘ stays ⌘)" : "Remote Is a PC (⌘ ↔ Ctrl)", #selector(setProfile(_:)))
+            let i = item(profile.menuTitle, #selector(setProfile(_:)))
             i.representedObject = profile.rawValue
             device.addItem(i)
         }
