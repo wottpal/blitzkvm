@@ -914,7 +914,7 @@ extension AppDelegate: NSMenuItemValidation {
         case #selector(setQualityLevel(_:)):
             let level = menuItem.representedObject as? String
             if c?.device.adaptiveQuality == true {
-                menuItem.state = c?.snapshot.QualityLevel == level ? .mixed : .off
+                menuItem.state = QualityLevelName.ladderLevel(c?.snapshot.QualityLevel) == level ? .mixed : .off
                 menuItem.toolTip = menuItem.state == .mixed ? "Automatic runs at this level now" : nil
             } else {
                 menuItem.state = c?.device.qualityLevel == level ? .on : .off

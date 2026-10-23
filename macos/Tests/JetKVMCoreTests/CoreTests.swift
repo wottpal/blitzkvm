@@ -55,6 +55,25 @@ final class EngineProtocolTests: XCTestCase {
         XCTAssertEqual(connect["clientRefresh"] as? Bool, true)
     }
 
+    func testGameModeCommandEncodesLikeGo() throws {
+        let on = try JSONSerialization.jsonObject(with: JSONEncoder().encode(EngineCommand(cmd: "setGameMode", gameMode: true))) as! [String: Any]
+        XCTAssertEqual(on["cmd"] as? String, "setGameMode")
+        XCTAssertEqual(on["gameMode"] as? Bool, true)
+        let none = try JSONSerialization.jsonObject(with: JSONEncoder().encode(EngineCommand(cmd: "ping"))) as! [String: Any]
+        XCTAssertNil(none["gameMode"])
+        let json = #"{"Phase":"connected","Status":"connected","GameMode":true,"RelativeMouseOff":true}"#
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snapshot.GameMode, true)
+        XCTAssertEqual(snapshot.RelativeMouseOff, true)
+    }
+
+    func testGameQualityLevelIsNeverALadderLevel() {
+        XCTAssertEqual(QualityLevelName.ladderLevel("game"), "maximum")
+        XCTAssertEqual(QualityLevelName.ladderLevel("balanced"), "balanced")
+        XCTAssertNil(QualityLevelName.ladderLevel(nil))
+        XCTAssertNil(QualityLevelName.ladderLevel(""))
+    }
+
     func testSnapshotCarriesTheStillRefreshLevel() throws {
         let json = #"{"Phase":"connected","Status":"connected","ClientRefresh":true,"MinQP":10,"StillQP":1}"#
         let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))

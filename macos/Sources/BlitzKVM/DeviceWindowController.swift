@@ -103,6 +103,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private var slowLinkHintShown = false
     private var isShutDown = false
     private var wasConnected = false
+    private var relativeMouseHintShown = false
     private var pathMonitor: NWPathMonitor?
     private var aspectLocked = false
     private var pendingPasteID: Int64?
@@ -269,6 +270,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         guard !input.viewOnly else { return }
         gameModeOverride = nil
         updatePreferences { $0.isGameMode = on }
+        engine.setGameMode(on)
         if !on { releasePointerLock() }
     }
 
@@ -669,7 +671,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private func connectEngine() {
         engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256,
                        autoQuality: device.adaptiveQuality && !input.viewOnly, qualityLevel: input.viewOnly ? nil : device.qualityLevel,
-                       clientRefresh: !input.viewOnly, audio: playsAudio, enableDeviceAudio: !input.viewOnly)
+                       clientRefresh: !input.viewOnly, audio: playsAudio, enableDeviceAudio: !input.viewOnly,
+                       gameMode: isGameMode)
     }
 
     func showVirtualMedia() {
@@ -881,6 +884,18 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     // MARK: Commands
 
+    /// Game Mode needs the JetKVM's relative mouse; when it is off, says so
+    /// once per window with a button that turns it on (a device setting the
+    /// user explicitly clicks: kvm-blitz/jsonrpc.go setUsbDeviceState).
+    private func offerRelativeMouseIfOff() {
+        guard !relativeMouseHintShown, snapshot.GameMode == true, snapshot.RelativeMouseOff == true else { return }
+        relativeMouseHintShown = true
+        hud.show("Game Mode needs the JetKVM's relative mouse, which is off", for: 12, action: ("Turn On", { [weak self] in
+            self?.sendRPC("setUsbDeviceState", params: .object(["device": .string("relativeMouse"), "enabled": .bool(true)]))
+            self?.hud.show("Relative mouse turned on", for: 2.5)
+        }))
+    }
+
     func sendRPC(_ method: String, params: JSONValue? = nil) {
         engine.send(command: EngineCommand(cmd: "rpc", method: method, params: params))
     }
@@ -955,7 +970,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// Automatic quality: the engine adapts the stream to the link.
     func setAdaptiveQuality(_ on: Bool) {
         guard !input.viewOnly else { return } // view-only never changes device settings
-        let current = snapshot.QualityLevel
+        let current = QualityLevelName.ladderLevel(snapshot.QualityLevel) // never "game"
         updatePreferences {
             $0.adaptiveQuality = on
             // Off keeps what automatic had chosen (the engine does the same).
@@ -1014,6 +1029,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         self.snapshot = snapshot
         stillRefresh.update(snapshot)
+        offerRelativeMouseIfOff()
         if snapshot.Phase == "auth_failed" && !snapshot.Status.contains("locked") {
             // Wrong, empty or changed password: always ask (the engine has
             // stopped retrying). A lockout (429) must not trigger more tries.
@@ -1229,7 +1245,14 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         parts.append(codecName)
         codecLock.unlock()
         if let codec = audio.playingCodec { parts.append("audio \(codec)") }
-        if let level = snapshot.QualityLevel, !level.isEmpty {
+        let gameLevel = snapshot.GameMode == true && snapshot.QualityLevel == "game"
+        if gameLevel {
+            // The encoder state, e.g. "Game Mode · 1280×720 120 fps".
+            var game = "Game Mode"
+            if let w = snapshot.VideoWidth, let h = snapshot.VideoHeight, w > 0, h > 0 { game += " · \(w)×\(h)" }
+            if let fps = snapshot.VideoFPS, fps > 0 { game += String(format: " %.0f fps", fps) }
+            parts.append(game)
+        } else if let level = snapshot.QualityLevel, !level.isEmpty {
             parts.append(snapshot.AutoQuality == true ? "quality \(level) (auto)" : "quality \(level)")
         }
         if let fps = lastStats["FramesPerSecond"] as? Double { parts.append(String(format: "%.0f fps", fps)) }
@@ -1672,6 +1695,8 @@ final class HintView: NSView {
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private let flash = NSView()
+    private let actionButton = NSButton(title: "", target: nil, action: nil)
+    private var actionHandler: (() -> Void)?
     private var hideWork: DispatchWorkItem?
     private var flashWork: DispatchWorkItem?
 
@@ -1697,7 +1722,12 @@ final class HintView: NSView {
         label.textColor = .labelColor
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [icon, label])
+        actionButton.bezelStyle = .rounded
+        actionButton.controlSize = .small
+        actionButton.target = self
+        actionButton.action = #selector(actionClicked)
+        actionButton.isHidden = true
+        let stack = NSStackView(views: [icon, label, actionButton])
         stack.spacing = 9
         stack.edgeInsets = NSEdgeInsets(top: 9, left: 16, bottom: 9, right: 16)
         panel.addSubview(shade)
@@ -1730,13 +1760,28 @@ final class HintView: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    // Never takes clicks from the video.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    // Never takes clicks from the video, except on a visible action button.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !actionButton.isHidden, !panel.isHidden, panel.alphaValue > 0.5 else { return nil }
+        let inButton = actionButton.convert(point, from: self)
+        return actionButton.bounds.contains(inButton) ? actionButton : nil
+    }
+
+    @objc private func actionClicked() {
+        let handler = actionHandler
+        actionHandler = nil
+        actionButton.isHidden = true
+        handler?()
+    }
 
     /// Shows `text` for `seconds`. A hint that flashes, shown again while
     /// it does (each key typed without control), keeps the flash on.
-    func show(_ text: String, for seconds: TimeInterval, prominent: Bool = false, flashes: Bool = false) {
+    func show(_ text: String, for seconds: TimeInterval, prominent: Bool = false, flashes: Bool = false,
+              action: (title: String, handler: () -> Void)? = nil) {
         label.stringValue = text
+        actionHandler = action?.handler
+        actionButton.title = action?.title ?? ""
+        actionButton.isHidden = action == nil
         label.font = .systemFont(ofSize: prominent ? 14 : 13, weight: prominent ? .semibold : .medium)
         icon.isHidden = !prominent
         effectiveAppearance.performAsCurrentDrawingAppearance {

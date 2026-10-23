@@ -243,6 +243,19 @@ func TestEngineVideoPause(t *testing.T) {
 	}
 }
 
+func TestEngineGameMode(t *testing.T) {
+	srv := startEmulator(t)
+	h := startEngine(t)
+	h.send(engineipc.Command{ID: 1, Cmd: "connect", BaseURL: strings.TrimPrefix(srv.BaseURL(), "http://"), Password: "pw"})
+	h.waitForSnapshot(10*time.Second, "connected", func(snap map[string]any) bool { return snap["Phase"] == "connected" })
+	h.send(engineipc.Command{ID: 2, Cmd: "setGameMode", GameMode: true})
+	h.waitFor(5*time.Second, "setGameMode ack", func(f frame) bool {
+		var res engineipc.CommandResult
+		return f.typ == engineipc.TypeCommandDone && json.Unmarshal(f.payload, &res) == nil && res.ID == 2 && res.Error == ""
+	})
+	h.waitForSnapshot(5*time.Second, "GameMode snapshot", func(snap map[string]any) bool { return snap["GameMode"] == true })
+}
+
 // createPassword sets a password-less device's first password; the device
 // then asks for it, and the engine reconnects with it.
 func TestEngineCreatePassword(t *testing.T) {
