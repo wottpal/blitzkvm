@@ -23,6 +23,7 @@ enum SettingsTab: String, CaseIterable {
             AnyView(SettingsPane {
                 UpdatesSection(updater: updater)
                 ConnectionSection()
+                GameModeSection()
             } header: {
                 AppHeader(iconSize: 64, title: "BlitzKVM", subtitle: Self.version)
             })
@@ -162,6 +163,31 @@ struct ConnectionSection: View {
             Text("Connection")
         } footer: {
             SettingsFooter("Applies from the next connection.")
+        }
+    }
+}
+
+/// How fast Game Mode's locked mouse turns (Device › Game Mode).
+struct GameModeSection: View {
+    @AppStorage(DeviceWindowController.gameModeSensitivityKey) private var sensitivity = 1.0
+
+    var body: some View {
+        Section {
+            LabeledContent {
+                HStack {
+                    Slider(value: $sensitivity, in: 0.25...4)
+                    Text(String(format: "%.2f×", sensitivity))
+                        .monospacedDigit()
+                        .frame(width: 44, alignment: .trailing)
+                }
+            } label: {
+                Text("Mouse sensitivity")
+                Text("Scales the raw mouse moves sent while the mouse is locked.")
+            }
+        } header: {
+            Text("Game Mode")
+        } footer: {
+            SettingsFooter("Applies the next time you click into a window.")
         }
     }
 }

@@ -678,6 +678,20 @@ final class JetKVMSetupTests: XCTestCase {
         XCTAssertFalse(device.addAddress("MAC-MINI-JETKVM.example.ts.net"))
         XCTAssertEqual(device.addresses, ["192.168.1.40", "mac-mini-jetkvm.example.ts.net"])
     }
+
+    func testDeviceGameModeRoundTrips() throws {
+        var device = Device(name: "Mac mini", addresses: ["192.168.1.40"])
+        XCTAssertFalse(device.isGameMode)
+        device.isGameMode = true
+        let decoded = try JSONDecoder().decode(Device.self, from: JSONEncoder().encode(device))
+        XCTAssertTrue(decoded.isGameMode)
+        // Off is stored as no key at all.
+        device.isGameMode = false
+        XCTAssertNil(device.gameMode)
+        // A library written before Game Mode existed loads with it off.
+        let old = #"{"id":"x","name":"Mac mini","addresses":["192.168.1.40"],"modifierProfile":"mac","invertScroll":false}"#
+        XCTAssertFalse(try JSONDecoder().decode(Device.self, from: Data(old.utf8)).isGameMode)
+    }
 }
 
 final class DoubleCommandPressTests: XCTestCase {

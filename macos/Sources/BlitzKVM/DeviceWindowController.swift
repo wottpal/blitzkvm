@@ -13,6 +13,15 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     let decoder = VideoDecoder()
     let audio = AudioPlayer()
     let input = InputController()
+    /// Game Mode's pointer lock, held while its relative mouse is active.
+    let pointerLock = PointerLock()
+    private(set) lazy var gameModeBinding = GameModeBinding(input: input, lock: pointerLock)
+    /// --game-mode (self-tests, latency probe): on for this window, not saved.
+    var gameModeOverride: Bool? {
+        didSet { applyPreferences() }
+    }
+    private var gameModeHintShown = false
+    private var sleepObservers: [NSObjectProtocol] = []
     /// Asks for still refreshes where the firmware leaves them to the app.
     let stillRefresh: StillRefresh
     private(set) var videoView: CaptureVideoView!
@@ -234,6 +243,50 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         input.localShortcuts = { MainActor.assumeIsolated { LocalShortcuts.shared.shortcuts } }
         input.onPasteFromApp = { [weak self] in MainActor.assumeIsolated { self?.pasteFromApp() == true } }
         applyPreferences()
+        // The cursor comes back before the Mac sleeps or the user switches away.
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
+                     NSWorkspace.sessionDidResignActiveNotification] {
+            sleepObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.releasePointerLock()
+            })
+        }
+    }
+
+    /// Game Mode › Sensitivity (Settings), for all device windows.
+    static let gameModeSensitivityKey = "gameModeSensitivity"
+    static var gameModeSensitivity: Double {
+        let value = UserDefaults.standard.double(forKey: gameModeSensitivityKey)
+        return value > 0 ? min(max(value, 0.25), 4) : 1
+    }
+
+    /// Game Mode for this window (an override, else the device's setting);
+    /// never for view-only windows.
+    var isGameMode: Bool { !input.viewOnly && (gameModeOverride ?? device.isGameMode) }
+
+    /// Device › Game Mode: saved for the device and applied at once.
+    func setGameMode(_ on: Bool) {
+        guard !input.viewOnly else { return }
+        gameModeOverride = nil
+        updatePreferences { $0.isGameMode = on }
+        if !on { releasePointerLock() }
+    }
+
+    /// Gives the cursor back and ends a capture that relied on it (a
+    /// relative mouse without the lock would move nothing and click blindly).
+    /// Desktop mode is untouched: nothing is locked there.
+    func releasePointerLock() {
+        if input.relativeActive { input.setCaptured(false) }
+        gameModeBinding.stop()
+    }
+
+    /// The video view's center in global display coordinates, origin at the
+    /// top left of the primary screen (what CGWarpMouseCursorPosition takes).
+    private func videoCenter() -> CGPoint {
+        guard let window, let view = videoView else { return .zero }
+        let rect = window.convertToScreen(view.convert(view.bounds, to: nil))
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? rect.maxY
+        return CGPoint(x: rect.midX, y: primaryHeight - rect.midY)
     }
 
     /// Input went to the remote: the still refresh waits for the typing to
@@ -246,7 +299,13 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     /// Says how to get the keyboard back the first time capture engages.
     private func captureChanged(_ captured: Bool) {
-        if captured && !keyboardHintShown {
+        if captured { input.sensitivity = Self.gameModeSensitivity }
+        gameModeBinding.captureChanged(captured, center: videoCenter())
+        if pointerLock.engaged && !gameModeHintShown {
+            gameModeHintShown = true
+            keyboardHintShown = true
+            hud.show("Game Mode: mouse locked  ·  ⌃⌘ releases", for: 3)
+        } else if captured && !keyboardHintShown {
             keyboardHintShown = true
             if input.eventTapActive {
                 hud.show("Keyboard goes to \(device.name)  ·  press ⌃⌘ to release", for: 2.5)
@@ -269,6 +328,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         input.modifierProfile = device.profile
         input.invertScroll = device.invertScroll
+        input.gameMode = isGameMode // ends a capture first when it changes
+        input.sensitivity = Self.gameModeSensitivity
         videoView.scalingMode = device.scaling
         videoView.matchScale = device.matchScale
         videoView.scalingFilter = scalingFilterOverride ?? Self.scalingFilter
@@ -774,6 +835,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         stillRefresh.stop()
         audio.stop()
         input.setCaptured(false)
+        gameModeBinding.stop()
+        for observer in sleepObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        sleepObservers = []
         statusTimer?.invalidate()
         stallTimer?.invalidate()
         setupModel?.cancel()
@@ -978,7 +1042,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.checkSetup() }
             }
         } else if snapshot.Phase != "connected" {
-            if wasConnected { audio.streamEnded() }
+            if wasConnected {
+                audio.streamEnded()
+                releasePointerLock()
+            }
             wasConnected = false
         }
         // The ID loads in the background after connecting.
@@ -1120,6 +1187,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     func engineDidRestart(_ engine: EngineProcess, reason: String) {
         pendingPasteID = nil
         appPasteID = nil
+        releasePointerLock()
         input.releaseAll()
         decoder.reset()
         audio.streamEnded()
@@ -1175,6 +1243,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         if decoded.errors > 0 { parts.append("decode errors \(decoded.errors)") }
         if decoder.paused { parts.append("paused (hidden)") }
         if snapshot.PasteInProgress == true || pendingPasteID != nil { parts.append("pasting…") }
+        if isGameMode { parts.append(pointerLock.engaged ? "Game Mode (mouse locked)" : "Game Mode") }
         if input.viewOnly {
             parts.append("view only")
         } else if input.captured {
@@ -1218,8 +1287,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func windowDidResignKey(_ notification: Notification) {
         // Focus left mid-press (⌘Tab during a drag): release everything on
-        // the remote so nothing stays stuck.
+        // the remote so nothing stays stuck. The cursor comes back too.
         input.focusLost()
+        gameModeBinding.stop()
     }
 
     /// Hidden windows (another tab in front, minimized, covered, another
@@ -1369,6 +1439,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     }
 
     func windowWillClose(_ notification: Notification) {
+        gameModeBinding.stop()
         shutdown()
         onClose?(self)
     }
@@ -1494,9 +1565,10 @@ final class CaptureVideoView: VideoView {
         guard let controller else { return }
         let point = convert(event.locationInWindow, from: nil)
         let physical = physicalPoint(point)
-        if overflows {
+        if overflows && !controller.input.relativeActive {
             // A remote screen larger than the view pans with the pointer:
-            // at the view's left edge its left edge shows, and so on.
+            // at the view's left edge its left edge shows, and so on. (Not
+            // under Game Mode's lock: the cursor stays frozen at the center.)
             let fx = bounds.width > 0 ? Double(point.x / bounds.width) : 0.5
             let fy = bounds.height > 0 ? Double(1 - point.y / bounds.height) : 0.5
             pan = (min(max(fx, 0), 1), min(max(fy, 0), 1))
@@ -1508,6 +1580,18 @@ final class CaptureVideoView: VideoView {
         }
     }
 
+    /// The timestamp of the last move given to the pointer lock: AppKit
+    /// delivers each move twice (tracking area and window), and a delta
+    /// counted twice would double the fallback path's speed.
+    private var lastLockDeltaAt: TimeInterval = -1
+
+    /// Game Mode without a GCMouse: the dissociated cursor's event deltas.
+    private func lockDelta(_ event: NSEvent) {
+        guard let controller, controller.pointerLock.engaged, event.timestamp != lastLockDeltaAt else { return }
+        lastLockDeltaAt = event.timestamp
+        controller.pointerLock.eventDelta(event)
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard let controller else { return }
         if !controller.input.captured && controller.capturesOnRequest {
@@ -1516,14 +1600,14 @@ final class CaptureVideoView: VideoView {
         routeMouse(event)
     }
 
-    override func mouseMoved(with event: NSEvent) { routeMouse(event) }
-    override func mouseDragged(with event: NSEvent) { routeMouse(event) }
+    override func mouseMoved(with event: NSEvent) { lockDelta(event); routeMouse(event) }
+    override func mouseDragged(with event: NSEvent) { lockDelta(event); routeMouse(event) }
     override func mouseUp(with event: NSEvent) { routeMouse(event) }
     override func rightMouseDown(with event: NSEvent) { routeMouse(event) }
-    override func rightMouseDragged(with event: NSEvent) { routeMouse(event) }
+    override func rightMouseDragged(with event: NSEvent) { lockDelta(event); routeMouse(event) }
     override func rightMouseUp(with event: NSEvent) { routeMouse(event) }
     override func otherMouseDown(with event: NSEvent) { routeMouse(event) }
-    override func otherMouseDragged(with event: NSEvent) { routeMouse(event) }
+    override func otherMouseDragged(with event: NSEvent) { lockDelta(event); routeMouse(event) }
     override func otherMouseUp(with event: NSEvent) { routeMouse(event) }
     override func scrollWheel(with event: NSEvent) { controller?.input.scroll(event) }
 

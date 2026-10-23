@@ -124,3 +124,38 @@ final class LivePointerLockSystem: PointerLockSystem {
         installed = nil
     }
 }
+
+/// Ties a window's PointerLock to its InputController: the lock is held only
+/// while Game Mode's relative mouse is active, and its motion goes out as
+/// relative moves. The window forwards every capture change here (it owns
+/// `onCaptureChange`) and calls stop() for anything else that must give the
+/// cursor back.
+final class GameModeBinding {
+    let input: InputController
+    let lock: PointerLock
+
+    init(input: InputController, lock: PointerLock) {
+        self.input = input
+        self.lock = lock
+        lock.onMotion = { [weak input] dx, dy in
+            // GCMouse handlers run on the main queue; the input path is main-only.
+            if Thread.isMainThread {
+                input?.relativeMotion(dx: dx, dy: dy)
+            } else {
+                DispatchQueue.main.async { input?.relativeMotion(dx: dx, dy: dy) }
+            }
+        }
+    }
+
+    /// Capture engaged (lock at `center`, global display coordinates,
+    /// origin top-left) or ended (release).
+    func captureChanged(_ on: Bool, center: CGPoint) {
+        if on && input.relativeActive {
+            lock.engage(centeredOn: center)
+        } else {
+            lock.release()
+        }
+    }
+
+    func stop() { lock.release() }
+}

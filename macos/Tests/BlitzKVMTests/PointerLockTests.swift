@@ -3,7 +3,7 @@ import XCTest
 @testable import BlitzKVM
 
 /// Records every call so tests assert the order and balance of cursor changes.
-private final class FakePointerLockSystem: PointerLockSystem {
+final class FakePointerLockSystem: PointerLockSystem {
     enum Call: Equatable {
         case associate(Bool), hide, unhide, warp(CGPoint), install, remove
     }

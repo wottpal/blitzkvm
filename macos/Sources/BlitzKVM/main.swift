@@ -52,6 +52,9 @@ struct Options {
     var setupSnapshot: String?
     /// Self-test: send the wake-only signal once connected (no keystrokes).
     var wake = false
+    /// `--game-mode`: Game Mode on for the window, not saved (self-tests,
+    /// latency probe).
+    var gameMode = false
     /// Self-test: type with pauses and check the still refreshes (SelfTest.typePauses).
     var typePauses = false
     /// Self-test: play the device's audio (silently) and expect this codec
@@ -103,6 +106,7 @@ struct Options {
             case "--setup": o.setup = next()
             case "--setup-snapshot": o.setupSnapshot = next()
             case "--wake": o.wake = true
+            case "--game-mode": o.gameMode = true
             case "--type-pauses": o.typePauses = true
             case "--expect-audio": o.expectAudio = next()
             case "--open": o.openWindow = next()
@@ -324,6 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.input.viewOnly = options.viewOnly
         controller.scalingFilterOverride = options.scalingFilter
         controller.localPointerOverride = options.localPointer
+        if options.gameMode { controller.gameModeOverride = true }
         if isSelfTest { controller.playsAudioOverride = options.expectAudio != nil }
         controller.addressAnswered = answered
         controller.showsSetupOnConnect = pendingSetup.remove(device.id) != nil || options.setup != nil
@@ -421,6 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         saved.viewMode = device.viewMode
         saved.exactPixelScaling = device.exactPixelScaling
         saved.invertScroll = device.invertScroll
+        saved.gameMode = device.gameMode
         saved.autoQuality = device.autoQuality
         saved.qualityLevel = device.qualityLevel
         store.upsert(saved)
@@ -535,6 +541,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(item("Enable System Shortcut Capture", #selector(requestAccessibility)))
         device.addItem(.separator())
         device.addItem(item("Wake Computer", #selector(wakeComputer)))
+        device.addItem(item("Game Mode", #selector(toggleGameMode), key: "g", mods: [.command, .shift]))
         device.addItem(item("Restart JetKVM", #selector(restartJetKVM)))
         let power = NSMenu(title: "Power")
         for (title, action) in [("ATX: Press Power Button", "power-short"), ("ATX: Hold Power Button (Force Off)", "power-long"), ("ATX: Press Reset", "reset")] {
@@ -803,6 +810,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func wakeComputer() { current?.wakeComputer() }
+    @objc private func toggleGameMode() {
+        guard let c = current else { return }
+        c.setGameMode(!c.isGameMode)
+    }
 
     @objc private func restartJetKVM() { current?.confirmRestart() }
 
@@ -863,6 +874,9 @@ extension AppDelegate: NSMenuItemValidation {
             return c?.snapshot.Phase == "connected"
         case #selector(wakeComputer):
             return c?.snapshot.Phase == "connected" && c?.input.viewOnly == false
+        case #selector(toggleGameMode):
+            menuItem.state = c?.isGameMode == true ? .on : .off
+            return c != nil && c?.input.viewOnly == false
         case #selector(toggleExactPixels):
             menuItem.state = c?.device.exactPixels == true ? .on : .off
             return c != nil

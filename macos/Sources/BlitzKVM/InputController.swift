@@ -81,6 +81,7 @@ final class InputController {
                 _ = Self.accessibilityTrusted(prompt: true)
             }
             ensureEventTap()
+            if relativeActive { liftAbsoluteButtons() }
         }
         onCaptureChange?(on)
     }
@@ -435,7 +436,11 @@ final class InputController {
 
     /// Game Mode: with the keyboard captured, the mouse goes out as relative
     /// moves (raw deltas from PointerLock) instead of absolute positions.
-    var gameMode = false
+    /// Switching it while captured ends capture first, so no pending motion
+    /// or held button crosses from one mode to the other.
+    var gameMode = false {
+        willSet { if newValue != gameMode && captured { setCaptured(false) } }
+    }
     var sensitivity: Double {
         get { relative.sensitivity }
         set { relative.sensitivity = newValue }
@@ -448,6 +453,17 @@ final class InputController {
     /// The buttons of the last relative report sent (releaseAll runs after
     /// `captured` is already false, so it can't ask relativeActive).
     private var relativeButtons: UInt8 = 0
+
+    /// Relative mode starts while buttons are down through the absolute
+    /// path (⌘ twice during a drag): they go up there first, or they would
+    /// stay held on the remote.
+    private func liftAbsoluteButtons() {
+        guard buttonState != 0 else { return }
+        buttonState = 0
+        guard !viewOnly, let (x, y, _) = lastPointer else { return }
+        lastPointer = (x, y, 0)
+        send(EngineProtocol.absolutePointer(x: x, y: y, buttons: 0))
+    }
 
     /// Raw deltas: coalesced, and sent at most every relativeFlushInterval.
     func relativeMotion(dx: Double, dy: Double) {
