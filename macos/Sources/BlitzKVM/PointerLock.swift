@@ -80,7 +80,9 @@ final class PointerLock {
 
     private func installHandler() {
         gcDriving = system.installMouseHandler { [weak self] dx, dy in
-            self?.onMotion(dx, dy)
+            // A late-queued callback after release must not move the remote.
+            guard let self, self.engaged, self.gcDriving else { return }
+            self.onMotion(dx, dy)
         }
     }
 
@@ -95,7 +97,12 @@ final class PointerLock {
     }
 }
 
-struct LivePointerLockSystem: PointerLockSystem {
+/// Remembers the GCMouseInput it installed on: by the time
+/// GCMouseDidBecomeCurrent fires, GCMouse.current is already the new mouse,
+/// so clearing "the current one" would leave the old mouse's handler behind.
+final class LivePointerLockSystem: PointerLockSystem {
+    private weak var installed: GCMouseInput?
+
     func associateMouse(_ on: Bool) {
         CGAssociateMouseAndMouseCursorPosition(on ? 1 : 0)
     }
@@ -104,13 +111,16 @@ struct LivePointerLockSystem: PointerLockSystem {
     func warp(to point: CGPoint) { CGWarpMouseCursorPosition(point) }
 
     func installMouseHandler(_ handler: @escaping (Double, Double) -> Void) -> Bool {
+        removeMouseHandler()
         guard let input = GCMouse.current?.mouseInput else { return false }
         // GCMouse's y is up-positive; the remote's is down-positive.
         input.mouseMovedHandler = { _, dx, dy in handler(Double(dx), Double(-dy)) }
+        installed = input
         return true
     }
 
     func removeMouseHandler() {
-        GCMouse.current?.mouseInput?.mouseMovedHandler = nil
+        installed?.mouseMovedHandler = nil
+        installed = nil
     }
 }

@@ -81,6 +81,15 @@ final class PointerLockTests: XCTestCase {
         XCTAssertEqual(motions().first?.1, -1)
     }
 
+    func testLateGCMouseCallbackAfterReleaseIsIgnored() {
+        let (lock, system, motions) = make(gcMouse: true)
+        lock.engage(centeredOn: .zero)
+        let stale = system.handler
+        lock.release()
+        stale?(2, -1)
+        XCTAssertTrue(motions().isEmpty)
+    }
+
     func testNothingWhileNotEngaged() {
         let (lock, _, motions) = make()
         lock.eventDelta(dx: 3, dy: 4)
