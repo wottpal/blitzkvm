@@ -120,7 +120,7 @@ type Command struct {
 	// setExtension (Text), setSerialSettings (Params:
 	// session.SerialSettings), upload, cancelUpload, setAutoQuality
 	// (AutoQuality), setQualityLevel (QualityLevel), setVideoPaused
-	// (Paused), createPassword (Password: sets the device's first password
+	// (Paused), setGameMode (GameMode), createPassword (Password: sets the device's first password
 	// and uses it from then on), changePassword (OldPassword, Password),
 	// removePassword (Password: the current one; the device then asks for none),
 	// reboot (restarts the JetKVM; the session reconnects once it is up),
@@ -150,6 +150,8 @@ type Command struct {
 	Path string `json:"path,omitempty"`
 	// Target is the ID of the upload command to cancel (cancelUpload).
 	Target int64 `json:"target,omitempty"`
+	// GameMode selects the Game Mode video quality (connect, setGameMode).
+	GameMode bool `json:"gameMode,omitempty"`
 	// Paused stops sending video while the app shows none (setVideoPaused).
 	Paused bool `json:"paused,omitempty"`
 	// ClientRefresh: the app refreshes still pictures itself through the

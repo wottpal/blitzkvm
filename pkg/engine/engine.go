@@ -217,6 +217,12 @@ func (e *Engine) command(cmd engineipc.Command) error {
 	case "setVideoPaused":
 		e.setVideoPaused(cmd.Paused)
 		e.reply(cmd.ID, nil, "")
+	case "setGameMode":
+		go e.withController(cmd, func(c *session.Controller) error {
+			ctx, cancel := context.WithTimeout(e.ctx, defaultRPCWait)
+			defer cancel()
+			return c.SetGameMode(ctx, cmd.GameMode)
+		})
 	case "setAudio":
 		if c := e.controller(); c != nil {
 			c.SetAudio(cmd.Audio)
@@ -387,6 +393,7 @@ func (e *Engine) startSession(baseURL string, cmd engineipc.Command) {
 		OfferH265:         cmd.OfferH265,
 		AutoQuality:       cmd.AutoQuality,
 		QualityLevel:      cmd.QualityLevel,
+		GameMode:          cmd.GameMode,
 		ClientRefresh:     cmd.ClientRefresh,
 		OnAccessUnit:      e.onAccessUnit,
 		OnSerialText:      e.onSerialText,

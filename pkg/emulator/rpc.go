@@ -385,6 +385,37 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 			st.AudioEnabled = false
 		}
 		return ok(nil), nil
+	case "setUsbDeviceState":
+		// Upstream rpcSetUsbDeviceState: one USB function by its camelCase
+		// name; audio off turns the audio setting off too.
+		params, err := decodeParams[struct {
+			Device  string `json:"device"`
+			Enabled bool   `json:"enabled"`
+		}](req.Params)
+		if err != nil {
+			return invalid("invalid params"), nil
+		}
+		devices := &st.USBDevices
+		switch params.Device {
+		case "absoluteMouse":
+			devices.AbsoluteMouse = params.Enabled
+		case "relativeMouse":
+			devices.RelativeMouse = params.Enabled
+		case "keyboard":
+			devices.Keyboard = params.Enabled
+		case "massStorage":
+			devices.MassStorage = params.Enabled
+		case "serialConsole":
+			devices.SerialConsole = params.Enabled
+		case "audio":
+			devices.Audio = params.Enabled
+			if !params.Enabled {
+				st.AudioEnabled = false
+			}
+		default:
+			return failed("invalid device: " + params.Device), nil
+		}
+		return ok(nil), nil
 	case "getAudioConfig":
 		return ok(client.AudioConfig{Enabled: st.AudioEnabled && st.USBDevices.Audio}), nil
 	case "setAudioConfig":

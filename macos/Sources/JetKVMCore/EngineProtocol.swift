@@ -127,6 +127,8 @@ public struct EngineCommand: Codable, Equatable {
     public var target: Int64?
     /// Stop sending video while the app shows none (cmd "setVideoPaused").
     public var paused: Bool?
+    /// Game Mode video quality (connect, cmd "setGameMode").
+    public var gameMode: Bool?
     /// The app refreshes still pictures itself (refreshRegions) where the
     /// firmware offers it (connect).
     public var clientRefresh: Bool?
@@ -144,7 +146,7 @@ public struct EngineCommand: Codable, Equatable {
                 qualityLevel: String? = nil, method: String? = nil,
                 params: JSONValue? = nil, text: String? = nil, delay: Int? = nil, path: String? = nil, target: Int64? = nil,
                 paused: Bool? = nil, oldPassword: String? = nil, clientRefresh: Bool? = nil,
-                audio: Bool? = nil, enableDeviceAudio: Bool? = nil, noDirectPath: Bool? = nil) {
+                audio: Bool? = nil, enableDeviceAudio: Bool? = nil, noDirectPath: Bool? = nil, gameMode: Bool? = nil) {
         self.id = id
         self.oldPassword = oldPassword
         self.cmd = cmd
@@ -162,6 +164,7 @@ public struct EngineCommand: Codable, Equatable {
         self.path = path
         self.target = target
         self.paused = paused
+        self.gameMode = gameMode
         self.clientRefresh = clientRefresh
         self.audio = audio
         self.enableDeviceAudio = enableDeviceAudio
@@ -196,6 +199,10 @@ public struct SessionSnapshot: Decodable, Equatable {
     /// Whether the engine adapts quality to the link, and its current level.
     public var AutoQuality: Bool?
     public var QualityLevel: String?
+    /// Game Mode's quality applies (QualityLevel is then "game").
+    public var GameMode: Bool?
+    /// Game Mode is on while the JetKVM's relative mouse is off.
+    public var RelativeMouseOff: Bool?
     /// The device leaves still refreshes to the app (RefreshPlanner), with
     /// the current level's P-frame QP floor and still refresh QP.
     public var ClientRefresh: Bool?
@@ -352,5 +359,14 @@ public extension JSONValue {
     var numberValue: Double? {
         if case .number(let n) = self { return n }
         return nil
+    }
+}
+
+/// The engine reports "game" as the quality level while Game Mode's top
+/// level applies; it is not a ladder level and is never saved or sent back.
+public enum QualityLevelName {
+    public static func ladderLevel(_ reported: String?) -> String? {
+        guard let reported, !reported.isEmpty else { return nil }
+        return reported == "game" ? "maximum" : reported
     }
 }

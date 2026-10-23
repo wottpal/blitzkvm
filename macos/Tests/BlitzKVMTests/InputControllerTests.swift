@@ -1,3 +1,4 @@
+import Carbon.HIToolbox
 import JetKVMCore
 import XCTest
 @testable import BlitzKVM
@@ -28,15 +29,31 @@ final class InputControllerTests: XCTestCase {
     private let fn = LocalShortcut.function
 
     /// A captured controller (no Accessibility prompt, no tap in tests).
-    private func captured(_ shortcuts: [LocalShortcut]) -> (InputController, () -> [Data]) {
+    private func captured(_ shortcuts: [LocalShortcut], gameMode: Bool = false) -> (InputController, () -> [Data]) {
         UserDefaults.standard.set(true, forKey: InputController.askedForAccessibilityKey)
         let input = InputController()
         var sent: [Data] = []
         input.send = { sent.append($0) }
         input.localShortcuts = { shortcuts }
+        input.gameMode = gameMode
         input.setCaptured(true)
         sent.removeAll()
         return (input, { sent })
+    }
+
+    /// ⇧⌘G toggles Game Mode while captured too (the game has the keyboard
+    /// then); the remote never gets the G.
+    func testGameModeShortcutWorksWhileCaptured() {
+        let (input, sent) = captured([], gameMode: true)
+        var toggled = 0
+        input.onGameModeShortcut = { toggled += 1 }
+        let shiftCommand = LocalShortcut.shift | LocalShortcut.command
+        XCTAssertEqual(input.route(.keyDown, keyCode: UInt16(kVK_ANSI_G), flags: shiftCommand, fromApp: false), .drop)
+        XCTAssertEqual(input.route(.keyUp, keyCode: UInt16(kVK_ANSI_G), flags: shiftCommand, fromApp: false), .drop)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05)) // toggled after the key, as it ends the capture
+        XCTAssertEqual(toggled, 1)
+        XCTAssertFalse(sent().contains(EngineProtocol.key(hid: 0x0A, pressed: true)), "no G on the remote")
+        XCTAssertEqual(input.route(.keyDown, keyCode: UInt16(kVK_ANSI_G), flags: LocalShortcut.command, fromApp: false), .remote)
     }
 
     func testAKeyShortcutStaysHere() {
@@ -138,5 +155,242 @@ final class InputControllerTests: XCTestCase {
     func testRepeatedReportsAreSentOnce() {
         let sent = pointerReports([(1000, 500, 0), (1000, 500, 0), (1000, 500, 1), (1000, 500, 1), (1000, 500, 0)])
         XCTAssertEqual(sent.count, 3)
+    }
+
+    // MARK: Game Mode
+
+    private func leftDown() -> NSEvent {
+        NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                           context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+    }
+
+    private func gameInput() -> (InputController, () -> [Data]) {
+        captured([], gameMode: true)
+    }
+
+    func testGameModeSendsRelativeMotionSums() {
+        let (input, sent) = gameInput()
+        input.relativeMotion(dx: 1.6, dy: 0)
+        input.relativeMotion(dx: 1.6, dy: -2.2)
+        input.flushRelative()
+        XCTAssertEqual(sent().last, EngineProtocol.relativePointer(dx: 3, dy: -2, buttons: 0))
+    }
+
+    func testAButtonFlushesMotionFirst() {
+        let (input, sent) = gameInput()
+        input.relativeMotion(dx: 5, dy: 0)
+        input.mouse(leftDown(), at: (0, 0), in: layout)
+        XCTAssertEqual(sent(), [EngineProtocol.relativePointer(dx: 5, dy: 0, buttons: 0),
+                                EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: 1)])
+    }
+
+    func testGameModeSendsNoAbsolutePointer() {
+        let (input, sent) = gameInput()
+        input.mouse(at: (100, 100), in: layout, buttons: 0)
+        input.mouse(leftDown(), at: (100, 100), in: layout)
+        XCTAssertFalse(sent().contains { $0[4] == FrameType.absPointer.rawValue })
+    }
+
+    func testReleaseAllLiftsRelativeButtons() {
+        let (input, sent) = gameInput()
+        input.mouse(leftDown(), at: (0, 0), in: layout)
+        input.setCaptured(false)
+        let frames = sent()
+        let down = EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: 1)
+        let up = EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: 0)
+        XCTAssertEqual(frames.firstIndex(of: down), 0)
+        XCTAssertNotNil(frames.firstIndex(of: up))
+        XCTAssertEqual(frames.last, try? EngineProtocol.command(EngineCommand(cmd: "releaseAll")))
+        XCTAssertGreaterThan(frames.count - 1, frames.firstIndex(of: up)!)
+    }
+
+    func testGameModeOffKeepsAbsolute() {
+        let (input, sent) = captured([])
+        input.gameMode = false
+        input.mouse(at: (3022, 948), in: layout, buttons: 0)
+        XCTAssertEqual(sent().last, EngineProtocol.absolutePointer(x: 32767, y: 16384, buttons: 0))
+    }
+
+    func testNotCapturedSendsNothingRelative() {
+        let input = InputController()
+        var sent: [Data] = []
+        input.send = { sent.append($0) }
+        input.gameMode = true
+        input.relativeMotion(dx: 10, dy: 10)
+        input.flushRelative()
+        XCTAssertTrue(sent.isEmpty)
+    }
+
+    func testTogglingGameModeWhileCapturedEndsCaptureFirst() {
+        let (input, sent) = gameInput()
+        input.mouse(leftDown(), at: (0, 0), in: layout)
+        input.relativeMotion(dx: 5, dy: 0) // pending, not yet flushed
+        input.gameMode = false
+        XCTAssertFalse(input.captured)
+        let frames = sent()
+        XCTAssertTrue(frames.contains(EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: 0)), "held button lifted")
+        XCTAssertFalse(frames.contains(EngineProtocol.relativePointer(dx: 5, dy: 0, buttons: 1)), "pending motion dropped")
+        // Nothing relative leaks later either.
+        input.flushRelative()
+        XCTAssertEqual(sent().count, frames.count)
+    }
+
+    func testGameModeOnLiftsAbsoluteButtonsHeld() {
+        UserDefaults.standard.set(true, forKey: InputController.askedForAccessibilityKey)
+        let input = InputController()
+        var sent: [Data] = []
+        input.send = { sent.append($0) }
+        // A desktop drag held over the picture, then Game Mode turns on.
+        input.mouse(leftDown(), at: (3022, 948), in: layout)
+        XCTAssertEqual(sent.last, EngineProtocol.absolutePointer(x: 32767, y: 16384, buttons: 1))
+        input.gameMode = true
+        XCTAssertEqual(sent.last, EngineProtocol.absolutePointer(x: 32767, y: 16384, buttons: 0))
+        input.setCaptured(true)
+        XCTAssertTrue(input.relativeActive)
+        sent.removeAll()
+        input.relativeMotion(dx: 2, dy: 0)
+        input.flushRelative()
+        XCTAssertEqual(sent, [EngineProtocol.relativePointer(dx: 2, dy: 0, buttons: 0)])
+    }
+
+    private func leftUp() -> NSEvent {
+        NSEvent.mouseEvent(with: .leftMouseUp, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                           context: nil, eventNumber: 0, clickCount: 1, pressure: 0)!
+    }
+
+    func testGameModeReleasedSendsNoPointerAtAll() {
+        let input = InputController()
+        var sent: [Data] = []
+        input.send = { sent.append($0) }
+        input.gameMode = true
+        XCTAssertFalse(input.captured)
+        // Hover and clicks while released reach nothing on the remote.
+        input.mouse(at: (100, 100), in: layout, buttons: 0)
+        input.mouse(at: (3022, 948), in: layout, buttons: 1)
+        input.mouse(leftDown(), at: (100, 100), in: layout)
+        input.mouse(leftUp(), at: (100, 100), in: layout)
+        XCTAssertTrue(sent.isEmpty, "\(sent)")
+    }
+
+    func testGameModeCaptureByClickGoesOutRelative() {
+        UserDefaults.standard.set(true, forKey: InputController.askedForAccessibilityKey)
+        let input = InputController()
+        var sent: [Data] = []
+        input.send = { sent.append($0) }
+        input.gameMode = true
+        // The window's mouseDown: capture first, then the click is routed.
+        input.setCaptured(true)
+        input.mouse(leftDown(), at: (100, 100), in: layout)
+        input.mouse(leftUp(), at: (100, 100), in: layout)
+        XCTAssertFalse(sent.contains { $0[4] == FrameType.absPointer.rawValue })
+        XCTAssertEqual(Array(sent.suffix(2)), [EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: 1),
+                                               EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: 0)])
+        // Released again: hover sends nothing.
+        input.setCaptured(false)
+        sent.removeAll()
+        input.mouse(at: (100, 100), in: layout, buttons: 0)
+        XCTAssertTrue(sent.isEmpty)
+    }
+
+    func testDesktopReleasedHoverStaysAbsolute() {
+        let input = InputController()
+        var sent: [Data] = []
+        input.send = { sent.append($0) }
+        input.mouse(at: (3022, 948), in: layout, buttons: 0)
+        input.mouse(leftDown(), at: (3022, 948), in: layout)
+        XCTAssertEqual(sent, [EngineProtocol.absolutePointer(x: 32767, y: 16384, buttons: 0),
+                              EngineProtocol.absolutePointer(x: 32767, y: 16384, buttons: 1)])
+    }
+
+    func testDesktopCaptureKeepsAbsoluteButtonsHeld() {
+        UserDefaults.standard.set(true, forKey: InputController.askedForAccessibilityKey)
+        let input = InputController()
+        var sent: [Data] = []
+        input.send = { sent.append($0) }
+        input.mouse(leftDown(), at: (3022, 948), in: layout)
+        input.setCaptured(true)
+        XCTAssertFalse(sent.contains(EngineProtocol.absolutePointer(x: 32767, y: 16384, buttons: 0)))
+    }
+
+    // MARK: Game Mode status
+
+    private func snapshot(_ json: String) -> SessionSnapshot {
+        let prefix = #"{"Phase":"connected","Status":"connected","#
+        return try! JSONDecoder().decode(SessionSnapshot.self, from: Data((prefix + json).utf8))
+    }
+
+    func testGameModeStatusIsOneEntry() {
+        let live = snapshot(#""GameMode":true,"QualityLevel":"game","VideoWidth":1280,"VideoHeight":720,"VideoFPS":120,"MinQP":22}"#)
+        XCTAssertEqual(DeviceWindowController.gameModeStatus(live, mouseLocked: true), "Game Mode · 1280×720 120 Hz · mouse locked")
+        XCTAssertEqual(DeviceWindowController.gameModeStatus(live, mouseLocked: false), "Game Mode · 1280×720 120 Hz")
+    }
+
+    func testGameModeStatusNotesStockFirmware() {
+        let stock = snapshot(#""GameMode":true,"QualityLevel":"game","VideoWidth":1920,"VideoHeight":1080,"VideoFPS":60}"#)
+        XCTAssertEqual(DeviceWindowController.gameModeStatus(stock, mouseLocked: false),
+                       "Game Mode · 1920×1080 60 Hz · video: stock firmware")
+    }
+
+    func testGameModeStatusSaysRelativeMouseOff() {
+        let off = snapshot(#""GameMode":true,"RelativeMouseOff":true}"#)
+        XCTAssertEqual(DeviceWindowController.gameModeStatus(off, mouseLocked: true), "Game Mode · relative mouse off · mouse locked")
+        // Not yet applied by the engine: just the name.
+        XCTAssertEqual(DeviceWindowController.gameModeStatus(snapshot(#""GameMode":true}"#), mouseLocked: false), "Game Mode")
+    }
+
+    // MARK: Game Mode binding
+
+    func testEveryCaptureEndReleasesTheLock() {
+        UserDefaults.standard.set(true, forKey: InputController.askedForAccessibilityKey)
+        let input = InputController()
+        input.send = { _ in }
+        input.gameMode = true
+        let system = FakePointerLockSystem()
+        let lock = PointerLock(system: system)
+        let binding = GameModeBinding(input: input, lock: lock)
+        let center = CGPoint(x: 640, y: 400)
+        input.onCaptureChange = { binding.captureChanged($0, center: center) }
+        func balanced() {
+            let hides = system.calls.filter { $0 == .hide }.count
+            let unhides = system.calls.filter { $0 == .unhide }.count
+            XCTAssertEqual(hides - unhides, lock.engaged ? 1 : 0)
+        }
+
+        input.setCaptured(true)
+        XCTAssertTrue(lock.engaged)
+        XCTAssertTrue(system.calls.contains(.warp(center)))
+        balanced()
+        input.focusLost()
+        XCTAssertFalse(lock.engaged)
+        balanced()
+        input.setCaptured(true)
+        XCTAssertTrue(lock.engaged)
+        balanced()
+        binding.stop()
+        XCTAssertFalse(lock.engaged)
+        balanced()
+        // Game Mode off while engaged: the lock goes, and capture can't bring it back.
+        input.setCaptured(false)
+        input.setCaptured(true)
+        XCTAssertTrue(lock.engaged)
+        input.gameMode = false
+        XCTAssertFalse(lock.engaged)
+        binding.captureChanged(true, center: center)
+        XCTAssertFalse(lock.engaged)
+        input.setCaptured(true)
+        XCTAssertFalse(lock.engaged)
+        balanced()
+    }
+
+    func testLockMotionReachesTheRelativePath() {
+        let (input, sent) = gameInput()
+        let system = FakePointerLockSystem()
+        let lock = PointerLock(system: system)
+        let binding = GameModeBinding(input: input, lock: lock)
+        binding.captureChanged(true, center: .zero)
+        lock.eventDelta(dx: 4, dy: -3)
+        input.flushRelative()
+        XCTAssertEqual(sent().last, EngineProtocol.relativePointer(dx: 4, dy: -3, buttons: 0))
+        binding.stop()
     }
 }

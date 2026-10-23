@@ -24,11 +24,17 @@ public struct Device: Codable, Equatable, Identifiable {
     /// Match Window: the remote display's refresh rate (Hz); nil picks the
     /// largest picture and then the highest rate (RemoteDisplay.mode).
     public var matchWindowRefresh: Int?
+    /// Match Window: the EDID to put back when it ends ("" is JetKVM
+    /// Default); nil while Match Window hasn't changed it.
+    public var matchWindowRestoreEDID: String?
     /// Stream quality follows the network; nil means on.
     public var autoQuality: Bool?
     /// The fixed quality level used while automatic quality is off.
     public var qualityLevel: String?
     public var invertScroll: Bool
+    /// Game Mode: the mouse goes out as raw relative moves under a pointer
+    /// lock while captured; nil means off.
+    public var gameMode: Bool?
     public var lastConnected: Date?
     /// The last JetKVM Setup check, shown in the Devices window.
     public var setup: SetupSummary?
@@ -71,6 +77,11 @@ public struct Device: Codable, Equatable, Identifiable {
 
     /// The Match Window scales offered in menus, largest text first.
     public static let matchScales: [Double] = [2, 1.5, 1.25, 1, 0.8, 0.67, 0.5]
+
+    public var isGameMode: Bool {
+        get { gameMode ?? false }
+        set { gameMode = newValue ? true : nil }
+    }
 
     public var adaptiveQuality: Bool {
         get { autoQuality ?? true }

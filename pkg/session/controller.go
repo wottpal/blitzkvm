@@ -82,6 +82,9 @@ type Config struct {
 	// live turns the device's own still refresh off (autoRefresh). Only for
 	// clients that plan refreshes and send input.
 	ClientRefresh bool
+	// GameMode favours latency (SetGameMode changes it): no still
+	// refreshes, the game level at the top, at least 60 fps.
+	GameMode bool
 	// OnAudioPacket receives the device's audio while Audio is on (see
 	// client.Config.OnAudioPacket); nil never asks for it.
 	OnAudioPacket func(client.AudioPacket)
@@ -142,6 +145,12 @@ type Snapshot struct {
 	ClientRefresh bool
 	MinQP         int
 	StillQP       int
+	// GameMode is Config.GameMode as SetGameMode left it.
+	// RelativeMouseOff: the device's relative mouse, which games read, is
+	// off (checked when Game Mode turns on or connects with it; cleared when
+	// Game Mode turns off or a later check finds it on).
+	GameMode         bool
+	RelativeMouseOff bool
 }
 
 type Controller struct {
@@ -168,6 +177,10 @@ type Controller struct {
 	// takes live encoder parameters (patched firmware).
 	encoderParamsClient *client.Client
 	encoderParamsOK     bool
+	// gameSaved holds what Game Mode replaced while no level is configured,
+	// to put back when it turns off: the stock quality factor, or the live
+	// encoder parameters.
+	gameSaved gameSavedState
 
 	// audio is Config.Audio as SetAudio left it (read for every packet);
 	// audioTurnedOn is set once the controller tried to turn the device's
@@ -288,6 +301,7 @@ func New(cfg Config) *Controller {
 			Status:      "idle",
 			BaseURL:     cfg.BaseURL,
 			AutoQuality: cfg.AutoQuality,
+			GameMode:    cfg.GameMode,
 		},
 	}
 	c.audio.Store(cfg.Audio)

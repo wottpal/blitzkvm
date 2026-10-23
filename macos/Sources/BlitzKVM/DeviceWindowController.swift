@@ -13,6 +13,16 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     let decoder = VideoDecoder()
     let audio = AudioPlayer()
     let input = InputController()
+    /// Game Mode's pointer lock, held while its relative mouse is active.
+    let pointerLock = PointerLock()
+    private(set) lazy var gameModeBinding = GameModeBinding(input: input, lock: pointerLock)
+    /// --game-mode (self-tests, latency probe): on for this window, not saved.
+    var gameModeOverride: Bool? {
+        didSet { applyPreferences() }
+    }
+    private var gameModeHintShown = false
+    private var sleepObservers: [NSObjectProtocol] = []
+    private var screenLockObserver: NSObjectProtocol?
     /// Asks for still refreshes where the firmware leaves them to the app.
     let stillRefresh: StillRefresh
     private(set) var videoView: CaptureVideoView!
@@ -94,6 +104,13 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private var slowLinkHintShown = false
     private var isShutDown = false
     private var wasConnected = false
+    /// Game Mode is on while the JetKVM's relative mouse is off (as the
+    /// last snapshot said): the status bar says so, and the hint comes back.
+    private var relativeMouseWasOff = false
+    /// The setUsbDeviceState command that Turn On sent.
+    private var relativeMouseTurnOnID: Int64?
+    /// It succeeded: confirmed once a snapshot finds the relative mouse on.
+    private var relativeMouseTurningOn = false
     private var pathMonitor: NWPathMonitor?
     private var aspectLocked = false
     private var pendingPasteID: Int64?
@@ -233,7 +250,62 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         input.onCaptureChange = { [weak self] in self?.captureChanged($0) }
         input.localShortcuts = { MainActor.assumeIsolated { LocalShortcuts.shared.shortcuts } }
         input.onPasteFromApp = { [weak self] in MainActor.assumeIsolated { self?.pasteFromApp() == true } }
+        input.onGameModeShortcut = { [weak self] in MainActor.assumeIsolated { self.map { $0.setGameMode(!$0.isGameMode) } } }
         applyPreferences()
+        // The cursor comes back before the Mac sleeps or the user switches away.
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
+                     NSWorkspace.sessionDidResignActiveNotification] {
+            sleepObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.releasePointerLock()
+            })
+        }
+        // The screen locked (⌃⌘Q, a hot corner): no sleep or session change.
+        screenLockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
+            self?.releasePointerLock()
+        }
+        pointerLock.onSource = { [weak self] gcMouse in
+            guard let self else { return }
+            AppLog.log("\(self.device.name): game mode: motion from \(gcMouse ? "GCMouse" : "event deltas (accelerated)")")
+        }
+    }
+
+    /// Game Mode › Sensitivity (Settings), for all device windows.
+    static let gameModeSensitivityKey = "gameModeSensitivity"
+    static var gameModeSensitivity: Double {
+        let value = UserDefaults.standard.double(forKey: gameModeSensitivityKey)
+        return value > 0 ? min(max(value, 0.25), 4) : 1
+    }
+
+    /// Game Mode for this window (an override, else the device's setting);
+    /// never for view-only windows.
+    var isGameMode: Bool { !input.viewOnly && (gameModeOverride ?? device.isGameMode) }
+
+    /// Device › Game Mode: saved for the device and applied at once.
+    func setGameMode(_ on: Bool) {
+        guard !input.viewOnly else { return }
+        gameModeOverride = nil
+        updatePreferences { $0.isGameMode = on }
+        engine.setGameMode(on)
+        if !on { releasePointerLock() }
+    }
+
+    /// Gives the cursor back and ends a capture that relied on it (a
+    /// relative mouse without the lock would move nothing and click blindly).
+    /// Desktop mode is untouched: nothing is locked there.
+    func releasePointerLock() {
+        if input.relativeActive { input.setCaptured(false) }
+        gameModeBinding.stop()
+    }
+
+    /// The video view's center in global display coordinates, origin at the
+    /// top left of the primary screen (what CGWarpMouseCursorPosition takes).
+    private func videoCenter() -> CGPoint {
+        guard let window, let view = videoView else { return .zero }
+        let rect = window.convertToScreen(view.convert(view.bounds, to: nil))
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? rect.maxY
+        return CGPoint(x: rect.midX, y: primaryHeight - rect.midY)
     }
 
     /// Input went to the remote: the still refresh waits for the typing to
@@ -246,7 +318,19 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     /// Says how to get the keyboard back the first time capture engages.
     private func captureChanged(_ captured: Bool) {
-        if captured && !keyboardHintShown {
+        if captured { input.sensitivity = Self.gameModeSensitivity }
+        gameModeBinding.captureChanged(captured, center: videoCenter())
+        if relativeMouseOff {
+            // Again at every capture change: Turn On can't be clicked while
+            // the cursor is locked, so it comes with ⌃⌘ during capture.
+            gameModeHintShown = gameModeHintShown || pointerLock.engaged
+            keyboardHintShown = keyboardHintShown || captured
+            offerRelativeMouse()
+        } else if pointerLock.engaged && !gameModeHintShown {
+            gameModeHintShown = true
+            keyboardHintShown = true
+            hud.show("Game Mode: mouse locked  ·  ⌃⌘ releases", for: 3)
+        } else if captured && !keyboardHintShown {
             keyboardHintShown = true
             if input.eventTapActive {
                 hud.show("Keyboard goes to \(device.name)  ·  press ⌃⌘ to release", for: 2.5)
@@ -269,6 +353,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         input.modifierProfile = device.profile
         input.invertScroll = device.invertScroll
+        input.gameMode = isGameMode // ends a capture first when it changes
+        input.sensitivity = Self.gameModeSensitivity
         videoView.scalingMode = device.scaling
         videoView.matchScale = device.matchScale
         videoView.scalingFilter = scalingFilterOverride ?? Self.scalingFilter
@@ -359,8 +445,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// Changing the view mode resizes the window to suit it, or (Match
     /// Window) the remote display to suit the window.
     func setScaling(_ mode: ScalingMode) {
+        let wasMatching = device.scaling == .matchWindow
         updatePreferences { $0.scaling = mode }
+        if mode == .matchWindow && !wasMatching { matchWindowTurnedOnHere = true }
         if !followsWindow { displayFollower.cancel() }
+        if wasMatching && mode != .matchWindow { restoreRemoteDisplay(forget: true) }
         if mode == .actualSize || mode == .pixelExact {
             userSizedWindow = false
             fitWindowToRemote()
@@ -394,6 +483,50 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// The remote display follows the window (not in view-only sessions:
     /// it changes the device's EDID).
     private var followsWindow: Bool { device.scaling == .matchWindow && !input.viewOnly }
+    /// Match Window was turned on in this window: the device's EDID before
+    /// its first change is the one to put back (EDIDRestore.original).
+    private var matchWindowTurnedOnHere = false
+    private var closingAfterRestore = false
+
+    /// Match Window changed the device's EDID, and it can be put back now.
+    var needsDisplayRestore: Bool {
+        device.matchWindowRestoreEDID != nil && snapshot.Phase == "connected" && !isShutDown && !input.viewOnly
+    }
+
+    /// Puts back the EDID Match Window replaced (the remote computer
+    /// re-detects its display, back at its earlier resolution). forget:
+    /// Match Window is off, so the kept EDID goes too; otherwise it stays
+    /// for the next session, which changes the EDID again.
+    func restoreRemoteDisplay(forget: Bool, done: @escaping () -> Void = {}) {
+        guard needsDisplayRestore, let saved = device.matchWindowRestoreEDID else { return done() }
+        displayFollower.cancel()
+        Task { @MainActor in
+            do {
+                let current = try? await engine.call("getEDID", as: String.self)
+                if let edid = EDIDRestore.value(saved: saved, current: current) {
+                    try await engine.call("setEDID", params: .object(["edid": .string(edid)]))
+                    AppLog.log("remote display: restored \(edid.isEmpty ? "JetKVM Default" : "the earlier display")")
+                }
+                if forget { updatePreferences { $0.matchWindowRestoreEDID = nil } }
+            } catch {
+                AppLog.log("remote display: could not restore it: \(error.localizedDescription)")
+            }
+            done()
+        }
+    }
+
+    /// The window or the app is about to end the session: restores the
+    /// remote display first, waiting at most 3 s.
+    func restoreBeforeEnding(_ done: @escaping () -> Void) {
+        var finished = false
+        let finish = {
+            guard !finished else { return }
+            finished = true
+            done()
+        }
+        restoreRemoteDisplay(forget: false, done: finish)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: finish)
+    }
 
     private func makeDisplayFollower() -> DisplayFollower {
         let follower = DisplayFollower(engine: engine)
@@ -416,6 +549,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             }
         }
         follower.onError = { [weak self] in self?.refreshStatus(extra: $0) }
+        follower.willReplace = { [weak self] current in
+            guard let self, self.device.matchWindowRestoreEDID == nil else { return }
+            let original = EDIDRestore.original(current: current, turnedOnHere: self.matchWindowTurnedOnHere)
+            self.updatePreferences { $0.matchWindowRestoreEDID = original }
+        }
         return follower
     }
 
@@ -608,7 +746,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private func connectEngine() {
         engine.connect(baseURL: address, password: password, deviceID: device.deviceID, certSHA256: device.certificateSHA256,
                        autoQuality: device.adaptiveQuality && !input.viewOnly, qualityLevel: input.viewOnly ? nil : device.qualityLevel,
-                       clientRefresh: !input.viewOnly, audio: playsAudio, enableDeviceAudio: !input.viewOnly)
+                       clientRefresh: !input.viewOnly, audio: playsAudio, enableDeviceAudio: !input.viewOnly,
+                       gameMode: isGameMode)
     }
 
     func showVirtualMedia() {
@@ -774,6 +913,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         stillRefresh.stop()
         audio.stop()
         input.setCaptured(false)
+        gameModeBinding.stop()
+        for observer in sleepObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        sleepObservers = []
+        if let observer = screenLockObserver { DistributedNotificationCenter.default().removeObserver(observer) }
+        screenLockObserver = nil
         statusTimer?.invalidate()
         stallTimer?.invalidate()
         setupModel?.cancel()
@@ -816,6 +960,46 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     }
 
     // MARK: Commands
+
+    /// Game Mode is on and the JetKVM's relative mouse, which games read, is off.
+    private var relativeMouseOff: Bool { snapshot.GameMode == true && snapshot.RelativeMouseOff == true }
+
+    /// Snapshot update: the hint when the relative mouse is found off, and
+    /// the confirmation once a check after Turn On finds it on.
+    private func relativeMouseStateChanged() {
+        let off = relativeMouseOff
+        defer { relativeMouseWasOff = off }
+        if snapshot.GameMode != true { relativeMouseTurningOn = false }
+        if relativeMouseTurningOn && snapshot.GameMode == true && snapshot.RelativeMouseOff == false {
+            relativeMouseTurningOn = false
+            hud.show("Relative mouse turned on", for: 2.5)
+            return
+        }
+        if off && !relativeMouseWasOff { offerRelativeMouse() }
+    }
+
+    /// Game Mode needs the JetKVM's relative mouse; while it is off, says so
+    /// when found off and again whenever capture changes, with a button that
+    /// turns it on (a device setting the user explicitly clicks:
+    /// kvm-blitz/jsonrpc.go setUsbDeviceState). The button only while the
+    /// cursor is free; during capture the hint says how to get it back.
+    private func offerRelativeMouse() {
+        guard relativeMouseOff else { return }
+        let text = "Game Mode needs the JetKVM's relative mouse, which is off"
+        if input.captured {
+            hud.show(text + "  ·  ⌃⌘ releases, then Turn On", for: 6)
+            return
+        }
+        hud.show(text, for: 12, action: ("Turn On", { [weak self] in self?.turnOnRelativeMouse() }))
+    }
+
+    /// Turn On: confirmed only once a check finds the relative mouse on
+    /// (setGameMode again checks; relativeMouseStateChanged confirms).
+    private func turnOnRelativeMouse() {
+        relativeMouseTurnOnID = engine.send(command: EngineCommand(cmd: "rpc", method: "setUsbDeviceState",
+                                                                   params: .object(["device": .string("relativeMouse"), "enabled": .bool(true)])))
+        hud.show("Turning on the relative mouse…", for: 4)
+    }
 
     func sendRPC(_ method: String, params: JSONValue? = nil) {
         engine.send(command: EngineCommand(cmd: "rpc", method: method, params: params))
@@ -891,7 +1075,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// Automatic quality: the engine adapts the stream to the link.
     func setAdaptiveQuality(_ on: Bool) {
         guard !input.viewOnly else { return } // view-only never changes device settings
-        let current = snapshot.QualityLevel
+        let current = QualityLevelName.ladderLevel(snapshot.QualityLevel) // never "game"
         updatePreferences {
             $0.adaptiveQuality = on
             // Off keeps what automatic had chosen (the engine does the same).
@@ -950,6 +1134,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         self.snapshot = snapshot
         stillRefresh.update(snapshot)
+        relativeMouseStateChanged()
         if snapshot.Phase == "auth_failed" && !snapshot.Status.contains("locked") {
             // Wrong, empty or changed password: always ask (the engine has
             // stopped retrying). A lockout (429) must not trigger more tries.
@@ -961,6 +1146,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             roaming.connected()
             restartedAt = nil // back after a restart
             connectedAt = DispatchTime.now().uptimeNanoseconds
+            if !followsWindow {
+                restoreRemoteDisplay(forget: true) // turned off while away
+            } else if device.matchWindowRestoreEDID == nil && !matchWindowTurnedOnHere {
+                // On from before EDIDs were kept: the device may have one already.
+                updatePreferences { $0.matchWindowRestoreEDID = EDIDRestore.original(current: "", turnedOnHere: false) }
+            }
             matchRemoteToWindow()
             learnCaptureLimit()
             if let accepted = unverifiedPassword {
@@ -978,7 +1169,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.checkSetup() }
             }
         } else if snapshot.Phase != "connected" {
-            if wasConnected { audio.streamEnded() }
+            if wasConnected {
+                audio.streamEnded()
+                releasePointerLock()
+            }
             wasConnected = false
         }
         // The ID loads in the background after connecting.
@@ -1074,6 +1268,15 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     }
 
     func engine(_ engine: EngineProcess, didFinishCommand id: Int64, error: String?, invalid: String?) {
+        if id == relativeMouseTurnOnID {
+            relativeMouseTurnOnID = nil
+            if let error, !error.isEmpty {
+                hud.show("Could not turn on the relative mouse: \(error)", for: 6)
+            } else if isGameMode {
+                relativeMouseTurningOn = true
+                engine.setGameMode(true) // checks the relative mouse again
+            }
+        }
         if id == appPasteID {
             appPasteID = nil
             input.releaseHeldKeys()
@@ -1120,6 +1323,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     func engineDidRestart(_ engine: EngineProcess, reason: String) {
         pendingPasteID = nil
         appPasteID = nil
+        releasePointerLock()
         input.releaseAll()
         decoder.reset()
         audio.streamEnded()
@@ -1146,6 +1350,26 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
     }
 
+    /// The one Game Mode entry of the status bar, e.g. "Game Mode · 1280×720
+    /// 120 Hz · mouse locked": the incoming mode while Game Mode's quality
+    /// applies (the received frame rate has its own entry), a note when the
+    /// firmware takes no live encoder parameters (stock: the level applies
+    /// only as a quality factor, MinQP stays 0), and the relative mouse
+    /// when it is off.
+    static func gameModeStatus(_ snapshot: SessionSnapshot, mouseLocked: Bool) -> String {
+        var entry = ["Game Mode"]
+        if snapshot.GameMode == true && snapshot.QualityLevel == "game" {
+            var mode = ""
+            if let w = snapshot.VideoWidth, let h = snapshot.VideoHeight, w > 0, h > 0 { mode = "\(w)×\(h)" }
+            if let fps = snapshot.VideoFPS, fps > 0 { mode += String(format: mode.isEmpty ? "%.0f Hz" : " %.0f Hz", fps) }
+            if !mode.isEmpty { entry.append(mode) }
+            if (snapshot.MinQP ?? 0) == 0 { entry.append("video: stock firmware") }
+        }
+        if snapshot.GameMode == true && snapshot.RelativeMouseOff == true { entry.append("relative mouse off") }
+        if mouseLocked { entry.append("mouse locked") }
+        return entry.joined(separator: " · ")
+    }
+
     func refreshStatus(extra: String? = nil) {
         let decoded = decoder.snapshot()
         var parts = [snapshot.Status]
@@ -1161,7 +1385,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         parts.append(codecName)
         codecLock.unlock()
         if let codec = audio.playingCodec { parts.append("audio \(codec)") }
-        if let level = snapshot.QualityLevel, !level.isEmpty {
+        let gameLevel = snapshot.GameMode == true && snapshot.QualityLevel == "game"
+        if isGameMode {
+            parts.append(Self.gameModeStatus(snapshot, mouseLocked: pointerLock.engaged))
+        }
+        if !gameLevel, let level = snapshot.QualityLevel, !level.isEmpty {
             parts.append(snapshot.AutoQuality == true ? "quality \(level) (auto)" : "quality \(level)")
         }
         if let fps = lastStats["FramesPerSecond"] as? Double { parts.append(String(format: "%.0f fps", fps)) }
@@ -1218,8 +1446,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func windowDidResignKey(_ notification: Notification) {
         // Focus left mid-press (⌘Tab during a drag): release everything on
-        // the remote so nothing stays stuck.
+        // the remote so nothing stays stuck. The cursor comes back too.
         input.focusLost()
+        gameModeBinding.stop()
     }
 
     /// Hidden windows (another tab in front, minimized, covered, another
@@ -1368,7 +1597,15 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         window?.styleMask.insert(.resizable)
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !closingAfterRestore, needsDisplayRestore else { return true }
+        closingAfterRestore = true
+        restoreBeforeEnding { [weak sender] in sender?.close() }
+        return false
+    }
+
     func windowWillClose(_ notification: Notification) {
+        gameModeBinding.stop()
         shutdown()
         onClose?(self)
     }
@@ -1494,9 +1731,10 @@ final class CaptureVideoView: VideoView {
         guard let controller else { return }
         let point = convert(event.locationInWindow, from: nil)
         let physical = physicalPoint(point)
-        if overflows {
+        if overflows && !controller.input.relativeActive {
             // A remote screen larger than the view pans with the pointer:
-            // at the view's left edge its left edge shows, and so on.
+            // at the view's left edge its left edge shows, and so on. (Not
+            // under Game Mode's lock: the cursor stays frozen at the center.)
             let fx = bounds.width > 0 ? Double(point.x / bounds.width) : 0.5
             let fy = bounds.height > 0 ? Double(1 - point.y / bounds.height) : 0.5
             pan = (min(max(fx, 0), 1), min(max(fy, 0), 1))
@@ -1508,6 +1746,18 @@ final class CaptureVideoView: VideoView {
         }
     }
 
+    /// The timestamp of the last move given to the pointer lock: AppKit
+    /// delivers each move twice (tracking area and window), and a delta
+    /// counted twice would double the fallback path's speed.
+    private var lastLockDeltaAt: TimeInterval = -1
+
+    /// Game Mode without a GCMouse: the dissociated cursor's event deltas.
+    private func lockDelta(_ event: NSEvent) {
+        guard let controller, controller.pointerLock.engaged, event.timestamp != lastLockDeltaAt else { return }
+        lastLockDeltaAt = event.timestamp
+        controller.pointerLock.eventDelta(event)
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard let controller else { return }
         if !controller.input.captured && controller.capturesOnRequest {
@@ -1516,14 +1766,14 @@ final class CaptureVideoView: VideoView {
         routeMouse(event)
     }
 
-    override func mouseMoved(with event: NSEvent) { routeMouse(event) }
-    override func mouseDragged(with event: NSEvent) { routeMouse(event) }
+    override func mouseMoved(with event: NSEvent) { lockDelta(event); routeMouse(event) }
+    override func mouseDragged(with event: NSEvent) { lockDelta(event); routeMouse(event) }
     override func mouseUp(with event: NSEvent) { routeMouse(event) }
     override func rightMouseDown(with event: NSEvent) { routeMouse(event) }
-    override func rightMouseDragged(with event: NSEvent) { routeMouse(event) }
+    override func rightMouseDragged(with event: NSEvent) { lockDelta(event); routeMouse(event) }
     override func rightMouseUp(with event: NSEvent) { routeMouse(event) }
     override func otherMouseDown(with event: NSEvent) { routeMouse(event) }
-    override func otherMouseDragged(with event: NSEvent) { routeMouse(event) }
+    override func otherMouseDragged(with event: NSEvent) { lockDelta(event); routeMouse(event) }
     override func otherMouseUp(with event: NSEvent) { routeMouse(event) }
     override func scrollWheel(with event: NSEvent) { controller?.input.scroll(event) }
 
@@ -1584,10 +1834,17 @@ extension CaptureVideoView: NSMenuItemValidation {
 /// with a symbol and an accent edge; one that flashes (typing went nowhere,
 /// easy to miss) also briefly dims the picture inside an accent frame.
 final class HintView: NSView {
+    /// For tests: the action button's frame in the superview's coordinates, if shown.
+    var actionButtonFrameInSuperview: NSRect? {
+        actionButton.isHidden ? nil : superview?.convert(actionButton.bounds, from: actionButton)
+    }
+
     private let panel = NSVisualEffectView()
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private let flash = NSView()
+    private let actionButton = NSButton(title: "", target: nil, action: nil)
+    private var actionHandler: (() -> Void)?
     private var hideWork: DispatchWorkItem?
     private var flashWork: DispatchWorkItem?
 
@@ -1613,7 +1870,12 @@ final class HintView: NSView {
         label.textColor = .labelColor
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [icon, label])
+        actionButton.bezelStyle = .rounded
+        actionButton.controlSize = .small
+        actionButton.target = self
+        actionButton.action = #selector(actionClicked)
+        actionButton.isHidden = true
+        let stack = NSStackView(views: [icon, label, actionButton])
         stack.spacing = 9
         stack.edgeInsets = NSEdgeInsets(top: 9, left: 16, bottom: 9, right: 16)
         panel.addSubview(shade)
@@ -1646,13 +1908,28 @@ final class HintView: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    // Never takes clicks from the video.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    // Never takes clicks from the video, except on a visible action button.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !actionButton.isHidden, !panel.isHidden, panel.alphaValue > 0.5 else { return nil }
+        let inButton = actionButton.convert(point, from: superview) // hitTest gets superview coordinates
+        return actionButton.bounds.contains(inButton) ? actionButton : nil
+    }
+
+    @objc private func actionClicked() {
+        let handler = actionHandler
+        actionHandler = nil
+        actionButton.isHidden = true
+        handler?()
+    }
 
     /// Shows `text` for `seconds`. A hint that flashes, shown again while
     /// it does (each key typed without control), keeps the flash on.
-    func show(_ text: String, for seconds: TimeInterval, prominent: Bool = false, flashes: Bool = false) {
+    func show(_ text: String, for seconds: TimeInterval, prominent: Bool = false, flashes: Bool = false,
+              action: (title: String, handler: () -> Void)? = nil) {
         label.stringValue = text
+        actionHandler = action?.handler
+        actionButton.title = action?.title ?? ""
+        actionButton.isHidden = action == nil
         label.font = .systemFont(ofSize: prominent ? 14 : 13, weight: prominent ? .semibold : .medium)
         icon.isHidden = !prominent
         effectiveAppearance.performAsCurrentDrawingAppearance {

@@ -27,6 +27,10 @@ final class LatencyProbe {
     /// BLITZKVM_PROBE_WHEEL=1: a wheel tick instead of a key (the page flips
     /// its square on wheel events too).
     private let wheelMode = ProcessInfo.processInfo.environment["BLITZKVM_PROBE_WHEEL"] == "1"
+    /// BLITZKVM_PROBE_RELATIVE=1: a relative mouse move (±40 counts) instead of
+    /// a key; the page flips its square on mousemove with movementX (open it as
+    /// latency.html#rel). For Game Mode (--game-mode).
+    private let relativeMode = ProcessInfo.processInfo.environment["BLITZKVM_PROBE_RELATIVE"] == "1"
     /// Pointer spots as fractions of the remote picture: on the page's black
     /// area below its marker, clear of the counter, at any size from 1280×720.
     private let targets = [CGPoint(x: 0.62, y: 0.86), CGPoint(x: 0.72, y: 0.93)]
@@ -172,6 +176,9 @@ final class LatencyProbe {
             controller.inputSent(keysHeld: false) // as the app's input does
         } else if wheelMode {
             controller.engine.write(EngineProtocol.wheel(y: target == 0 ? 1 : -1, x: 0))
+            controller.inputSent(keysHeld: false) // as the app's input does
+        } else if relativeMode {
+            controller.engine.write(EngineProtocol.relativePointer(dx: target == 0 ? 40 : -40, dy: 0, buttons: 0))
             controller.inputSent(keysHeld: false) // as the app's input does
         } else {
             controller.engine.write(EngineProtocol.key(hid: 0x1B, pressed: true))

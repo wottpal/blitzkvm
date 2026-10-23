@@ -582,3 +582,73 @@ func waitForBaseURL(t *testing.T, srv *Server) {
 		t.Fatal("server did not start")
 	}
 }
+
+// SendRelMouse splits a delta beyond +-127 into several reports; the sum of
+// what the device receives must equal what was asked for.
+func TestSendRelMouseSplitsLosslessly(t *testing.T) {
+	srv, err := NewServer(Config{
+		ListenAddr:      "127.0.0.1:0",
+		ICELoopbackOnly: true,
+		AuthMode:        AuthModePassword,
+		Password:        "secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-errCh:
+			if err != nil && ctx.Err() == nil {
+				t.Errorf("server: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("server did not shut down")
+		}
+	})
+	go func() { errCh <- srv.ListenAndServe(ctx) }()
+	waitForBaseURL(t, srv)
+
+	c, err := client.New(client.Config{
+		BaseURL:         srv.BaseURL(),
+		ICELoopbackOnly: true,
+		Password:        "secret",
+		RPCTimeout:      2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer waitCancel()
+	if err := c.WaitForHID(waitCtx); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.SendRelMouse(300, -5, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SendRelMouse(-1000, 1000, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	// 300 -> 127,127,46 (3 reports); 1000 -> 7x127+111 (8 reports).
+	const wantReports = 3 + 8
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, _, reports, _ := srv.RelativeMouseTotals()
+		if reports >= wantReports || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	dx, dy, reports, buttons := srv.RelativeMouseTotals()
+	if reports != wantReports || dx != -700 || dy != 995 || buttons != 1 {
+		t.Fatalf("got dx=%d dy=%d reports=%d buttons=%d, want dx=-700 dy=995 reports=%d buttons=1", dx, dy, reports, buttons, wantReports)
+	}
+}

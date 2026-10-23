@@ -43,6 +43,7 @@ stops as soon as it is gone. So keys never reach another app on the remote when 
 |---|---|
 | `BLITZKVM_PROBE_POINTER=1` | Moves the pointer between two spots instead of pressing a key; waits for the cursor at the new spot |
 | `BLITZKVM_PROBE_WHEEL=1` | A wheel step instead of a key (the page flips its square on wheel events too) |
+| `BLITZKVM_PROBE_RELATIVE=1` | A relative mouse move (±40 counts, alternating) instead of a key, for Game Mode: run with `--game-mode` against `latency.html#rel` (the page flips its square on `mousemove` with a nonzero `movementX`, only when the URL hash contains `rel`) |
 | `BLITZKVM_PROBE_KEYFRAME_LEAD=S` | Asks for a keyframe S seconds before each key: the cost of a large frame in flight (a still refresh, a repair). Use `latency_busy.html` (the probe page over the quality pattern), so keyframes have a desktop's size |
 | `BLITZKVM_PROBE_FULLSCREEN=1` | Measures with the window in full screen |
 | `BLITZKVM_PROBE_PAIR_GAP=S` | Presses an unmeasured key first, then the measured one S seconds later (to hit the still refresh) |

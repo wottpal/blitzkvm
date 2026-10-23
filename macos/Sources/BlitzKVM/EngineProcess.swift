@@ -303,12 +303,12 @@ final class EngineProcess {
     /// (StillRefresh) where the firmware offers it. `audio`: the device's
     /// audio comes along; `enableDeviceAudio`: the session may turn it on.
     func connect(baseURL: String, password: String?, deviceID: String?, certSHA256: String?, autoQuality: Bool, qualityLevel: String?,
-                 clientRefresh: Bool, audio: Bool, enableDeviceAudio: Bool) {
+                 clientRefresh: Bool, audio: Bool, enableDeviceAudio: Bool, gameMode: Bool) {
         let command = EngineCommand(cmd: "connect", baseURL: baseURL, password: password, deviceID: deviceID,
                                     certSHA256: certSHA256, offerH265: Self.offerH265, autoQuality: autoQuality,
                                     qualityLevel: autoQuality ? nil : qualityLevel, clientRefresh: clientRefresh,
                                     audio: audio, enableDeviceAudio: enableDeviceAudio,
-                                    noDirectPath: Self.directPath ? nil : true)
+                                    noDirectPath: Self.directPath ? nil : true, gameMode: gameMode ? true : nil)
         lastConnect = command
         send(command: command)
     }
@@ -328,6 +328,12 @@ final class EngineProcess {
     func setAutoQuality(_ on: Bool) {
         lastConnect?.autoQuality = on
         send(command: EngineCommand(cmd: "setAutoQuality", autoQuality: on))
+    }
+
+    /// Game Mode's video quality, also for a restarted helper.
+    func setGameMode(_ on: Bool) {
+        lastConnect?.gameMode = on ? true : nil
+        send(command: EngineCommand(cmd: "setGameMode", gameMode: on))
     }
 
     /// Fixes the quality level (automatic off), also for a restarted helper.

@@ -55,6 +55,29 @@ final class EngineProtocolTests: XCTestCase {
         XCTAssertEqual(connect["clientRefresh"] as? Bool, true)
     }
 
+    func testGameModeCommandEncodesLikeGo() throws {
+        let on = try JSONSerialization.jsonObject(with: JSONEncoder().encode(EngineCommand(cmd: "setGameMode", gameMode: true))) as! [String: Any]
+        XCTAssertEqual(on["cmd"] as? String, "setGameMode")
+        XCTAssertEqual(on["gameMode"] as? Bool, true)
+        let none = try JSONSerialization.jsonObject(with: JSONEncoder().encode(EngineCommand(cmd: "ping"))) as! [String: Any]
+        XCTAssertNil(none["gameMode"])
+        let json = #"{"Phase":"connected","Status":"connected","GameMode":true,"RelativeMouseOff":true}"#
+        let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(snapshot.GameMode, true)
+        XCTAssertEqual(snapshot.RelativeMouseOff, true)
+        // Game Mode's status reads the live encoder from MinQP (0 or absent: stock firmware).
+        let live = try JSONDecoder().decode(SessionSnapshot.self, from: Data(#"{"Phase":"connected","Status":"connected","QualityLevel":"game","MinQP":22,"RelativeMouseOff":false}"#.utf8))
+        XCTAssertEqual(live.MinQP, 22)
+        XCTAssertEqual(live.RelativeMouseOff, false)
+    }
+
+    func testGameQualityLevelIsNeverALadderLevel() {
+        XCTAssertEqual(QualityLevelName.ladderLevel("game"), "maximum")
+        XCTAssertEqual(QualityLevelName.ladderLevel("balanced"), "balanced")
+        XCTAssertNil(QualityLevelName.ladderLevel(nil))
+        XCTAssertNil(QualityLevelName.ladderLevel(""))
+    }
+
     func testSnapshotCarriesTheStillRefreshLevel() throws {
         let json = #"{"Phase":"connected","Status":"connected","ClientRefresh":true,"MinQP":10,"StillQP":1}"#
         let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
@@ -123,6 +146,20 @@ final class KeyMapTests: XCTestCase {
         XCTAssertEqual(ModifierProfile.pc.apply(0xE0), 0xE3)
         XCTAssertEqual(ModifierProfile.mac.apply(0xE3), 0xE3)
         XCTAssertEqual(ModifierProfile.pc.apply(0x04), 0x04)
+    }
+
+    /// Keys by position, as on a PC keyboard: ⌃ Ctrl, ⌥ Windows, ⌘ Alt.
+    func testPCLayoutProfileMatchesPCKeyPositions() {
+        let p = ModifierProfile.pcLayout
+        XCTAssertEqual(p.apply(0xE0), 0xE0, "⌃ stays Ctrl")
+        XCTAssertEqual(p.apply(0xE2), 0xE3, "⌥ sends Windows")
+        XCTAssertEqual(p.apply(0xE3), 0xE2, "⌘ sends Alt")
+        XCTAssertEqual(p.apply(0xE6), 0xE7, "right ⌥ sends right Windows")
+        XCTAssertEqual(p.apply(0xE7), 0xE6, "right ⌘ sends right Alt")
+        XCTAssertEqual(p.apply(0xE1), 0xE1)
+        XCTAssertEqual(p.apply(0x04), 0x04)
+        XCTAssertEqual(KeyMap.hidUsage(keyCode: 0x0A, isISO: true, remote: .pcLayout),
+                       KeyMap.hidUsage(keyCode: 0x0A, isISO: true, remote: .pc), "ISO keys as for any PC")
     }
 }
 
@@ -586,6 +623,25 @@ final class JetKVMSetupTests: XCTestCase {
         XCTAssertEqual(InstallGuard.verdict(statusOutput: ""), .none)
     }
 
+    /// Stock JetKVMs have no /userdata/init.d until something creates it.
+    func testInstallGuardCommandCreatesInitDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let install = Process()
+        install.executableURL = URL(fileURLWithPath: "/bin/sh")
+        install.arguments = ["-c", InstallGuard.installCommand.replacingOccurrences(of: "/userdata", with: root.path)]
+        let input = Pipe()
+        install.standardInput = input
+        try install.run()
+        input.fileHandleForWriting.write(Data("#!/bin/sh\n".utf8))
+        try input.fileHandleForWriting.close()
+        install.waitUntilExit()
+        XCTAssertEqual(install.terminationStatus, 0)
+        let script = InstallGuard.script.replacingOccurrences(of: "/userdata", with: root.path)
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: script), script)
+    }
+
     /// The app ships the fork's guard unchanged, and BusyBox's sh can parse it.
     func testBundledInstallGuard() throws {
         let macos = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -678,6 +734,20 @@ final class JetKVMSetupTests: XCTestCase {
         XCTAssertFalse(device.addAddress("MAC-MINI-JETKVM.example.ts.net"))
         XCTAssertEqual(device.addresses, ["192.168.1.40", "mac-mini-jetkvm.example.ts.net"])
     }
+
+    func testDeviceGameModeRoundTrips() throws {
+        var device = Device(name: "Mac mini", addresses: ["192.168.1.40"])
+        XCTAssertFalse(device.isGameMode)
+        device.isGameMode = true
+        let decoded = try JSONDecoder().decode(Device.self, from: JSONEncoder().encode(device))
+        XCTAssertTrue(decoded.isGameMode)
+        // Off is stored as no key at all.
+        device.isGameMode = false
+        XCTAssertNil(device.gameMode)
+        // A library written before Game Mode existed loads with it off.
+        let old = #"{"id":"x","name":"Mac mini","addresses":["192.168.1.40"],"modifierProfile":"mac","invertScroll":false}"#
+        XCTAssertFalse(try JSONDecoder().decode(Device.self, from: Data(old.utf8)).isGameMode)
+    }
 }
 
 final class DoubleCommandPressTests: XCTestCase {
@@ -729,3 +799,18 @@ final class PointerRestTests: XCTestCase {
         XCTAssertEqual(rest.decide(at: 4.2, buttonsHeld: false), .hide)
     }
 }
+
+final class EDIDRestoreTests: XCTestCase {
+    func testOriginalIsTheDevicesEDIDOnlyWhenTurnedOnHere() {
+        XCTAssertEqual(EDIDRestore.original(current: "00FFAA", turnedOnHere: true), "00FFAA")
+        XCTAssertEqual(EDIDRestore.original(current: "00FFAA", turnedOnHere: false), "", "already on: JetKVM Default")
+    }
+
+    func testValueSkipsAnEDIDTheDeviceHasAlready() {
+        XCTAssertNil(EDIDRestore.value(saved: "00ffaa", current: "00FFAA"))
+        XCTAssertEqual(EDIDRestore.value(saved: "00FFAA", current: "00FFBB"), "00FFAA")
+        XCTAssertEqual(EDIDRestore.value(saved: "00FFAA", current: nil), "00FFAA", "unknown: set it")
+        XCTAssertEqual(EDIDRestore.value(saved: "", current: "00FFAA"), "", "JetKVM Default is always set")
+    }
+}
+

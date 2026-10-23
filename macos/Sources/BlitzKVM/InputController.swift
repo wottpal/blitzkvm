@@ -45,12 +45,16 @@ final class InputController {
     /// Another app pressed ⌘V: true when handled (it isn't sent then); nil
     /// or false leaves it to the remote like any key.
     var onPasteFromApp: (() -> Bool)?
+    /// ⇧⌘G pressed while captured: Game Mode's toggle, which a game holding
+    /// the keyboard would otherwise get.
+    var onGameModeShortcut: (() -> Void)?
     /// Keys pressed as a shortcut for this Mac: their release stays here too.
     private var localKeys = Set<UInt16>()
     /// Modifiers alone made a shortcut for this Mac: modifier changes stay
     /// here until all are up.
     private var localModifiers = false
-    /// ⌘V presses taken as another app's paste: their release is dropped.
+    /// ⌘V presses taken as another app's paste, and ⇧⌘G taken as Game
+    /// Mode's toggle: their release is dropped.
     private var appPasteKeys = Set<UInt16>()
     /// Events the tap let through to macOS, which then reach this app too.
     private var passedOn: [CGEventTimestamp] = []
@@ -81,6 +85,7 @@ final class InputController {
                 _ = Self.accessibilityTrusted(prompt: true)
             }
             ensureEventTap()
+            if relativeActive { liftAbsoluteButtons() }
         }
         onCaptureChange?(on)
     }
@@ -262,6 +267,13 @@ final class InputController {
                 releaseModifiers()
                 return .drop
             }
+            if keyCode == UInt16(kVK_ANSI_G), flags & LocalShortcut.flagsMask == LocalShortcut.shift | LocalShortcut.command,
+               let toggle = onGameModeShortcut {
+                appPasteKeys.insert(keyCode)
+                releaseModifiers()
+                DispatchQueue.main.async(execute: toggle) // it ends this capture
+                return .drop
+            }
             if let shortcut = localShortcuts().first(where: { $0.matches(keyCode: keyCode, flags: flags) }) {
                 localKeys.insert(keyCode)
                 pressed(shortcut)
@@ -417,6 +429,13 @@ final class InputController {
         buttonState = 0
         scroll.reset()
         chordArmed = false
+        relative.reset()
+        relativeFlush?.cancel()
+        relativeFlush = nil
+        if relativeButtons != 0 {
+            relativeButtons = 0
+            send(EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: 0))
+        }
         send((try? EngineProtocol.command(EngineCommand(cmd: "releaseAll"))) ?? Data())
     }
 
@@ -424,19 +443,97 @@ final class InputController {
 
     private var buttonState: UInt8 = 0
 
+    // MARK: Game Mode (relative pointer)
+
+    /// Game Mode: with the keyboard captured, the mouse goes out as relative
+    /// moves (raw deltas from PointerLock) instead of absolute positions.
+    /// Switching it while captured ends capture first, so no pending motion
+    /// or held button crosses from one mode to the other.
+    /// No absolute report goes out while it is on, captured or not: a raw
+    /// input game reads even a hover as a jump. Buttons held through the
+    /// absolute path go up as it turns on.
+    var gameMode = false {
+        willSet {
+            guard newValue != gameMode else { return }
+            if captured { setCaptured(false) }
+            if newValue { liftAbsoluteButtons() }
+        }
+    }
+    var sensitivity: Double {
+        get { relative.sensitivity }
+        set { relative.sensitivity = newValue }
+    }
+    /// 250 reports/s at most.
+    static let relativeFlushInterval: TimeInterval = 0.004
+    var relativeActive: Bool { gameMode && captured && !viewOnly }
+    private var relative = RelativeMotion()
+    private var relativeFlush: DispatchWorkItem?
+    /// The buttons of the last relative report sent (releaseAll runs after
+    /// `captured` is already false, so it can't ask relativeActive).
+    private var relativeButtons: UInt8 = 0
+
+    /// Relative mode starts while buttons are down through the absolute
+    /// path (⌘ twice during a drag): they go up there first, or they would
+    /// stay held on the remote.
+    private func liftAbsoluteButtons() {
+        guard buttonState != 0 else { return }
+        buttonState = 0
+        guard !viewOnly, let (x, y, _) = lastPointer else { return }
+        lastPointer = (x, y, 0)
+        send(EngineProtocol.absolutePointer(x: x, y: y, buttons: 0))
+    }
+
+    /// Raw deltas: coalesced, and sent at most every relativeFlushInterval.
+    func relativeMotion(dx: Double, dy: Double) {
+        guard relativeActive else { return }
+        relative.add(dx: dx, dy: dy)
+        guard relativeFlush == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.relativeFlush = nil
+            self?.flushRelative()
+        }
+        relativeFlush = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.relativeFlushInterval, execute: work)
+    }
+
+    /// Sends the pending motion now, with the current buttons.
+    func flushRelative() {
+        guard relativeActive else { return }
+        while let move = relative.take() {
+            relativeButtons = buttonState
+            send(EngineProtocol.relativePointer(dx: move.dx, dy: move.dy, buttons: buttonState))
+        }
+    }
+
     /// Pointer report for a mouse event. Button state is tracked from the
     /// events themselves (NSEvent buttonNumber 0…4 = left, right, middle,
     /// back, forward = HID bits 1, 2, 4, 8, 16), not from global hardware
     /// state, so presses that began outside the window are not reported.
     func mouse(_ event: NSEvent, at point: (Double, Double), in layout: VideoLayout) {
         let bit: UInt8 = event.buttonNumber < 5 ? UInt8(1) << UInt8(event.buttonNumber) : 0
+        let previous = buttonState
+        var buttons = buttonState
         switch event.type {
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            buttonState |= bit
+            buttons |= bit
             chordArmed = false
-        case .leftMouseUp, .rightMouseUp, .otherMouseUp: buttonState &= ~bit
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp: buttons &= ~bit
         default: break
         }
+        // Game Mode while not captured: nothing (the click that captures
+        // engages capture before it gets here, so it goes out relative).
+        if gameMode && !captured { return }
+        if relativeActive {
+            // Motion first, with the old buttons, so the click lands where aimed.
+            if buttons != previous {
+                flushRelative()
+                buttonState = buttons
+                relativeButtons = buttons
+                send(EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: buttons))
+            }
+            return
+        }
+        buttonState = buttons
         mouse(at: point, in: layout, buttons: buttonState)
     }
 
@@ -446,7 +543,7 @@ final class InputController {
     /// pixels short of it. A report the same as the last one is skipped
     /// (AppKit delivers each move twice: tracking area and window).
     func mouse(at point: (Double, Double), in layout: VideoLayout, buttons: UInt8) {
-        guard !viewOnly, let (x, y) = layout.absolutePosition(px: point.0, py: point.1) else { return }
+        guard !viewOnly, !gameMode, let (x, y) = layout.absolutePosition(px: point.0, py: point.1) else { return }
         if let last = lastPointer, last == (x, y, buttons) { return }
         lastPointer = (x, y, buttons)
         send(EngineProtocol.absolutePointer(x: x, y: y, buttons: buttons))

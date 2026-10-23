@@ -52,6 +52,9 @@ struct Options {
     var setupSnapshot: String?
     /// Self-test: send the wake-only signal once connected (no keystrokes).
     var wake = false
+    /// `--game-mode`: Game Mode on for the window, not saved (self-tests,
+    /// latency probe).
+    var gameMode = false
     /// Self-test: type with pauses and check the still refreshes (SelfTest.typePauses).
     var typePauses = false
     /// Self-test: play the device's audio (silently) and expect this codec
@@ -103,6 +106,7 @@ struct Options {
             case "--setup": o.setup = next()
             case "--setup-snapshot": o.setupSnapshot = next()
             case "--wake": o.wake = true
+            case "--game-mode": o.gameMode = true
             case "--type-pauses": o.typePauses = true
             case "--expect-audio": o.expectAudio = next()
             case "--open": o.openWindow = next()
@@ -163,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isSelfTest: Bool { options.selfTestSeconds != nil || options.latencyProbe != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        PointerLock.startMouseDiscovery()
         updater = MainActor.assumeIsolated { Updater(start: !isSelfTest || Updater.feedOverride != nil) }
         NSApp.mainMenu = buildMenu()
         if let address = options.device {
@@ -184,9 +189,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default: break
         }
         NSApp.activate(ignoringOtherApps: true)
+        if !isSelfTest { DispatchQueue.main.async { MainActor.assumeIsolated { self.checkAccessibilityAtLaunch() } } }
+    }
+
+    private static let skipsAccessibilityCheckKey = "skipsAccessibilityCheckAtLaunch"
+
+    /// Without Accessibility, system shortcuts (⌘Tab) stay on this Mac. A
+    /// rebuilt or moved copy is a new app to macOS: its entry in System
+    /// Settings still looks on, but is for the earlier copy. Says so at
+    /// launch, as a sheet so connecting goes on meanwhile.
+    @MainActor private func checkAccessibilityAtLaunch() {
+        guard !InputController.accessibilityTrusted(prompt: false), !permissions.showsOnboarding,
+              !UserDefaults.standard.bool(forKey: Self.skipsAccessibilityCheckKey) else { return }
+        let alert = NSAlert()
+        alert.messageText = "System Shortcuts Stay on This Mac"
+        alert.informativeText = "BlitzKVM has no Accessibility access, so ⌘Tab and other system shortcuts aren’t sent to the remote computer. "
+            + "If BlitzKVM is already listed and switched on in System Settings › Privacy & Security › Accessibility, "
+            + "that entry is for an earlier copy: remove it with −, then add this one with + (it’s selected in Finder).\n\n"
+            + Bundle.main.bundlePath
+        alert.addButton(withTitle: "Open Accessibility Settings")
+        alert.addButton(withTitle: "Not Now")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don’t check at launch"
+        let done: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            if alert.suppressionButton?.state == .on {
+                UserDefaults.standard.set(true, forKey: Self.skipsAccessibilityCheckKey)
+            }
+            guard response == .alertFirstButtonReturn, let self else { return }
+            NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+            UserDefaults.standard.set(true, forKey: InputController.askedForAccessibilityKey)
+            MainActor.assumeIsolated { self.permissions.allowAccessibility() } // opens the pane once asked
+        }
+        if let window = windows.first?.window ?? devicesWindow?.window {
+            alert.beginSheetModal(for: window, completionHandler: done)
+        } else {
+            done(alert.runModal())
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// Windows whose Match Window changed the remote display put it back
+    /// first (at most 3 s).
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            let pending = windows.filter(\.needsDisplayRestore)
+            guard !pending.isEmpty else { return .terminateNow }
+            var left = pending.count
+            for window in pending {
+                window.restoreBeforeEnding {
+                    left -= 1
+                    if left == 0 { sender.reply(toApplicationShouldTerminate: true) }
+                }
+            }
+            return .terminateLater
+        }
+    }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { showDevices() }
@@ -324,6 +382,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.input.viewOnly = options.viewOnly
         controller.scalingFilterOverride = options.scalingFilter
         controller.localPointerOverride = options.localPointer
+        if options.gameMode { controller.gameModeOverride = true }
         if isSelfTest { controller.playsAudioOverride = options.expectAudio != nil }
         controller.addressAnswered = answered
         controller.showsSetupOnConnect = pendingSetup.remove(device.id) != nil || options.setup != nil
@@ -419,8 +478,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard var saved = store.device(id: device.id) else { return }
         saved.modifierProfile = device.modifierProfile
         saved.viewMode = device.viewMode
+        saved.matchWindowRestoreEDID = device.matchWindowRestoreEDID
         saved.exactPixelScaling = device.exactPixelScaling
         saved.invertScroll = device.invertScroll
+        saved.gameMode = device.gameMode
         saved.autoQuality = device.autoQuality
         saved.qualityLevel = device.qualityLevel
         store.upsert(saved)
@@ -535,6 +596,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(item("Enable System Shortcut Capture", #selector(requestAccessibility)))
         device.addItem(.separator())
         device.addItem(item("Wake Computer", #selector(wakeComputer)))
+        device.addItem(item("Game Mode", #selector(toggleGameMode), key: "g", mods: [.command, .shift]))
         device.addItem(item("Restart JetKVM", #selector(restartJetKVM)))
         let power = NSMenu(title: "Power")
         for (title, action) in [("ATX: Press Power Button", "power-short"), ("ATX: Hold Power Button (Force Off)", "power-long"), ("ATX: Press Reset", "reset")] {
@@ -564,7 +626,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         device.addItem(extensionsItem)
         device.addItem(.separator())
         for profile in ModifierProfile.allCases {
-            let i = item(profile == .mac ? "Remote Is a Mac (⌘ stays ⌘)" : "Remote Is a PC (⌘ ↔ Ctrl)", #selector(setProfile(_:)))
+            let i = item(profile.menuTitle, #selector(setProfile(_:)))
             i.representedObject = profile.rawValue
             device.addItem(i)
         }
@@ -803,6 +865,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func wakeComputer() { current?.wakeComputer() }
+    @objc private func toggleGameMode() {
+        guard let c = current else { return }
+        c.setGameMode(!c.isGameMode)
+    }
 
     @objc private func restartJetKVM() { current?.confirmRestart() }
 
@@ -863,6 +929,9 @@ extension AppDelegate: NSMenuItemValidation {
             return c?.snapshot.Phase == "connected"
         case #selector(wakeComputer):
             return c?.snapshot.Phase == "connected" && c?.input.viewOnly == false
+        case #selector(toggleGameMode):
+            menuItem.state = c?.isGameMode == true ? .on : .off
+            return c != nil && c?.input.viewOnly == false
         case #selector(toggleExactPixels):
             menuItem.state = c?.device.exactPixels == true ? .on : .off
             return c != nil
@@ -900,7 +969,7 @@ extension AppDelegate: NSMenuItemValidation {
         case #selector(setQualityLevel(_:)):
             let level = menuItem.representedObject as? String
             if c?.device.adaptiveQuality == true {
-                menuItem.state = c?.snapshot.QualityLevel == level ? .mixed : .off
+                menuItem.state = QualityLevelName.ladderLevel(c?.snapshot.QualityLevel) == level ? .mixed : .off
                 menuItem.toolTip = menuItem.state == .mixed ? "Automatic runs at this level now" : nil
             } else {
                 menuItem.state = c?.device.qualityLevel == level ? .on : .off

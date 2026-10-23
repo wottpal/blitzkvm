@@ -28,4 +28,8 @@
   });
   // A wheel tick flips it too (BLITZKVM_PROBE_WHEEL); the page never scrolls.
   addEventListener("wheel", (e) => { e.preventDefault(); flip(); }, { passive: false });
+  // latency.html#rel: a relative mouse move flips it (BLITZKVM_PROBE_RELATIVE).
+  if (location.hash.includes("rel")) {
+    addEventListener("mousemove", (e) => { if (e.movementX !== 0) flip(); });
+  }
 </script>
