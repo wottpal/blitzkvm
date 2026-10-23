@@ -343,3 +343,22 @@ public enum RemoteDisplay {
         bytes.map { String(format: "%02X", $0) }.joined()
     }
 }
+
+/// Match Window's way back: the EDID the device had before Match Window
+/// replaced it, put back when Match Window ends ("" is JetKVM Default).
+public enum EDIDRestore {
+    /// What to keep before Match Window's first change: the device's EDID
+    /// when Match Window was turned on in this window; JetKVM Default when it
+    /// was already on (an earlier version changed the EDID and kept nothing).
+    public static func original(current: String, turnedOnHere: Bool) -> String {
+        turnedOnHere ? current : ""
+    }
+
+    /// The EDID to set to restore `saved`, or nil when the device has it
+    /// already (setting it again would make the computer re-detect its
+    /// display). JetKVM Default can't be compared, so it is always set.
+    public static func value(saved: String, current: String?) -> String? {
+        guard !saved.isEmpty, let current else { return saved }
+        return saved.caseInsensitiveCompare(current) == .orderedSame ? nil : saved
+    }
+}

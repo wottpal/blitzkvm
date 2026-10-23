@@ -24,6 +24,9 @@ public struct Device: Codable, Equatable, Identifiable {
     /// Match Window: the remote display's refresh rate (Hz); nil picks the
     /// largest picture and then the highest rate (RemoteDisplay.mode).
     public var matchWindowRefresh: Int?
+    /// Match Window: the EDID to put back when it ends ("" is JetKVM
+    /// Default); nil while Match Window hasn't changed it.
+    public var matchWindowRestoreEDID: String?
     /// Stream quality follows the network; nil means on.
     public var autoQuality: Bool?
     /// The fixed quality level used while automatic quality is off.

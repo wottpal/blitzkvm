@@ -18,6 +18,9 @@ final class DisplayFollower {
     /// pauses while it re-detects the display).
     var onResize: ((RemoteDisplay.Mode) -> Void)?
     var onError: ((String) -> Void)?
+    /// The device's EDID (hex) just before a change: kept to put back when
+    /// Match Window ends.
+    var willReplace: ((String) -> Void)?
     /// The mode last asked of the device.
     private(set) var requested: RemoteDisplay.Mode?
     private var wanted: RemoteDisplay.Mode?
@@ -60,6 +63,7 @@ final class DisplayFollower {
                 let edid = try RemoteDisplay.edid(current, advertising: mode.size, refresh: mode.refresh)
                 requested = mode
                 if edid != current {
+                    willReplace?(hex)
                     onResize?(mode)
                     try await engine.call("setEDID", params: .object(["edid": .string(RemoteDisplay.hex(edid))]))
                     AppLog.log("remote display: asked for \(mode)")

@@ -799,3 +799,18 @@ final class PointerRestTests: XCTestCase {
         XCTAssertEqual(rest.decide(at: 4.2, buttonsHeld: false), .hide)
     }
 }
+
+final class EDIDRestoreTests: XCTestCase {
+    func testOriginalIsTheDevicesEDIDOnlyWhenTurnedOnHere() {
+        XCTAssertEqual(EDIDRestore.original(current: "00FFAA", turnedOnHere: true), "00FFAA")
+        XCTAssertEqual(EDIDRestore.original(current: "00FFAA", turnedOnHere: false), "", "already on: JetKVM Default")
+    }
+
+    func testValueSkipsAnEDIDTheDeviceHasAlready() {
+        XCTAssertNil(EDIDRestore.value(saved: "00ffaa", current: "00FFAA"))
+        XCTAssertEqual(EDIDRestore.value(saved: "00FFAA", current: "00FFBB"), "00FFAA")
+        XCTAssertEqual(EDIDRestore.value(saved: "00FFAA", current: nil), "00FFAA", "unknown: set it")
+        XCTAssertEqual(EDIDRestore.value(saved: "", current: "00FFAA"), "", "JetKVM Default is always set")
+    }
+}
+

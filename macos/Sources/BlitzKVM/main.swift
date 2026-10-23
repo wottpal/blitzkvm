@@ -229,6 +229,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// Windows whose Match Window changed the remote display put it back
+    /// first (at most 3 s).
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            let pending = windows.filter(\.needsDisplayRestore)
+            guard !pending.isEmpty else { return .terminateNow }
+            var left = pending.count
+            for window in pending {
+                window.restoreBeforeEnding {
+                    left -= 1
+                    if left == 0 { sender.reply(toApplicationShouldTerminate: true) }
+                }
+            }
+            return .terminateLater
+        }
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { showDevices() }
         return true
@@ -461,6 +478,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard var saved = store.device(id: device.id) else { return }
         saved.modifierProfile = device.modifierProfile
         saved.viewMode = device.viewMode
+        saved.matchWindowRestoreEDID = device.matchWindowRestoreEDID
         saved.exactPixelScaling = device.exactPixelScaling
         saved.invertScroll = device.invertScroll
         saved.gameMode = device.gameMode

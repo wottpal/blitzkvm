@@ -445,8 +445,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// Changing the view mode resizes the window to suit it, or (Match
     /// Window) the remote display to suit the window.
     func setScaling(_ mode: ScalingMode) {
+        let wasMatching = device.scaling == .matchWindow
         updatePreferences { $0.scaling = mode }
+        if mode == .matchWindow && !wasMatching { matchWindowTurnedOnHere = true }
         if !followsWindow { displayFollower.cancel() }
+        if wasMatching && mode != .matchWindow { restoreRemoteDisplay(forget: true) }
         if mode == .actualSize || mode == .pixelExact {
             userSizedWindow = false
             fitWindowToRemote()
@@ -480,6 +483,50 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// The remote display follows the window (not in view-only sessions:
     /// it changes the device's EDID).
     private var followsWindow: Bool { device.scaling == .matchWindow && !input.viewOnly }
+    /// Match Window was turned on in this window: the device's EDID before
+    /// its first change is the one to put back (EDIDRestore.original).
+    private var matchWindowTurnedOnHere = false
+    private var closingAfterRestore = false
+
+    /// Match Window changed the device's EDID, and it can be put back now.
+    var needsDisplayRestore: Bool {
+        device.matchWindowRestoreEDID != nil && snapshot.Phase == "connected" && !isShutDown && !input.viewOnly
+    }
+
+    /// Puts back the EDID Match Window replaced (the remote computer
+    /// re-detects its display, back at its earlier resolution). forget:
+    /// Match Window is off, so the kept EDID goes too; otherwise it stays
+    /// for the next session, which changes the EDID again.
+    func restoreRemoteDisplay(forget: Bool, done: @escaping () -> Void = {}) {
+        guard needsDisplayRestore, let saved = device.matchWindowRestoreEDID else { return done() }
+        displayFollower.cancel()
+        Task { @MainActor in
+            do {
+                let current = try? await engine.call("getEDID", as: String.self)
+                if let edid = EDIDRestore.value(saved: saved, current: current) {
+                    try await engine.call("setEDID", params: .object(["edid": .string(edid)]))
+                    AppLog.log("remote display: restored \(edid.isEmpty ? "JetKVM Default" : "the earlier display")")
+                }
+                if forget { updatePreferences { $0.matchWindowRestoreEDID = nil } }
+            } catch {
+                AppLog.log("remote display: could not restore it: \(error.localizedDescription)")
+            }
+            done()
+        }
+    }
+
+    /// The window or the app is about to end the session: restores the
+    /// remote display first, waiting at most 3 s.
+    func restoreBeforeEnding(_ done: @escaping () -> Void) {
+        var finished = false
+        let finish = {
+            guard !finished else { return }
+            finished = true
+            done()
+        }
+        restoreRemoteDisplay(forget: false, done: finish)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: finish)
+    }
 
     private func makeDisplayFollower() -> DisplayFollower {
         let follower = DisplayFollower(engine: engine)
@@ -502,6 +549,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             }
         }
         follower.onError = { [weak self] in self?.refreshStatus(extra: $0) }
+        follower.willReplace = { [weak self] current in
+            guard let self, self.device.matchWindowRestoreEDID == nil else { return }
+            let original = EDIDRestore.original(current: current, turnedOnHere: self.matchWindowTurnedOnHere)
+            self.updatePreferences { $0.matchWindowRestoreEDID = original }
+        }
         return follower
     }
 
@@ -1094,6 +1146,12 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             roaming.connected()
             restartedAt = nil // back after a restart
             connectedAt = DispatchTime.now().uptimeNanoseconds
+            if !followsWindow {
+                restoreRemoteDisplay(forget: true) // turned off while away
+            } else if device.matchWindowRestoreEDID == nil && !matchWindowTurnedOnHere {
+                // On from before EDIDs were kept: the device may have one already.
+                updatePreferences { $0.matchWindowRestoreEDID = EDIDRestore.original(current: "", turnedOnHere: false) }
+            }
             matchRemoteToWindow()
             learnCaptureLimit()
             if let accepted = unverifiedPassword {
@@ -1537,6 +1595,13 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     func windowWillExitFullScreen(_ notification: Notification) {
         window?.styleMask.insert(.resizable)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !closingAfterRestore, needsDisplayRestore else { return true }
+        closingAfterRestore = true
+        restoreBeforeEnding { [weak sender] in sender?.close() }
+        return false
     }
 
     func windowWillClose(_ notification: Notification) {
