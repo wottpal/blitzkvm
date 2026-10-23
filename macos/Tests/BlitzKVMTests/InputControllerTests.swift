@@ -1,3 +1,4 @@
+import Carbon.HIToolbox
 import JetKVMCore
 import XCTest
 @testable import BlitzKVM
@@ -38,6 +39,21 @@ final class InputControllerTests: XCTestCase {
         input.setCaptured(true)
         sent.removeAll()
         return (input, { sent })
+    }
+
+    /// ⇧⌘G toggles Game Mode while captured too (the game has the keyboard
+    /// then); the remote never gets the G.
+    func testGameModeShortcutWorksWhileCaptured() {
+        let (input, sent) = captured([], gameMode: true)
+        var toggled = 0
+        input.onGameModeShortcut = { toggled += 1 }
+        let shiftCommand = LocalShortcut.shift | LocalShortcut.command
+        XCTAssertEqual(input.route(.keyDown, keyCode: UInt16(kVK_ANSI_G), flags: shiftCommand, fromApp: false), .drop)
+        XCTAssertEqual(input.route(.keyUp, keyCode: UInt16(kVK_ANSI_G), flags: shiftCommand, fromApp: false), .drop)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05)) // toggled after the key, as it ends the capture
+        XCTAssertEqual(toggled, 1)
+        XCTAssertFalse(sent().contains(EngineProtocol.key(hid: 0x0A, pressed: true)), "no G on the remote")
+        XCTAssertEqual(input.route(.keyDown, keyCode: UInt16(kVK_ANSI_G), flags: LocalShortcut.command, fromApp: false), .remote)
     }
 
     func testAKeyShortcutStaysHere() {

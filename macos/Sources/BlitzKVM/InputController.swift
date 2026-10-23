@@ -45,12 +45,16 @@ final class InputController {
     /// Another app pressed ⌘V: true when handled (it isn't sent then); nil
     /// or false leaves it to the remote like any key.
     var onPasteFromApp: (() -> Bool)?
+    /// ⇧⌘G pressed while captured: Game Mode's toggle, which a game holding
+    /// the keyboard would otherwise get.
+    var onGameModeShortcut: (() -> Void)?
     /// Keys pressed as a shortcut for this Mac: their release stays here too.
     private var localKeys = Set<UInt16>()
     /// Modifiers alone made a shortcut for this Mac: modifier changes stay
     /// here until all are up.
     private var localModifiers = false
-    /// ⌘V presses taken as another app's paste: their release is dropped.
+    /// ⌘V presses taken as another app's paste, and ⇧⌘G taken as Game
+    /// Mode's toggle: their release is dropped.
     private var appPasteKeys = Set<UInt16>()
     /// Events the tap let through to macOS, which then reach this app too.
     private var passedOn: [CGEventTimestamp] = []
@@ -261,6 +265,13 @@ final class InputController {
                onPasteFromApp?() == true {
                 appPasteKeys.insert(keyCode)
                 releaseModifiers()
+                return .drop
+            }
+            if keyCode == UInt16(kVK_ANSI_G), flags & LocalShortcut.flagsMask == LocalShortcut.shift | LocalShortcut.command,
+               let toggle = onGameModeShortcut {
+                appPasteKeys.insert(keyCode)
+                releaseModifiers()
+                DispatchQueue.main.async(execute: toggle) // it ends this capture
                 return .drop
             }
             if let shortcut = localShortcuts().first(where: { $0.matches(keyCode: keyCode, flags: flags) }) {

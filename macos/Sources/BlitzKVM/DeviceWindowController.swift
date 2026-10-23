@@ -250,6 +250,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         input.onCaptureChange = { [weak self] in self?.captureChanged($0) }
         input.localShortcuts = { MainActor.assumeIsolated { LocalShortcuts.shared.shortcuts } }
         input.onPasteFromApp = { [weak self] in MainActor.assumeIsolated { self?.pasteFromApp() == true } }
+        input.onGameModeShortcut = { [weak self] in MainActor.assumeIsolated { self.map { $0.setGameMode(!$0.isGameMode) } } }
         applyPreferences()
         // The cursor comes back before the Mac sleeps or the user switches away.
         let workspace = NSWorkspace.shared.notificationCenter
