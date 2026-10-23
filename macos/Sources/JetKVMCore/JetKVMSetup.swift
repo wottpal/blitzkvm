@@ -266,7 +266,8 @@ public enum InstallGuard {
     public static let log = "/userdata/install-guard.log"
 
     /// Installs the script from standard input (and drops an earlier log).
-    public static let installCommand = "rm -f \(log) && cat > \(script) && chmod +x \(script)"
+    /// Stock JetKVMs have no /userdata/init.d until something creates it.
+    public static let installCommand = "rm -f \(log) && mkdir -p /userdata/init.d && cat > \(script) && chmod +x \(script)"
     /// Arms it for the next boot.
     public static let armCommand = "echo 0 > \(marker)"
     /// Prints whether it is armed (with its boot count), then its log's last

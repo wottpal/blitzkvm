@@ -609,6 +609,25 @@ final class JetKVMSetupTests: XCTestCase {
         XCTAssertEqual(InstallGuard.verdict(statusOutput: ""), .none)
     }
 
+    /// Stock JetKVMs have no /userdata/init.d until something creates it.
+    func testInstallGuardCommandCreatesInitDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let install = Process()
+        install.executableURL = URL(fileURLWithPath: "/bin/sh")
+        install.arguments = ["-c", InstallGuard.installCommand.replacingOccurrences(of: "/userdata", with: root.path)]
+        let input = Pipe()
+        install.standardInput = input
+        try install.run()
+        input.fileHandleForWriting.write(Data("#!/bin/sh\n".utf8))
+        try input.fileHandleForWriting.close()
+        install.waitUntilExit()
+        XCTAssertEqual(install.terminationStatus, 0)
+        let script = InstallGuard.script.replacingOccurrences(of: "/userdata", with: root.path)
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: script), script)
+    }
+
     /// The app ships the fork's guard unchanged, and BusyBox's sh can parse it.
     func testBundledInstallGuard() throws {
         let macos = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
