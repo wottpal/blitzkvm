@@ -189,6 +189,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default: break
         }
         NSApp.activate(ignoringOtherApps: true)
+        if !isSelfTest { DispatchQueue.main.async { MainActor.assumeIsolated { self.checkAccessibilityAtLaunch() } } }
+    }
+
+    private static let skipsAccessibilityCheckKey = "skipsAccessibilityCheckAtLaunch"
+
+    /// Without Accessibility, system shortcuts (⌘Tab) stay on this Mac. A
+    /// rebuilt or moved copy is a new app to macOS: its entry in System
+    /// Settings still looks on, but is for the earlier copy. Says so at
+    /// launch, as a sheet so connecting goes on meanwhile.
+    @MainActor private func checkAccessibilityAtLaunch() {
+        guard !InputController.accessibilityTrusted(prompt: false), !permissions.showsOnboarding,
+              !UserDefaults.standard.bool(forKey: Self.skipsAccessibilityCheckKey) else { return }
+        let alert = NSAlert()
+        alert.messageText = "System Shortcuts Stay on This Mac"
+        alert.informativeText = "BlitzKVM has no Accessibility access, so ⌘Tab and other system shortcuts aren’t sent to the remote computer. "
+            + "If BlitzKVM is already listed and switched on in System Settings › Privacy & Security › Accessibility, "
+            + "that entry is for an earlier copy: remove it with −, then add this one with + (it’s selected in Finder).\n\n"
+            + Bundle.main.bundlePath
+        alert.addButton(withTitle: "Open Accessibility Settings")
+        alert.addButton(withTitle: "Not Now")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don’t check at launch"
+        let done: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            if alert.suppressionButton?.state == .on {
+                UserDefaults.standard.set(true, forKey: Self.skipsAccessibilityCheckKey)
+            }
+            guard response == .alertFirstButtonReturn, let self else { return }
+            NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+            UserDefaults.standard.set(true, forKey: InputController.askedForAccessibilityKey)
+            MainActor.assumeIsolated { self.permissions.allowAccessibility() } // opens the pane once asked
+        }
+        if let window = windows.first?.window ?? devicesWindow?.window {
+            alert.beginSheetModal(for: window, completionHandler: done)
+        } else {
+            done(alert.runModal())
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
