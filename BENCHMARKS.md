@@ -318,6 +318,18 @@ Stock firmware sends G.711 (8 kHz mono) at a constant 50 packets a second, silen
 
 A ten-hour session at 2400×1012@60 in full screen on the 40" display: app memory flat (964 MB shown, the render targets of a 6016×2538 window), engine 18–33 MB and 3 % CPU, device memory flat. A still screen is no longer redrawn: the app skips decoded frames identical to the one shown, so a still H.265 clip draws 1 of 753 frames and GPU use falls from 10–13 % to about 0.
 
+## Game Mode
+
+Relative mouse move to photon, through the whole app, with Game Mode on.
+
+- **Method:** on the gaming PC, open `tools/latency-probe/latency.html#rel` in a browser, full screen (served as in the probe's README), on a wired LAN with the built-in 120 Hz display of the Mac in full screen. The page flips its square on a `mousemove` with a nonzero `movementX`.
+- **Key control:** `BLITZKVM_PROBE_FULLSCREEN=1 BlitzKVM --device <address> --latency-probe 40 --full-screen`.
+- **Relative probe:** `BLITZKVM_PROBE_RELATIVE=1 BLITZKVM_PROBE_FULLSCREEN=1 BlitzKVM --device <address> --game-mode --latency-probe 40`, run after the key control, 40 samples each. Each sample sends one relative move of ±40 counts and is timed like a key sample, so `decoded_ms` and `presented_ms` mean relative move to photon.
+- **Record with each run:** the mode the PC delivers (status bar resolution and rate), median and p90.
+- **Expected:** relative close to the pointer baseline above at the delivered mode.
+
+Results: pending owner hardware session.
+
 ## Method
 
 - **Test pattern:** `tools/quality-bench/make_pattern.swift` draws a 1920×1080 page with text from 9 to 28 px in light and dark mode, colored text, code, 1-pixel gratings, color patches, a gray ramp, gradients and a photo-like texture; the same layout at 2× is the reference for enlarging. The JetKVM display uses the sRGB color profile.
