@@ -248,6 +248,9 @@ type Server struct {
 	media        *virtualmedia.State
 	storage      map[string]storedFile
 	uploads      map[string]*pendingUpload
+	// Relative mouse totals: sums of every report received (recording only).
+	relDX, relDY, relReports int
+	relButtons               byte
 	// typed counts key presses for the still screen to draw.
 	typed atomic.Int64
 }
@@ -1442,6 +1445,12 @@ func (s *Server) recordPointer(x, y int32, buttons byte) {
 }
 
 func (s *Server) recordRelativeMouse(dx, dy int8, buttons byte) {
+	s.mu.Lock()
+	s.relDX += int(dx)
+	s.relDY += int(dy)
+	s.relReports++
+	s.relButtons = buttons
+	s.mu.Unlock()
 	if buttons != 0 {
 		log := logging.Subsystem("emulator")
 		log.Trace().Int8("dx", dx).Int8("dy", dy).Uint8("buttons", buttons).Msg("received relative mouse")
@@ -1570,4 +1579,12 @@ func (sess *session) close() {
 func itoa(v int) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// RelativeMouseTotals returns the sums of every relative mouse report
+// received, the report count and the buttons of the last report.
+func (s *Server) RelativeMouseTotals() (dx, dy, reports int, buttons byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.relDX, s.relDY, s.relReports, s.relButtons
 }
