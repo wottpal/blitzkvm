@@ -417,6 +417,13 @@ final class InputController {
         buttonState = 0
         scroll.reset()
         chordArmed = false
+        relative.reset()
+        relativeFlush?.cancel()
+        relativeFlush = nil
+        if relativeButtons != 0 {
+            relativeButtons = 0
+            send(EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: 0))
+        }
         send((try? EngineProtocol.command(EngineCommand(cmd: "releaseAll"))) ?? Data())
     }
 
@@ -424,19 +431,72 @@ final class InputController {
 
     private var buttonState: UInt8 = 0
 
+    // MARK: Game Mode (relative pointer)
+
+    /// Game Mode: with the keyboard captured, the mouse goes out as relative
+    /// moves (raw deltas from PointerLock) instead of absolute positions.
+    var gameMode = false
+    var sensitivity: Double {
+        get { relative.sensitivity }
+        set { relative.sensitivity = newValue }
+    }
+    /// 250 reports/s at most.
+    static let relativeFlushInterval: TimeInterval = 0.004
+    var relativeActive: Bool { gameMode && captured && !viewOnly }
+    private var relative = RelativeMotion()
+    private var relativeFlush: DispatchWorkItem?
+    /// The buttons of the last relative report sent (releaseAll runs after
+    /// `captured` is already false, so it can't ask relativeActive).
+    private var relativeButtons: UInt8 = 0
+
+    /// Raw deltas: coalesced, and sent at most every relativeFlushInterval.
+    func relativeMotion(dx: Double, dy: Double) {
+        guard relativeActive else { return }
+        relative.add(dx: dx, dy: dy)
+        guard relativeFlush == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.relativeFlush = nil
+            self?.flushRelative()
+        }
+        relativeFlush = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.relativeFlushInterval, execute: work)
+    }
+
+    /// Sends the pending motion now, with the current buttons.
+    func flushRelative() {
+        guard relativeActive else { return }
+        while let move = relative.take() {
+            relativeButtons = buttonState
+            send(EngineProtocol.relativePointer(dx: move.dx, dy: move.dy, buttons: buttonState))
+        }
+    }
+
     /// Pointer report for a mouse event. Button state is tracked from the
     /// events themselves (NSEvent buttonNumber 0…4 = left, right, middle,
     /// back, forward = HID bits 1, 2, 4, 8, 16), not from global hardware
     /// state, so presses that began outside the window are not reported.
     func mouse(_ event: NSEvent, at point: (Double, Double), in layout: VideoLayout) {
         let bit: UInt8 = event.buttonNumber < 5 ? UInt8(1) << UInt8(event.buttonNumber) : 0
+        let previous = buttonState
+        var buttons = buttonState
         switch event.type {
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            buttonState |= bit
+            buttons |= bit
             chordArmed = false
-        case .leftMouseUp, .rightMouseUp, .otherMouseUp: buttonState &= ~bit
+        case .leftMouseUp, .rightMouseUp, .otherMouseUp: buttons &= ~bit
         default: break
         }
+        if relativeActive {
+            // Motion first, with the old buttons, so the click lands where aimed.
+            if buttons != previous {
+                flushRelative()
+                buttonState = buttons
+                relativeButtons = buttons
+                send(EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: buttons))
+            }
+            return
+        }
+        buttonState = buttons
         mouse(at: point, in: layout, buttons: buttonState)
     }
 
@@ -446,7 +506,7 @@ final class InputController {
     /// pixels short of it. A report the same as the last one is skipped
     /// (AppKit delivers each move twice: tracking area and window).
     func mouse(at point: (Double, Double), in layout: VideoLayout, buttons: UInt8) {
-        guard !viewOnly, let (x, y) = layout.absolutePosition(px: point.0, py: point.1) else { return }
+        guard !viewOnly, !relativeActive, let (x, y) = layout.absolutePosition(px: point.0, py: point.1) else { return }
         if let last = lastPointer, last == (x, y, buttons) { return }
         lastPointer = (x, y, buttons)
         send(EngineProtocol.absolutePointer(x: x, y: y, buttons: buttons))

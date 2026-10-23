@@ -139,4 +139,70 @@ final class InputControllerTests: XCTestCase {
         let sent = pointerReports([(1000, 500, 0), (1000, 500, 0), (1000, 500, 1), (1000, 500, 1), (1000, 500, 0)])
         XCTAssertEqual(sent.count, 3)
     }
+
+    // MARK: Game Mode
+
+    private func leftDown() -> NSEvent {
+        NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                           context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+    }
+
+    private func gameInput() -> (InputController, () -> [Data]) {
+        let (input, sent) = captured([])
+        input.gameMode = true
+        return (input, sent)
+    }
+
+    func testGameModeSendsRelativeMotionSums() {
+        let (input, sent) = gameInput()
+        input.relativeMotion(dx: 1.6, dy: 0)
+        input.relativeMotion(dx: 1.6, dy: -2.2)
+        input.flushRelative()
+        XCTAssertEqual(sent().last, EngineProtocol.relativePointer(dx: 3, dy: -2, buttons: 0))
+    }
+
+    func testAButtonFlushesMotionFirst() {
+        let (input, sent) = gameInput()
+        input.relativeMotion(dx: 5, dy: 0)
+        input.mouse(leftDown(), at: (0, 0), in: layout)
+        XCTAssertEqual(sent(), [EngineProtocol.relativePointer(dx: 5, dy: 0, buttons: 0),
+                                EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: 1)])
+    }
+
+    func testGameModeSendsNoAbsolutePointer() {
+        let (input, sent) = gameInput()
+        input.mouse(at: (100, 100), in: layout, buttons: 0)
+        input.mouse(leftDown(), at: (100, 100), in: layout)
+        XCTAssertFalse(sent().contains { $0[4] == FrameType.absPointer.rawValue })
+    }
+
+    func testReleaseAllLiftsRelativeButtons() {
+        let (input, sent) = gameInput()
+        input.mouse(leftDown(), at: (0, 0), in: layout)
+        input.setCaptured(false)
+        let frames = sent()
+        let down = EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: 1)
+        let up = EngineProtocol.relativePointer(dx: 0, dy: 0, buttons: 0)
+        XCTAssertEqual(frames.firstIndex(of: down), 0)
+        XCTAssertNotNil(frames.firstIndex(of: up))
+        XCTAssertEqual(frames.last, try? EngineProtocol.command(EngineCommand(cmd: "releaseAll")))
+        XCTAssertGreaterThan(frames.count - 1, frames.firstIndex(of: up)!)
+    }
+
+    func testGameModeOffKeepsAbsolute() {
+        let (input, sent) = captured([])
+        input.gameMode = false
+        input.mouse(at: (3022, 948), in: layout, buttons: 0)
+        XCTAssertEqual(sent().last, EngineProtocol.absolutePointer(x: 32767, y: 16384, buttons: 0))
+    }
+
+    func testNotCapturedSendsNothingRelative() {
+        let input = InputController()
+        var sent: [Data] = []
+        input.send = { sent.append($0) }
+        input.gameMode = true
+        input.relativeMotion(dx: 10, dy: 10)
+        input.flushRelative()
+        XCTAssertTrue(sent.isEmpty)
+    }
 }
