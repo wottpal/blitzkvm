@@ -1691,6 +1691,11 @@ extension CaptureVideoView: NSMenuItemValidation {
 /// with a symbol and an accent edge; one that flashes (typing went nowhere,
 /// easy to miss) also briefly dims the picture inside an accent frame.
 final class HintView: NSView {
+    /// For tests: the action button's frame in the superview's coordinates, if shown.
+    var actionButtonFrameInSuperview: NSRect? {
+        actionButton.isHidden ? nil : superview?.convert(actionButton.bounds, from: actionButton)
+    }
+
     private let panel = NSVisualEffectView()
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
@@ -1763,7 +1768,7 @@ final class HintView: NSView {
     // Never takes clicks from the video, except on a visible action button.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard !actionButton.isHidden, !panel.isHidden, panel.alphaValue > 0.5 else { return nil }
-        let inButton = actionButton.convert(point, from: self)
+        let inButton = actionButton.convert(point, from: superview) // hitTest gets superview coordinates
         return actionButton.bounds.contains(inButton) ? actionButton : nil
     }
 
