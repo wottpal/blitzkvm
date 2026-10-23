@@ -13,10 +13,14 @@ public struct RelativeMotion {
         self.sensitivity = sensitivity
     }
 
-    /// Raw device units; scaled by `sensitivity` as they accumulate.
+    /// Raw device units; scaled by `sensitivity` as they accumulate. A
+    /// non-finite delta (NaN, infinity) is ignored: it would poison the
+    /// pending motion, and an infinite one never drains through `take()`.
     public mutating func add(dx: Double, dy: Double) {
-        x += dx * sensitivity
-        y += dy * sensitivity
+        let sx = dx * sensitivity, sy = dy * sensitivity
+        guard sx.isFinite, sy.isFinite, (x + sx).isFinite, (y + sy).isFinite else { return }
+        x += sx
+        y += sy
     }
 
     /// A whole unit is waiting on either axis.

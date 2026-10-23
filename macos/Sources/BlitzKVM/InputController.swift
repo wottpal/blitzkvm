@@ -438,8 +438,15 @@ final class InputController {
     /// moves (raw deltas from PointerLock) instead of absolute positions.
     /// Switching it while captured ends capture first, so no pending motion
     /// or held button crosses from one mode to the other.
+    /// No absolute report goes out while it is on, captured or not: a raw
+    /// input game reads even a hover as a jump. Buttons held through the
+    /// absolute path go up as it turns on.
     var gameMode = false {
-        willSet { if newValue != gameMode && captured { setCaptured(false) } }
+        willSet {
+            guard newValue != gameMode else { return }
+            if captured { setCaptured(false) }
+            if newValue { liftAbsoluteButtons() }
+        }
     }
     var sensitivity: Double {
         get { relative.sensitivity }
@@ -502,6 +509,9 @@ final class InputController {
         case .leftMouseUp, .rightMouseUp, .otherMouseUp: buttons &= ~bit
         default: break
         }
+        // Game Mode while not captured: nothing (the click that captures
+        // engages capture before it gets here, so it goes out relative).
+        if gameMode && !captured { return }
         if relativeActive {
             // Motion first, with the old buttons, so the click lands where aimed.
             if buttons != previous {
@@ -522,7 +532,7 @@ final class InputController {
     /// pixels short of it. A report the same as the last one is skipped
     /// (AppKit delivers each move twice: tracking area and window).
     func mouse(at point: (Double, Double), in layout: VideoLayout, buttons: UInt8) {
-        guard !viewOnly, !relativeActive, let (x, y) = layout.absolutePosition(px: point.0, py: point.1) else { return }
+        guard !viewOnly, !gameMode, let (x, y) = layout.absolutePosition(px: point.0, py: point.1) else { return }
         if let last = lastPointer, last == (x, y, buttons) { return }
         lastPointer = (x, y, buttons)
         send(EngineProtocol.absolutePointer(x: x, y: y, buttons: buttons))

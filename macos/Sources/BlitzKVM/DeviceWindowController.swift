@@ -22,6 +22,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     }
     private var gameModeHintShown = false
     private var sleepObservers: [NSObjectProtocol] = []
+    private var screenLockObserver: NSObjectProtocol?
     /// Asks for still refreshes where the firmware leaves them to the app.
     let stillRefresh: StillRefresh
     private(set) var videoView: CaptureVideoView!
@@ -103,7 +104,13 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private var slowLinkHintShown = false
     private var isShutDown = false
     private var wasConnected = false
-    private var relativeMouseHintShown = false
+    /// Game Mode is on while the JetKVM's relative mouse is off (as the
+    /// last snapshot said): the status bar says so, and the hint comes back.
+    private var relativeMouseWasOff = false
+    /// The setUsbDeviceState command that Turn On sent.
+    private var relativeMouseTurnOnID: Int64?
+    /// It succeeded: confirmed once a snapshot finds the relative mouse on.
+    private var relativeMouseTurningOn = false
     private var pathMonitor: NWPathMonitor?
     private var aspectLocked = false
     private var pendingPasteID: Int64?
@@ -252,6 +259,15 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
                 self?.releasePointerLock()
             })
         }
+        // The screen locked (⌃⌘Q, a hot corner): no sleep or session change.
+        screenLockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
+            self?.releasePointerLock()
+        }
+        pointerLock.onSource = { [weak self] gcMouse in
+            guard let self else { return }
+            AppLog.log("\(self.device.name): game mode: motion from \(gcMouse ? "GCMouse" : "event deltas (accelerated)")")
+        }
     }
 
     /// Game Mode › Sensitivity (Settings), for all device windows.
@@ -303,7 +319,13 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     private func captureChanged(_ captured: Bool) {
         if captured { input.sensitivity = Self.gameModeSensitivity }
         gameModeBinding.captureChanged(captured, center: videoCenter())
-        if pointerLock.engaged && !gameModeHintShown {
+        if relativeMouseOff {
+            // Again at every capture change: Turn On can't be clicked while
+            // the cursor is locked, so it comes with ⌃⌘ during capture.
+            gameModeHintShown = gameModeHintShown || pointerLock.engaged
+            keyboardHintShown = keyboardHintShown || captured
+            offerRelativeMouse()
+        } else if pointerLock.engaged && !gameModeHintShown {
             gameModeHintShown = true
             keyboardHintShown = true
             hud.show("Game Mode: mouse locked  ·  ⌃⌘ releases", for: 3)
@@ -841,6 +863,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         gameModeBinding.stop()
         for observer in sleepObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
         sleepObservers = []
+        if let observer = screenLockObserver { DistributedNotificationCenter.default().removeObserver(observer) }
+        screenLockObserver = nil
         statusTimer?.invalidate()
         stallTimer?.invalidate()
         setupModel?.cancel()
@@ -884,16 +908,44 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     // MARK: Commands
 
-    /// Game Mode needs the JetKVM's relative mouse; when it is off, says so
-    /// once per window with a button that turns it on (a device setting the
-    /// user explicitly clicks: kvm-blitz/jsonrpc.go setUsbDeviceState).
-    private func offerRelativeMouseIfOff() {
-        guard !relativeMouseHintShown, snapshot.GameMode == true, snapshot.RelativeMouseOff == true else { return }
-        relativeMouseHintShown = true
-        hud.show("Game Mode needs the JetKVM's relative mouse, which is off", for: 12, action: ("Turn On", { [weak self] in
-            self?.sendRPC("setUsbDeviceState", params: .object(["device": .string("relativeMouse"), "enabled": .bool(true)]))
-            self?.hud.show("Relative mouse turned on", for: 2.5)
-        }))
+    /// Game Mode is on and the JetKVM's relative mouse, which games read, is off.
+    private var relativeMouseOff: Bool { snapshot.GameMode == true && snapshot.RelativeMouseOff == true }
+
+    /// Snapshot update: the hint when the relative mouse is found off, and
+    /// the confirmation once a check after Turn On finds it on.
+    private func relativeMouseStateChanged() {
+        let off = relativeMouseOff
+        defer { relativeMouseWasOff = off }
+        if snapshot.GameMode != true { relativeMouseTurningOn = false }
+        if relativeMouseTurningOn && snapshot.GameMode == true && snapshot.RelativeMouseOff == false {
+            relativeMouseTurningOn = false
+            hud.show("Relative mouse turned on", for: 2.5)
+            return
+        }
+        if off && !relativeMouseWasOff { offerRelativeMouse() }
+    }
+
+    /// Game Mode needs the JetKVM's relative mouse; while it is off, says so
+    /// when found off and again whenever capture changes, with a button that
+    /// turns it on (a device setting the user explicitly clicks:
+    /// kvm-blitz/jsonrpc.go setUsbDeviceState). The button only while the
+    /// cursor is free; during capture the hint says how to get it back.
+    private func offerRelativeMouse() {
+        guard relativeMouseOff else { return }
+        let text = "Game Mode needs the JetKVM's relative mouse, which is off"
+        if input.captured {
+            hud.show(text + "  ·  ⌃⌘ releases, then Turn On", for: 6)
+            return
+        }
+        hud.show(text, for: 12, action: ("Turn On", { [weak self] in self?.turnOnRelativeMouse() }))
+    }
+
+    /// Turn On: confirmed only once a check finds the relative mouse on
+    /// (setGameMode again checks; relativeMouseStateChanged confirms).
+    private func turnOnRelativeMouse() {
+        relativeMouseTurnOnID = engine.send(command: EngineCommand(cmd: "rpc", method: "setUsbDeviceState",
+                                                                   params: .object(["device": .string("relativeMouse"), "enabled": .bool(true)])))
+        hud.show("Turning on the relative mouse…", for: 4)
     }
 
     func sendRPC(_ method: String, params: JSONValue? = nil) {
@@ -1029,7 +1081,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
         self.snapshot = snapshot
         stillRefresh.update(snapshot)
-        offerRelativeMouseIfOff()
+        relativeMouseStateChanged()
         if snapshot.Phase == "auth_failed" && !snapshot.Status.contains("locked") {
             // Wrong, empty or changed password: always ask (the engine has
             // stopped retrying). A lockout (429) must not trigger more tries.
@@ -1157,6 +1209,15 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     }
 
     func engine(_ engine: EngineProcess, didFinishCommand id: Int64, error: String?, invalid: String?) {
+        if id == relativeMouseTurnOnID {
+            relativeMouseTurnOnID = nil
+            if let error, !error.isEmpty {
+                hud.show("Could not turn on the relative mouse: \(error)", for: 6)
+            } else if isGameMode {
+                relativeMouseTurningOn = true
+                engine.setGameMode(true) // checks the relative mouse again
+            }
+        }
         if id == appPasteID {
             appPasteID = nil
             input.releaseHeldKeys()
@@ -1230,6 +1291,26 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         }
     }
 
+    /// The one Game Mode entry of the status bar, e.g. "Game Mode · 1280×720
+    /// 120 Hz · mouse locked": the incoming mode while Game Mode's quality
+    /// applies (the received frame rate has its own entry), a note when the
+    /// firmware takes no live encoder parameters (stock: the level applies
+    /// only as a quality factor, MinQP stays 0), and the relative mouse
+    /// when it is off.
+    static func gameModeStatus(_ snapshot: SessionSnapshot, mouseLocked: Bool) -> String {
+        var entry = ["Game Mode"]
+        if snapshot.GameMode == true && snapshot.QualityLevel == "game" {
+            var mode = ""
+            if let w = snapshot.VideoWidth, let h = snapshot.VideoHeight, w > 0, h > 0 { mode = "\(w)×\(h)" }
+            if let fps = snapshot.VideoFPS, fps > 0 { mode += String(format: mode.isEmpty ? "%.0f Hz" : " %.0f Hz", fps) }
+            if !mode.isEmpty { entry.append(mode) }
+            if (snapshot.MinQP ?? 0) == 0 { entry.append("video: stock firmware") }
+        }
+        if snapshot.GameMode == true && snapshot.RelativeMouseOff == true { entry.append("relative mouse off") }
+        if mouseLocked { entry.append("mouse locked") }
+        return entry.joined(separator: " · ")
+    }
+
     func refreshStatus(extra: String? = nil) {
         let decoded = decoder.snapshot()
         var parts = [snapshot.Status]
@@ -1246,13 +1327,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         codecLock.unlock()
         if let codec = audio.playingCodec { parts.append("audio \(codec)") }
         let gameLevel = snapshot.GameMode == true && snapshot.QualityLevel == "game"
-        if gameLevel {
-            // The encoder state, e.g. "Game Mode · 1280×720 120 fps".
-            var game = "Game Mode"
-            if let w = snapshot.VideoWidth, let h = snapshot.VideoHeight, w > 0, h > 0 { game += " · \(w)×\(h)" }
-            if let fps = snapshot.VideoFPS, fps > 0 { game += String(format: " %.0f fps", fps) }
-            parts.append(game)
-        } else if let level = snapshot.QualityLevel, !level.isEmpty {
+        if isGameMode {
+            parts.append(Self.gameModeStatus(snapshot, mouseLocked: pointerLock.engaged))
+        }
+        if !gameLevel, let level = snapshot.QualityLevel, !level.isEmpty {
             parts.append(snapshot.AutoQuality == true ? "quality \(level) (auto)" : "quality \(level)")
         }
         if let fps = lastStats["FramesPerSecond"] as? Double { parts.append(String(format: "%.0f fps", fps)) }
@@ -1266,7 +1344,6 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         if decoded.errors > 0 { parts.append("decode errors \(decoded.errors)") }
         if decoder.paused { parts.append("paused (hidden)") }
         if snapshot.PasteInProgress == true || pendingPasteID != nil { parts.append("pasting…") }
-        if isGameMode { parts.append(pointerLock.engaged ? "Game Mode (mouse locked)" : "Game Mode") }
         if input.viewOnly {
             parts.append("view only")
         } else if input.captured {

@@ -167,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isSelfTest: Bool { options.selfTestSeconds != nil || options.latencyProbe != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        PointerLock.startMouseDiscovery()
         updater = MainActor.assumeIsolated { Updater(start: !isSelfTest || Updater.feedOverride != nil) }
         NSApp.mainMenu = buildMenu()
         if let address = options.device {

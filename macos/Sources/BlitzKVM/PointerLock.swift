@@ -32,8 +32,11 @@ final class PointerLock {
     /// Raw dx, dy; +y is down on the remote.
     var onMotion: (Double, Double) -> Void = { _, _ in }
     private(set) var engaged = false
+    /// Called with the motion source each time one is chosen while engaged:
+    /// true for GCMouse (raw), false for the event deltas (accelerated).
+    var onSource: (Bool) -> Void = { _ in }
     /// A GCMouse handler delivers the motion (events are ignored then).
-    private var gcDriving = false
+    private(set) var gcDriving = false
     private var observers: [NSObjectProtocol] = []
 
     init(system: PointerLockSystem = LivePointerLockSystem()) {
@@ -84,6 +87,18 @@ final class PointerLock {
             guard let self, self.engaged, self.gcDriving else { return }
             self.onMotion(dx, dy)
         }
+        onSource(gcDriving)
+    }
+
+    /// GameController finds mice only after it is first used and the
+    /// connect notifications have run; touched at launch so GCMouse.current
+    /// is there by the first engage.
+    private static var discovery: NSObjectProtocol?
+
+    static func startMouseDiscovery() {
+        guard discovery == nil else { return }
+        discovery = NotificationCenter.default.addObserver(forName: .GCMouseDidConnect, object: nil, queue: .main) { _ in }
+        _ = GCMouse.mice()
     }
 
     /// Fallback path: called for every mouse move and drag event.

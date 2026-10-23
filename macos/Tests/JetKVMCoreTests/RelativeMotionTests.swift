@@ -69,4 +69,27 @@ final class RelativeMotionTests: XCTestCase {
         motion.add(dx: 0.2, dy: 0)
         XCTAssertNil(motion.take())
     }
+
+    func testNonFiniteDeltasAreIgnored() {
+        var motion = RelativeMotion()
+        motion.add(dx: 2.5, dy: -1)
+        motion.add(dx: .infinity, dy: 0)
+        motion.add(dx: 0, dy: -.infinity)
+        motion.add(dx: .nan, dy: 1)
+        motion.add(dx: 1, dy: .nan)
+        motion.add(dx: .infinity, dy: .nan)
+        let move = motion.take()
+        XCTAssertEqual(move?.dx, 2)
+        XCTAssertEqual(move?.dy, -1)
+        XCTAssertNil(motion.take())
+        XCTAssertEqual(motion.pending.dx, 0.5, accuracy: 1e-9)
+        XCTAssertTrue(motion.pending.dy.isFinite)
+    }
+
+    func testAnOverflowingDeltaIsIgnored() {
+        var motion = RelativeMotion(sensitivity: 4)
+        motion.add(dx: .greatestFiniteMagnitude, dy: 0) // × 4 is infinite
+        XCTAssertNil(motion.take())
+        XCTAssertEqual(motion.pending.dx, 0)
+    }
 }

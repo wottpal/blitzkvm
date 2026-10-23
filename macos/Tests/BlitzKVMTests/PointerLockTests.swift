@@ -117,4 +117,20 @@ final class PointerLockTests: XCTestCase {
         lock.mouseChanged()
         XCTAssertEqual(system.calls, [])
     }
+
+    func testEachEngageReportsItsMotionSource() {
+        let (lock, system, _) = make(gcMouse: true)
+        var sources: [Bool] = []
+        lock.onSource = { sources.append($0) }
+        lock.engage(centeredOn: .zero)
+        XCTAssertTrue(lock.gcDriving)
+        system.hasGCMouse = false
+        lock.mouseChanged()
+        lock.release()
+        lock.engage(centeredOn: .zero)
+        XCTAssertEqual(sources, [true, false, false])
+        lock.release()
+        lock.mouseChanged() // released: no source
+        XCTAssertEqual(sources.count, 3)
+    }
 }

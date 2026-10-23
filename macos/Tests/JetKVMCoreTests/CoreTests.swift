@@ -65,6 +65,10 @@ final class EngineProtocolTests: XCTestCase {
         let snapshot = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
         XCTAssertEqual(snapshot.GameMode, true)
         XCTAssertEqual(snapshot.RelativeMouseOff, true)
+        // Game Mode's status reads the live encoder from MinQP (0 or absent: stock firmware).
+        let live = try JSONDecoder().decode(SessionSnapshot.self, from: Data(#"{"Phase":"connected","Status":"connected","QualityLevel":"game","MinQP":22,"RelativeMouseOff":false}"#.utf8))
+        XCTAssertEqual(live.MinQP, 22)
+        XCTAssertEqual(live.RelativeMouseOff, false)
     }
 
     func testGameQualityLevelIsNeverALadderLevel() {
