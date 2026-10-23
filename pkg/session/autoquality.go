@@ -605,6 +605,9 @@ func (c *Controller) SetGameMode(ctx context.Context, on bool) error {
 	c.mu.Lock()
 	c.cfg.GameMode = on
 	c.snapshot.GameMode = on
+	if !on {
+		c.snapshot.RelativeMouseOff = false // only reported in Game Mode
+	}
 	auto := c.cfg.AutoQuality
 	c.mu.Unlock()
 	cl := c.clientIfConnected()
@@ -621,7 +624,10 @@ func (c *Controller) SetGameMode(ctx context.Context, on bool) error {
 }
 
 // checkRelativeMouse reports whether the device's relative mouse, which
-// games read, is off. It never changes the device's USB functions.
+// games read, is off; a later check that finds it on clears the report
+// (SetGameMode(true) again checks again, e.g. after the user turned it on).
+// It never changes the device's USB functions, and reports nothing once
+// Game Mode is off again.
 func (c *Controller) checkRelativeMouse(ctx context.Context, cl *client.Client) {
 	devices, err := cl.GetUSBDevices(ctx)
 	if err != nil {
@@ -629,7 +635,7 @@ func (c *Controller) checkRelativeMouse(ctx context.Context, cl *client.Client) 
 		log.Debug().Err(err).Msg("get USB devices")
 		return
 	}
-	c.setStateFor(cl, func(s *Snapshot) { s.RelativeMouseOff = !devices.RelativeMouse })
+	c.setStateFor(cl, func(s *Snapshot) { s.RelativeMouseOff = s.GameMode && !devices.RelativeMouse })
 }
 
 // gameSavedState is what Game Mode replaced on the device while no level was

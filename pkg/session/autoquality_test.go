@@ -1052,6 +1052,36 @@ func TestControllerGameModeReportsRelativeMouseOff(t *testing.T) {
 	if srv.State().USBDevices.RelativeMouse {
 		t.Fatal("Game Mode turned the relative mouse on")
 	}
+	// Game Mode off clears the report.
+	if err := controller.SetGameMode(ctx, false); err != nil {
+		t.Fatalf("SetGameMode: %v", err)
+	}
+	if controller.Snapshot().RelativeMouseOff {
+		t.Fatal("relative mouse off still reported after Game Mode off")
+	}
+	// The app turns it on (the user's Turn On), then sets Game Mode again
+	// to check: the report clears.
+	if err := controller.SetGameMode(ctx, true); err != nil || !controller.Snapshot().RelativeMouseOff {
+		t.Fatalf("relative mouse off not reported again: %v", err)
+	}
+	turnOn := []byte(`{"device":"relativeMouse","enabled":true}`)
+	if _, err := controller.Call(ctx, "setUsbDeviceState", turnOn); err != nil {
+		t.Fatalf("setUsbDeviceState: %v", err)
+	}
+	if !srv.State().USBDevices.RelativeMouse {
+		t.Fatal("setUsbDeviceState left the relative mouse off")
+	}
+	if err := controller.SetGameMode(ctx, true); err != nil {
+		t.Fatalf("SetGameMode: %v", err)
+	}
+	if controller.Snapshot().RelativeMouseOff {
+		t.Fatal("relative mouse off still reported after it was turned on")
+	}
+	_ = controller.SetGameMode(ctx, false)
+	devicesOff := `{"devices":{"absolute_mouse":true,"relative_mouse":false,"keyboard":true,"mass_storage":true,"audio":true}}`
+	if _, err := controller.Call(ctx, "setUsbDevices", []byte(devicesOff)); err != nil {
+		t.Fatalf("setUsbDevices: %v", err)
+	}
 	controller.Stop()
 
 	// Connecting with Game Mode on checks too.

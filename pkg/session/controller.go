@@ -147,7 +147,8 @@ type Snapshot struct {
 	StillQP       int
 	// GameMode is Config.GameMode as SetGameMode left it.
 	// RelativeMouseOff: the device's relative mouse, which games read, is
-	// off (checked when Game Mode turns on or connects with it).
+	// off (checked when Game Mode turns on or connects with it; cleared when
+	// Game Mode turns off or a later check finds it on).
 	GameMode         bool
 	RelativeMouseOff bool
 }
