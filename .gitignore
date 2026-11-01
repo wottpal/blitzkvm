@@ -20,6 +20,7 @@ research/
 
 # Swift Package Manager and Xcode
 .swiftpm/
+.build/
 xcuserdata/
 *.xcuserstate
 DerivedData/

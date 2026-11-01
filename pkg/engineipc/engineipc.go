@@ -127,7 +127,11 @@ type Command struct {
 	// setAudio (Audio), and clipboard sync over the firmware's host link
 	// (pkg/hostlink; Params as in pkg/engine): clipboardInstall,
 	// clipboardUninstall, clipboardStart, clipboardStop, clipboardSet,
-	// clipboardPaste (this Mac's clipboard pasted on the remote computer).
+	// clipboardPaste (this Mac's clipboard pasted on the remote computer),
+	// and hostLinkRun (a command run on the remote Mac over clipboard sync's
+	// login: Params user, privateKeyPath, hostKey, command, stdin (bytes,
+	// base64 in JSON), timeout (seconds); Result {stdout, stderr, exitCode};
+	// the remote approvals installer uses it).
 	Cmd      string `json:"cmd"`
 	BaseURL  string `json:"baseURL,omitempty"`
 	Password string `json:"password,omitempty"`

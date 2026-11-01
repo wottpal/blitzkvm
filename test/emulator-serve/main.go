@@ -95,6 +95,9 @@ func main() {
 	serveCmd.Flags().BoolVar(&cfg.OpusAudio, "opus-audio", false, "Like fork firmware D14: Opus audio where offered, getFirmwareFeatures lists opusAudio")
 	serveCmd.Flags().BoolVar(&cfg.BrowserAccess, "browser-access", false, "Like fork firmware D16: getBrowserAccessState/setBrowserAccessState; while off, browsers get 403")
 	serveCmd.Flags().BoolVar(&cfg.FramePacing, "frame-pacing", false, "Like fork firmware D18: setVideoEncoderParams' paceKbps, getFirmwareFeatures lists framePacing (implies --encoder-patch)")
+	serveCmd.Flags().BoolVar(&cfg.Approvals, "approvals", false, "Like fork firmware D20: the approval broker (getApprovalsState/setApprovalsEnabled, /approvals/v1/ws, the host link at --approvals-link)")
+	serveCmd.Flags().StringVar(&cfg.ApprovalsLink, "approvals-link", "127.0.0.1:4023", "Where the target daemon reaches the emulated host link (with --approvals)")
+	serveCmd.Flags().StringVar(&cfg.ApprovalsDir, "approvals-dir", "", "Keeps the broker's keys and roster (with --approvals; default a new temporary directory)")
 	serveCmd.Flags().BoolVar(&cfg.ICELoopbackOnly, "ice-loopback-only", false, "Offer only loopback ICE candidates, so the video's path is loopback rather than this Mac's LAN address")
 	serveCmd.Flags().BoolVar(&logInputs, "log-inputs", false, "Print every received input as a JSON line on stdout")
 

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -660,4 +661,90 @@ func (e *Engine) syncClipboard(ctx context.Context, c *session.Controller, run *
 		s.Close()
 		return ctx.Err()
 	}
+}
+
+// hostLinkRunParams are hostLinkRun's Params: a command run on the Mac over
+// clipboard sync's login (the remote approvals installer uses it).
+type hostLinkRunParams struct {
+	clipboardParams
+	Command string `json:"command"`
+	// Stdin is fed to the command (a file to install, the password for
+	// sudo -S); it never appears in a log.
+	Stdin   []byte `json:"stdin,omitempty"`
+	Timeout int    `json:"timeout,omitempty"` // seconds, default 120
+}
+
+// hostLinkRunResult is hostLinkRun's result.
+type hostLinkRunResult struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exitCode"`
+}
+
+// hostLinkRun runs a command on the Mac (the pinned host key and this app's
+// key, as clipboard sync) and returns its output and exit code.
+func (e *Engine) hostLinkRun(cmd engineipc.Command) {
+	result, err := e.runOnMac(cmd.Params)
+	if err != nil {
+		e.reply(cmd.ID, err, "")
+		return
+	}
+	e.replyResult(cmd.ID, result)
+}
+
+func (e *Engine) runOnMac(raw json.RawMessage) (*hostLinkRunResult, error) {
+	c := e.controller()
+	if c == nil {
+		return nil, errors.New("not connected")
+	}
+	var p hostLinkRunParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("hostLinkRun params: %w", err)
+	}
+	if p.User == "" || p.HostKey == "" || p.Command == "" {
+		return nil, errors.New("hostLinkRun needs clipboard sync's user and host key, and a command")
+	}
+	key, err := os.ReadFile(p.PrivateKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("this Mac's clipboard key: %w", err)
+	}
+	timeout := time.Duration(p.Timeout) * time.Second
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(e.ctx, timeout)
+	defer cancel()
+	sshClient, _, _, err := connectMac(ctx, c, hostlink.Login{User: p.User, PrivateKey: key, HostKey: p.HostKey})
+	if err != nil {
+		return nil, describeMacError(err)
+	}
+	defer sshClient.Close()
+	session, err := sshClient.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	defer session.Close()
+	var stdout, stderr bytes.Buffer
+	session.Stdout, session.Stderr = &stdout, &stderr
+	if len(p.Stdin) > 0 {
+		session.Stdin = bytes.NewReader(p.Stdin)
+	}
+	done := make(chan error, 1)
+	go func() { done <- session.Run(p.Command) }()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		_ = session.Signal(ssh.SIGTERM)
+		return nil, fmt.Errorf("the command on the remote Mac took too long: %w", ctx.Err())
+	}
+	res := &hostLinkRunResult{Stdout: stdout.String(), Stderr: stderr.String()}
+	var exit *ssh.ExitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exit):
+		res.ExitCode = exit.ExitStatus()
+	default:
+		return nil, err
+	}
+	return res, nil
 }

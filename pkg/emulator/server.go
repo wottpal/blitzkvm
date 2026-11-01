@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/wottpal/blitzkvm/approval/broker"
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
@@ -130,6 +131,16 @@ type Config struct {
 	// paceKbps leaves source frames out while the coded bytes run more than
 	// pacingWindow ahead of it.
 	FramePacing bool
+	// Approvals models fork firmware D20: getFirmwareFeatures lists
+	// approvals, getApprovalsState and setApprovalsEnabled drive the
+	// approval broker (approval/broker, the firmware's own), approvers
+	// connect at /approvals/v1/ws, and the target daemon reaches the host
+	// link at ApprovalsLink (default 127.0.0.1, any port: ApprovalsLinkAddr).
+	// ApprovalsDir keeps the broker's keys and roster (default a new
+	// temporary directory).
+	Approvals     bool
+	ApprovalsLink string
+	ApprovalsDir  string
 }
 
 type FaultConfig struct {
@@ -250,6 +261,9 @@ type Server struct {
 	uploads      map[string]*pendingUpload
 	// typed counts key presses for the still screen to draw.
 	typed atomic.Int64
+	// approvals is D20's broker, approvalsLink its host-link listener.
+	approvals     *broker.Broker
+	approvalsLink net.Listener
 }
 
 type storedFile struct {
@@ -342,6 +356,12 @@ func NewServer(cfg Config) (*Server, error) {
 	// only WebSocket signaling exists.
 	mux.HandleFunc("/webrtc/signaling/client", s.handleSignalingClient)
 	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/approvals/v1/ws", s.handleApprovalsWS)
+	if cfg.Approvals {
+		if err := s.startApprovals(); err != nil {
+			return nil, err
+		}
+	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
@@ -506,6 +526,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	s.listener = ln
 	s.serveCtx = ctx
 	s.mu.Unlock()
+	go s.runApprovals(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {

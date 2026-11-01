@@ -276,6 +276,8 @@ func (e *Engine) command(cmd engineipc.Command) error {
 		e.reply(cmd.ID, e.clipboardSet(cmd.Params), "")
 	case "clipboardPaste":
 		go func() { e.reply(cmd.ID, e.clipboardPaste(cmd.Params), "") }()
+	case "hostLinkRun":
+		go e.hostLinkRun(cmd)
 	case "cancelUpload":
 		e.uploadMu.Lock()
 		cancel := e.uploads[cmd.Target]

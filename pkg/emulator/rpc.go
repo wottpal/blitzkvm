@@ -488,6 +488,20 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 		}
 		st.BrowserAccessOff = !params.Enabled
 		return ok(nil), nil
+	case "getApprovalsState":
+		if srv.approvals == nil {
+			return notFound(), nil
+		}
+		return ok(srv.approvals.State()), nil
+	case "setApprovalsEnabled":
+		if srv.approvals == nil {
+			return notFound(), nil
+		}
+		state, err := srv.setApprovalsEnabled(req.Params)
+		if err != nil {
+			return failed(err.Error()), nil
+		}
+		return ok(state), nil
 	case "getDevChannelState":
 		return ok(st.DevChannel), nil
 	case "setDevChannelState":
@@ -660,6 +674,9 @@ func (sess *session) dispatchRPC(req jsonrpc.Request, urlCheck *mountURLInfo) (r
 		}
 		if srv.cfg.FramePacing {
 			features = append(features, client.FeatureFramePacing)
+		}
+		if srv.cfg.Approvals {
+			features = append(features, FeatureApprovals)
 		}
 		if features == nil {
 			return notFound(), nil

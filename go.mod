@@ -20,6 +20,8 @@ require (
 	golang.org/x/text v0.43.0
 )
 
+require github.com/cloudflare/circl v1.6.4 // indirect
+
 require (
 	github.com/dmarkham/enumer v1.7.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
@@ -38,6 +40,7 @@ require (
 	github.com/pion/turn/v5 v5.1.2 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
+	github.com/wottpal/blitzkvm/approval v0.0.0
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
@@ -49,3 +52,5 @@ require (
 tool github.com/dmarkham/enumer
 
 replace github.com/Azunyan1111/openh264-go => ./third_party/openh264-go
+
+replace github.com/wottpal/blitzkvm/approval => ./approval
