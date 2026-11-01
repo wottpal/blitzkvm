@@ -84,6 +84,7 @@ final class JetKVMSetupModel: ObservableObject {
         switch firmware.value {
         case .bundled(let build)?: firmwareUpToDate = build == recommended
         case .otherBlitzKVM?, .stock?: firmwareUpToDate = false
+        case .newerBlitzKVM?: firmwareUpToDate = true // nothing newer to install
         case .unverified?, nil: firmwareUpToDate = nil
         }
         var tailscaleConnected: Bool?
@@ -103,6 +104,7 @@ final class JetKVMSetupModel: ObservableObject {
             let version = try await engine.call("getLocalVersion", as: LocalVersion.self)
             // Only the BlitzKVM firmware answers this.
             let hasEncoderControl = (try? await engine.call("getVideoEncoderParams", as: JSONValue.self)) != nil
+            let features = (try? await engine.call("getFirmwareFeatures", as: [String].self)) ?? []
             var installed: String?
             var guardVerdict: InstallGuard.Verdict?
             if ssh, let shell {
@@ -110,7 +112,7 @@ final class JetKVMSetupModel: ObservableObject {
                 guardVerdict = await settleGuard(shell)
             }
             firmware.value = FirmwareState.evaluate(hasEncoderControl: hasEncoderControl, appVersion: version.appVersion,
-                                                    installedSHA256: installed, bundled: builds.map(\.build))
+                                                    installedSHA256: installed, bundled: builds.map(\.build), features: features)
             firmware.error = guardVerdict.flatMap(Self.message)
         } catch {
             firmware.error = Self.describe(error)

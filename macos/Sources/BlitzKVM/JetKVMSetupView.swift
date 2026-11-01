@@ -121,6 +121,9 @@ struct JetKVMSetupView: View {
         case .otherBlitzKVM?:
             content = RowContent(detail: "An older BlitzKVM build", note: newer,
                                  action: .init(title: "Update…", perform: install(recommended)), menu: choices(installed: nil))
+        case .newerBlitzKVM?:
+            content = RowContent(detail: "A newer BlitzKVM build", note: "Newer than \(recommended.title), which this app ships.",
+                                 menu: choices(installed: nil))
         case .unverified?:
             content = RowContent(detail: "BlitzKVM firmware", note: "Check whether it's \(recommended.version).",
                                  action: .init(title: "Check", perform: model.verifyFirmware), menu: choices(installed: nil))

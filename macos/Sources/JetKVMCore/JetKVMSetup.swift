@@ -16,12 +16,16 @@ public struct FirmwareBuild: Decodable, Equatable, Identifiable {
     public var tag: String
     public var sha256: String
     public var size: Int
+    /// What the build lists in getFirmwareFeatures (BlitzKVM builds): a
+    /// device listing more runs a newer build.
+    public var features: Set<String>?
 
-    public init(kind: Kind, tag: String, sha256: String, size: Int) {
+    public init(kind: Kind, tag: String, sha256: String, size: Int, features: Set<String>? = nil) {
         self.kind = kind
         self.tag = tag
         self.sha256 = sha256
         self.size = size
+        self.features = features
     }
 
     public var id: String { tag }
@@ -66,6 +70,9 @@ public enum FirmwareState: Equatable {
     case bundled(FirmwareBuild)
     /// A BlitzKVM build this app doesn't ship (an older one).
     case otherBlitzKVM
+    /// A BlitzKVM build newer than the one this app ships (it reports
+    /// features that one lacks): never offered as an update.
+    case newerBlitzKVM
     /// The BlitzKVM firmware; which build takes SSH to tell.
     case unverified
     /// JetKVM's own firmware in a version this app doesn't ship, or one it
@@ -77,11 +84,16 @@ public enum FirmwareState: Equatable {
     /// SHA-256 of the installed app. Fork builds keep upstream's version, so
     /// only the hash tells builds apart.
     public static func evaluate(hasEncoderControl: Bool, appVersion: String, installedSHA256: String?,
-                                bundled: [FirmwareBuild]) -> FirmwareState {
+                                bundled: [FirmwareBuild], features: [String] = []) -> FirmwareState {
         if let sha = installedSHA256?.lowercased(), let build = bundled.first(where: { $0.sha256.lowercased() == sha }) {
             return .bundled(build)
         }
         guard hasEncoderControl else { return .stock(appVersion) }
+        // Fork builds share upstream's version: a feature the shipped build
+        // doesn't have tells a newer (or development) build from an older one.
+        if let known = bundled.first(where: { $0.kind == .blitzkvm })?.features, !Set(features).isSubset(of: known) {
+            return .newerBlitzKVM
+        }
         return installedSHA256 == nil ? .unverified : .otherBlitzKVM
     }
 }

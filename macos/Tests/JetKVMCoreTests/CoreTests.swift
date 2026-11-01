@@ -520,6 +520,18 @@ final class JetKVMSetupTests: XCTestCase {
         XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: nil, bundled: bundled), .unverified)
         XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: false, appVersion: "0.5.10", installedSHA256: String(repeating: "cd", count: 32),
                                               bundled: bundled), .stock("0.5.10"))
+        // A build that reports a feature the shipped one lacks is newer: never
+        // offered the shipped one as an update.
+        let known = FirmwareBuild(kind: .blitzkvm, tag: "release/0.5.9-fork.9", sha256: String(repeating: "ab", count: 32), size: 1,
+                                  features: ["hostLink", "stunServers"])
+        XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: String(repeating: "cd", count: 32),
+                                              bundled: [known, stock], features: ["hostLink", "stunServers", "approvals"]), .newerBlitzKVM)
+        XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: nil,
+                                              bundled: [known, stock], features: ["hostLink", "approvals"]), .newerBlitzKVM)
+        XCTAssertEqual(FirmwareState.evaluate(hasEncoderControl: true, appVersion: "0.5.9", installedSHA256: String(repeating: "cd", count: 32),
+                                              bundled: [known, stock], features: ["hostLink"]), .otherBlitzKVM)
+        XCTAssertEqual(try FirmwareBuild.manifest(Data(#"{"builds":[{"kind":"blitzkvm","tag":"t","sha256":"ab","size":1,"features":["a"]}]}"#.utf8))
+                        .first?.features, ["a"])
         XCTAssertEqual(fork.title, "BlitzKVM 0.5.9-fork.4")
         XCTAssertEqual(stock.title, "JetKVM 0.5.9")
         XCTAssertEqual(fork.fileName, "release-0.5.9-fork.4.xz")

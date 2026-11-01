@@ -166,6 +166,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updater = MainActor.assumeIsolated { Updater(start: !isSelfTest || Updater.feedOverride != nil) }
         // Remote approvals: the JetKVMs this Mac approves for (none in self-tests).
         if !isSelfTest { MainActor.assumeIsolated { ApprovalService.shared.start() } }
+        NotificationCenter.default.addObserver(forName: ApprovalService.showSettings, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.showSettings()
+                self?.settingsWindow?.select(.approvals)
+            }
+        }
         NSApp.mainMenu = buildMenu()
         if let address = options.device {
             connectAdHoc(address)

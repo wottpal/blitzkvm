@@ -20,6 +20,8 @@ final class ApprovalService: ObservableObject, CenterTransport {
 
     /// Settings › Approvals' relay URL; new rosters name it (no default).
     static let relayKey = "approvalsRelayURL"
+    /// Opens Settings › Approvals (the app delegate listens).
+    static let showSettings = Notification.Name("BlitzKVMShowApprovalsSettings")
     static let file = DeviceStore.defaultURL().deletingLastPathComponent().appendingPathComponent("approvals.json")
     /// How long an ended request stays in the panel, saying how it ended.
     static let endedFor: TimeInterval = 4

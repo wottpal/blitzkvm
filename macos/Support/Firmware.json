@@ -4,7 +4,16 @@
       "kind": "blitzkvm",
       "tag": "release/0.5.9-fork.9",
       "sha256": "7ac763ebd33f67b0c37fcc7dd28888916a88680c4db7b8be48a3a1dbc9706660",
-      "size": 35257208
+      "size": 35257208,
+      "features": [
+        "hidrpcWheel",
+        "refreshRegions",
+        "opusAudio",
+        "browserAccess",
+        "hostLink",
+        "framePacing",
+        "stunServers"
+      ]
     },
     {
       "kind": "stock",

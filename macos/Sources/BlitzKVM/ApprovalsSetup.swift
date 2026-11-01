@@ -363,13 +363,18 @@ struct ApprovalsSetupRow: View {
     private var content: RowContent {
         let computer = model.computerName
         let turnOff = RowAction(title: "Turn Off…") { confirming = .turnOff }
+        let settings = RowAction(title: "Approvals Settings…") {
+            NotificationCenter.default.post(name: ApprovalService.showSettings, object: nil)
+        }
+        let relayNote = UserDefaults.standard.string(forKey: ApprovalService.relayKey)?.isEmpty == false ? ""
+            : " Without a relay (Settings › Approvals) only Macs on the JetKVM's network or tailnet get requests."
         switch model.row.value {
         case .needsClipboardSync?:
             return RowContent(detail: "Off", note: "Uses clipboard sync's USB link: set that up first.",
                               action: .init(title: "Set Up Clipboard Sync…", perform: setUpClipboard))
         case .off?:
-            return RowContent(detail: "Off", note: "Approve sudo and password prompts with Touch ID.",
-                              action: .init(title: "Turn On…") { confirming = .turnOn })
+            return RowContent(detail: "Off", note: "Approve sudo and password prompts with Touch ID." + relayNote,
+                              action: .init(title: "Turn On…") { confirming = .turnOn }, menu: [settings])
         case .managedElsewhere(let approvers, _)?:
             return RowContent(detail: "On, set up elsewhere", note: approvers.isEmpty ? nil : "Approvers: \(ApproverLine.names(approvers)).",
                               action: turnOff)
@@ -379,12 +384,12 @@ struct ApprovalsSetupRow: View {
                 let install = on.canInstall ? RowAction(title: "Install on \(computer)…") { install() }
                     : RowAction(title: "Set Up Clipboard Sync…", perform: setUpClipboard)
                 return RowContent(detail: "On · \(approvers)", note: "Install on \(computer) to approve its prompts.",
-                                  action: install, menu: [turnOff])
+                                  action: install, menu: [settings, turnOff])
             }
             let note = model.withoutSudo ? "Installed without sudo: /usr/local isn't root's there."
                 : on.connected ? "sudo stays approved 5 minutes after each approval." : "Waiting for \(target.name) to connect."
             return RowContent(detail: "\(target.name) · \(approvers)", note: note, badge: "On",
-                              menu: [RowAction(title: "Reinstall on \(target.name)…") { install() },
+                              menu: [settings, RowAction(title: "Reinstall on \(target.name)…") { install() },
                                      RowAction(title: "Remove from \(target.name)…") { remove() }, turnOff])
         case nil:
             return RowContent(detail: "Checking…")
