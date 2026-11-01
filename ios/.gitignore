@@ -1,0 +1,10 @@
+# The signing team (copy Config/Local.xcconfig.example)
+Config/Local.xcconfig
+
+# Build output
+build/
+DerivedData/
+
+# Xcode per-user state
+xcuserdata/
+*.xcuserstate

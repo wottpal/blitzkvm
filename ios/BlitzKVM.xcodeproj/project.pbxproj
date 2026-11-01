@@ -1,0 +1,756 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0191611B6F01D00076E033E2 /* PairView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6DD3EB45D699E8CD9CF7B53 /* PairView.swift */; };
+		0706FA9915BEBCF9C26CF10D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 30949C1E7A814EE923263C82 /* Assets.xcassets */; };
+		08F5F6B086BE3B00A045A8D2 /* DevicesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65F0BA917E35A737762CCD0B /* DevicesView.swift */; };
+		0E44002812519EE087ED85BE /* Biometrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F61F31D0F1B592F12A55468 /* Biometrics.swift */; };
+		148FC90C6837DFC4C49386F3 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DC667EE407739B66C872948 /* AppConfig.swift */; };
+		17DA03863220F8B5A5035595 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1078B6F0806AAAFD03BAF18D /* NotificationService.swift */; };
+		1D3661AF2EFE15EB24FB02A2 /* RequestsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38BB2F0012AEE9C98E321012 /* RequestsView.swift */; };
+		244F097C1D9B4F61A0A1E915 /* ReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFE271E58036C16089FA418E /* ReviewView.swift */; };
+		2C951F93E1EF4E44D6B7A077 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30AF7865FBACDB7F1C90E5F5 /* RootView.swift */; };
+		311378E7E45A56F31419B81D /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAE83DBCD36694022F7B6D7A /* Components.swift */; };
+		3217B612F10D9C25F5E82EEE /* PairingCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 108D35C6C35649FC4E2B316B /* PairingCode.swift */; };
+		33FA31432FCB42910E17FAEF /* ReviewContentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE4098E21064F3B136EDE587 /* ReviewContentTests.swift */; };
+		3A6C20B9424FA1A367BCFBDC /* ApprovalPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8789FF46EC4E4ACD4CF42E58 /* ApprovalPush.swift */; };
+		3C298063487F6D8780CD6B42 /* KindInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E8BC76AE028B9E0183E951C /* KindInfo.swift */; };
+		4856C711CE38D3EDCB116802 /* RelayTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD519739795CBFB2A4BF61DA /* RelayTransport.swift */; };
+		4AEFFBE023E0669B08BC5586 /* PasswordVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC153F54BD013D19334A64F1 /* PasswordVault.swift */; };
+		4E2B26C0554E580075559FC7 /* ApprovalKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5541C3D6E8683AA018A86B4A /* ApprovalKit */; };
+		4F5524D8CA321F7637CCC637 /* ApprovalKit in Frameworks */ = {isa = PBXBuildFile; productRef = A8A479C15EFD60EDA3454793 /* ApprovalKit */; };
+		501420F802E5711D1F26C7DD /* DemoData.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6A8F104EACC4F70264327BC /* DemoData.swift */; };
+		65DC8A2593377D675FD46F6F /* Format.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2420295EAD1024A582CF4F63 /* Format.swift */; };
+		6AA466D6B2C07D7FF3F51DB3 /* NotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 9231A5B936C798385068B3A9 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		78A09FA4C4266940E96D2346 /* QRScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C320DC035FAB218F85E2D38 /* QRScanner.swift */; };
+		7EB35B04B9494A55065EDDC7 /* PairingCodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9D418EEB964936BA5DC5804 /* PairingCodeTests.swift */; };
+		8D4F063F0A01B17D27EE308F /* SessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4D8A38BA616F4EE62C41B5D /* SessionTests.swift */; };
+		90BBAE9425EA5CB8E265D4E5 /* BlitzKVMApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E14DD0F769DC514DAAE8CA9 /* BlitzKVMApp.swift */; };
+		AD1A7C6A1804D0513B72FA93 /* ApprovalPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8789FF46EC4E4ACD4CF42E58 /* ApprovalPush.swift */; };
+		ADF4D8E8BE3A962202246E3B /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 582A0BA61B1EF961D08C9296 /* AppModel.swift */; };
+		B26D49500F7678436265F29E /* NotificationTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C023910E1AFC5688C9128D /* NotificationTextTests.swift */; };
+		B58BE4BC0AF4811DCA247A64 /* ReviewContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B9904DC4CC3F8237E7A76B6 /* ReviewContent.swift */; };
+		C44A728CF195FDBDBC0027A9 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300656185CAB4C653277FCB8 /* SettingsView.swift */; };
+		C5DF814A9B2590F7AB3CE03F /* Fixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = E57F4AF742497618F7C566A4 /* Fixture.swift */; };
+		C7B257CC23B3C4E690643215 /* Notifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA82CC4BA086DD28F578F425 /* Notifications.swift */; };
+		D0072DC321B25D8C8066D51F /* PasswordSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24A19759BA7383DE71C5BC09 /* PasswordSheet.swift */; };
+		D32F580B5CBE65CB1920469B /* SimulatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6712950ACBDF335688AB0C26 /* SimulatorTests.swift */; };
+		D9BFD0A48E7230A7166AD7DD /* KindInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E8BC76AE028B9E0183E951C /* KindInfo.swift */; };
+		DC40EC0DB8CB574EA84E9B5D /* ApproverSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = E038B5F8C5E2C50F2A672DCA /* ApproverSession.swift */; };
+		EDF318B1FFBB5FF36EEAE8C8 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21BD5D99507EA788DF25E036 /* AppDelegate.swift */; };
+		EF3A3201CB301816DF9DCB16 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 4D2C03D82F4C513F28A8B7D6 /* PrivacyInfo.xcprivacy */; };
+		F3F0A294929414194FAFD13D /* ErrorText.swift in Sources */ = {isa = PBXBuildFile; fileRef = E78281661F5AFFC3A742C5CE /* ErrorText.swift */; };
+		F6EC6DC261D2287A64AE1A75 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DC667EE407739B66C872948 /* AppConfig.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		47A0DE722B89471BB5C45892 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 54087D91A855888543DEB639 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 103E25E958C5BC22477947F7;
+			remoteInfo = NotificationService;
+		};
+		84A76B820D79FF6CB137DCEA /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 54087D91A855888543DEB639 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F565634E5332418B3BF0F6A0;
+			remoteInfo = BlitzKVM;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		99026EEDC34C3FABD65DD6F4 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				6AA466D6B2C07D7FF3F51DB3 /* NotificationService.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		035E568BD8247C1CEC10799E /* BlitzKVMTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = BlitzKVMTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1078B6F0806AAAFD03BAF18D /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
+		108D35C6C35649FC4E2B316B /* PairingCode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingCode.swift; sourceTree = "<group>"; };
+		133E04CF4E77FF7773E22201 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		1C320DC035FAB218F85E2D38 /* QRScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScanner.swift; sourceTree = "<group>"; };
+		21BD5D99507EA788DF25E036 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		237E8C4B1431A24532E2DB80 /* ApprovalKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ApprovalKit; path = ../apple/ApprovalKit; sourceTree = SOURCE_ROOT; };
+		2420295EAD1024A582CF4F63 /* Format.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Format.swift; sourceTree = "<group>"; };
+		24A19759BA7383DE71C5BC09 /* PasswordSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasswordSheet.swift; sourceTree = "<group>"; };
+		300656185CAB4C653277FCB8 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		30949C1E7A814EE923263C82 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		30AF7865FBACDB7F1C90E5F5 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		38BB2F0012AEE9C98E321012 /* RequestsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestsView.swift; sourceTree = "<group>"; };
+		3E3C5DFBFC7AF1AA7857BF49 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Base.xcconfig; sourceTree = "<group>"; };
+		4D2C03D82F4C513F28A8B7D6 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		4E14DD0F769DC514DAAE8CA9 /* BlitzKVMApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlitzKVMApp.swift; sourceTree = "<group>"; };
+		582A0BA61B1EF961D08C9296 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		65F0BA917E35A737762CCD0B /* DevicesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesView.swift; sourceTree = "<group>"; };
+		6712950ACBDF335688AB0C26 /* SimulatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorTests.swift; sourceTree = "<group>"; };
+		6E8BC76AE028B9E0183E951C /* KindInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KindInfo.swift; sourceTree = "<group>"; };
+		7F61F31D0F1B592F12A55468 /* Biometrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Biometrics.swift; sourceTree = "<group>"; };
+		826BAB89727378CA811B542C /* BlitzKVM.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BlitzKVM.entitlements; sourceTree = "<group>"; };
+		8789FF46EC4E4ACD4CF42E58 /* ApprovalPush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalPush.swift; sourceTree = "<group>"; };
+		8DC667EE407739B66C872948 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		9231A5B936C798385068B3A9 /* NotificationService.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = NotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		9B9904DC4CC3F8237E7A76B6 /* ReviewContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewContent.swift; sourceTree = "<group>"; };
+		A4D8A38BA616F4EE62C41B5D /* SessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionTests.swift; sourceTree = "<group>"; };
+		A6DD3EB45D699E8CD9CF7B53 /* PairView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairView.swift; sourceTree = "<group>"; };
+		A7C023910E1AFC5688C9128D /* NotificationTextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationTextTests.swift; sourceTree = "<group>"; };
+		A9D418EEB964936BA5DC5804 /* PairingCodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingCodeTests.swift; sourceTree = "<group>"; };
+		BAE83DBCD36694022F7B6D7A /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		BC153F54BD013D19334A64F1 /* PasswordVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasswordVault.swift; sourceTree = "<group>"; };
+		BD519739795CBFB2A4BF61DA /* RelayTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayTransport.swift; sourceTree = "<group>"; };
+		CA82CC4BA086DD28F578F425 /* Notifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifications.swift; sourceTree = "<group>"; };
+		D22689D422B5120E3CA0D1F2 /* BlitzKVM.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = BlitzKVM.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DCA4948FBC7E4D7B106F4EE4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		DE4098E21064F3B136EDE587 /* ReviewContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewContentTests.swift; sourceTree = "<group>"; };
+		DFE271E58036C16089FA418E /* ReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewView.swift; sourceTree = "<group>"; };
+		E038B5F8C5E2C50F2A672DCA /* ApproverSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApproverSession.swift; sourceTree = "<group>"; };
+		E57F4AF742497618F7C566A4 /* Fixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Fixture.swift; sourceTree = "<group>"; };
+		E6A8F104EACC4F70264327BC /* DemoData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoData.swift; sourceTree = "<group>"; };
+		E78281661F5AFFC3A742C5CE /* ErrorText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorText.swift; sourceTree = "<group>"; };
+		F24624F5BD6EC4A63F91BC89 /* NotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotificationService.entitlements; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		739526DE59C9CDE29B75B27D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4F5524D8CA321F7637CCC637 /* ApprovalKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		80DB350151C4ACFD770E2AEB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4E2B26C0554E580075559FC7 /* ApprovalKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		2753D704F922B2B0FB227F86 /* BlitzKVMTests */ = {
+			isa = PBXGroup;
+			children = (
+				E57F4AF742497618F7C566A4 /* Fixture.swift */,
+				A7C023910E1AFC5688C9128D /* NotificationTextTests.swift */,
+				A9D418EEB964936BA5DC5804 /* PairingCodeTests.swift */,
+				DE4098E21064F3B136EDE587 /* ReviewContentTests.swift */,
+				A4D8A38BA616F4EE62C41B5D /* SessionTests.swift */,
+				6712950ACBDF335688AB0C26 /* SimulatorTests.swift */,
+			);
+			path = BlitzKVMTests;
+			sourceTree = "<group>";
+		};
+		695CF3A153962A14EF0E75AC /* Model */ = {
+			isa = PBXGroup;
+			children = (
+				582A0BA61B1EF961D08C9296 /* AppModel.swift */,
+				E038B5F8C5E2C50F2A672DCA /* ApproverSession.swift */,
+				7F61F31D0F1B592F12A55468 /* Biometrics.swift */,
+				E6A8F104EACC4F70264327BC /* DemoData.swift */,
+				E78281661F5AFFC3A742C5CE /* ErrorText.swift */,
+				2420295EAD1024A582CF4F63 /* Format.swift */,
+				CA82CC4BA086DD28F578F425 /* Notifications.swift */,
+				108D35C6C35649FC4E2B316B /* PairingCode.swift */,
+				BC153F54BD013D19334A64F1 /* PasswordVault.swift */,
+				BD519739795CBFB2A4BF61DA /* RelayTransport.swift */,
+				9B9904DC4CC3F8237E7A76B6 /* ReviewContent.swift */,
+			);
+			path = Model;
+			sourceTree = "<group>";
+		};
+		6DC58AB18AA7FF418B573790 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				21BD5D99507EA788DF25E036 /* AppDelegate.swift */,
+				4E14DD0F769DC514DAAE8CA9 /* BlitzKVMApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		832A4A0993E815FC5DC349A5 = {
+			isa = PBXGroup;
+			children = (
+				F38D565F4EAD85AB960D3E5D /* BlitzKVM */,
+				2753D704F922B2B0FB227F86 /* BlitzKVMTests */,
+				9A92F6D417664D6252BAC231 /* Config */,
+				B24345785CB68B62C4B8F17A /* NotificationService */,
+				B158358F7E5A43E1689196F4 /* Packages */,
+				971A23AD07F590650740FBF2 /* Shared */,
+				A8B52B3E8746D70768415CA5 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		971A23AD07F590650740FBF2 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				8DC667EE407739B66C872948 /* AppConfig.swift */,
+				8789FF46EC4E4ACD4CF42E58 /* ApprovalPush.swift */,
+				6E8BC76AE028B9E0183E951C /* KindInfo.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		9A92F6D417664D6252BAC231 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				3E3C5DFBFC7AF1AA7857BF49 /* Base.xcconfig */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		A8B52B3E8746D70768415CA5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				D22689D422B5120E3CA0D1F2 /* BlitzKVM.app */,
+				035E568BD8247C1CEC10799E /* BlitzKVMTests.xctest */,
+				9231A5B936C798385068B3A9 /* NotificationService.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		B158358F7E5A43E1689196F4 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				237E8C4B1431A24532E2DB80 /* ApprovalKit */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		B24345785CB68B62C4B8F17A /* NotificationService */ = {
+			isa = PBXGroup;
+			children = (
+				133E04CF4E77FF7773E22201 /* Info.plist */,
+				F24624F5BD6EC4A63F91BC89 /* NotificationService.entitlements */,
+				1078B6F0806AAAFD03BAF18D /* NotificationService.swift */,
+			);
+			path = NotificationService;
+			sourceTree = "<group>";
+		};
+		C5B76945E85C6CF523A84148 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				BAE83DBCD36694022F7B6D7A /* Components.swift */,
+				65F0BA917E35A737762CCD0B /* DevicesView.swift */,
+				A6DD3EB45D699E8CD9CF7B53 /* PairView.swift */,
+				24A19759BA7383DE71C5BC09 /* PasswordSheet.swift */,
+				1C320DC035FAB218F85E2D38 /* QRScanner.swift */,
+				38BB2F0012AEE9C98E321012 /* RequestsView.swift */,
+				DFE271E58036C16089FA418E /* ReviewView.swift */,
+				30AF7865FBACDB7F1C90E5F5 /* RootView.swift */,
+				300656185CAB4C653277FCB8 /* SettingsView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		F38D565F4EAD85AB960D3E5D /* BlitzKVM */ = {
+			isa = PBXGroup;
+			children = (
+				30949C1E7A814EE923263C82 /* Assets.xcassets */,
+				826BAB89727378CA811B542C /* BlitzKVM.entitlements */,
+				DCA4948FBC7E4D7B106F4EE4 /* Info.plist */,
+				4D2C03D82F4C513F28A8B7D6 /* PrivacyInfo.xcprivacy */,
+				6DC58AB18AA7FF418B573790 /* App */,
+				695CF3A153962A14EF0E75AC /* Model */,
+				C5B76945E85C6CF523A84148 /* Views */,
+			);
+			path = BlitzKVM;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		103E25E958C5BC22477947F7 /* NotificationService */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F9D4AC73FA9A6026453F76C5 /* Build configuration list for PBXNativeTarget "NotificationService" */;
+			buildPhases = (
+				1D762AD33B6BCFF87C452D4A /* Sources */,
+				739526DE59C9CDE29B75B27D /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = NotificationService;
+			packageProductDependencies = (
+				A8A479C15EFD60EDA3454793 /* ApprovalKit */,
+			);
+			productName = NotificationService;
+			productReference = 9231A5B936C798385068B3A9 /* NotificationService.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		8836277755A7EDCAE4ED3ECF /* BlitzKVMTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FB9CBA809174D094F2B6B763 /* Build configuration list for PBXNativeTarget "BlitzKVMTests" */;
+			buildPhases = (
+				6B29BFBB899D66E14AF8E08B /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				082E838B54A1562C482CA1CA /* PBXTargetDependency */,
+			);
+			name = BlitzKVMTests;
+			packageProductDependencies = (
+			);
+			productName = BlitzKVMTests;
+			productReference = 035E568BD8247C1CEC10799E /* BlitzKVMTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		F565634E5332418B3BF0F6A0 /* BlitzKVM */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FAEBE7BD0EC1CF6443102392 /* Build configuration list for PBXNativeTarget "BlitzKVM" */;
+			buildPhases = (
+				BD7F22EB78DA143FA8D3751F /* Sources */,
+				4D6C1089AE8F48EC6129B765 /* Resources */,
+				80DB350151C4ACFD770E2AEB /* Frameworks */,
+				99026EEDC34C3FABD65DD6F4 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				7D72C54B4DC039B1CDB7B24D /* PBXTargetDependency */,
+			);
+			name = BlitzKVM;
+			packageProductDependencies = (
+				5541C3D6E8683AA018A86B4A /* ApprovalKit */,
+			);
+			productName = BlitzKVM;
+			productReference = D22689D422B5120E3CA0D1F2 /* BlitzKVM.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		54087D91A855888543DEB639 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					103E25E958C5BC22477947F7 = {
+						ProvisioningStyle = Automatic;
+					};
+					8836277755A7EDCAE4ED3ECF = {
+						ProvisioningStyle = Automatic;
+					};
+					F565634E5332418B3BF0F6A0 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = F1125948CF000FB7898C7A58 /* Build configuration list for PBXProject "BlitzKVM" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 832A4A0993E815FC5DC349A5;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				C1AD73473ABE318A121AEF86 /* XCLocalSwiftPackageReference "../apple/ApprovalKit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = A8B52B3E8746D70768415CA5 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F565634E5332418B3BF0F6A0 /* BlitzKVM */,
+				103E25E958C5BC22477947F7 /* NotificationService */,
+				8836277755A7EDCAE4ED3ECF /* BlitzKVMTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		4D6C1089AE8F48EC6129B765 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0706FA9915BEBCF9C26CF10D /* Assets.xcassets in Resources */,
+				EF3A3201CB301816DF9DCB16 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1D762AD33B6BCFF87C452D4A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				148FC90C6837DFC4C49386F3 /* AppConfig.swift in Sources */,
+				3A6C20B9424FA1A367BCFBDC /* ApprovalPush.swift in Sources */,
+				D9BFD0A48E7230A7166AD7DD /* KindInfo.swift in Sources */,
+				17DA03863220F8B5A5035595 /* NotificationService.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6B29BFBB899D66E14AF8E08B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C5DF814A9B2590F7AB3CE03F /* Fixture.swift in Sources */,
+				B26D49500F7678436265F29E /* NotificationTextTests.swift in Sources */,
+				7EB35B04B9494A55065EDDC7 /* PairingCodeTests.swift in Sources */,
+				33FA31432FCB42910E17FAEF /* ReviewContentTests.swift in Sources */,
+				8D4F063F0A01B17D27EE308F /* SessionTests.swift in Sources */,
+				D32F580B5CBE65CB1920469B /* SimulatorTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BD7F22EB78DA143FA8D3751F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F6EC6DC261D2287A64AE1A75 /* AppConfig.swift in Sources */,
+				EDF318B1FFBB5FF36EEAE8C8 /* AppDelegate.swift in Sources */,
+				ADF4D8E8BE3A962202246E3B /* AppModel.swift in Sources */,
+				AD1A7C6A1804D0513B72FA93 /* ApprovalPush.swift in Sources */,
+				DC40EC0DB8CB574EA84E9B5D /* ApproverSession.swift in Sources */,
+				0E44002812519EE087ED85BE /* Biometrics.swift in Sources */,
+				90BBAE9425EA5CB8E265D4E5 /* BlitzKVMApp.swift in Sources */,
+				311378E7E45A56F31419B81D /* Components.swift in Sources */,
+				501420F802E5711D1F26C7DD /* DemoData.swift in Sources */,
+				08F5F6B086BE3B00A045A8D2 /* DevicesView.swift in Sources */,
+				F3F0A294929414194FAFD13D /* ErrorText.swift in Sources */,
+				65DC8A2593377D675FD46F6F /* Format.swift in Sources */,
+				3C298063487F6D8780CD6B42 /* KindInfo.swift in Sources */,
+				C7B257CC23B3C4E690643215 /* Notifications.swift in Sources */,
+				0191611B6F01D00076E033E2 /* PairView.swift in Sources */,
+				3217B612F10D9C25F5E82EEE /* PairingCode.swift in Sources */,
+				D0072DC321B25D8C8066D51F /* PasswordSheet.swift in Sources */,
+				4AEFFBE023E0669B08BC5586 /* PasswordVault.swift in Sources */,
+				78A09FA4C4266940E96D2346 /* QRScanner.swift in Sources */,
+				4856C711CE38D3EDCB116802 /* RelayTransport.swift in Sources */,
+				1D3661AF2EFE15EB24FB02A2 /* RequestsView.swift in Sources */,
+				B58BE4BC0AF4811DCA247A64 /* ReviewContent.swift in Sources */,
+				244F097C1D9B4F61A0A1E915 /* ReviewView.swift in Sources */,
+				2C951F93E1EF4E44D6B7A077 /* RootView.swift in Sources */,
+				C44A728CF195FDBDBC0027A9 /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		082E838B54A1562C482CA1CA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F565634E5332418B3BF0F6A0 /* BlitzKVM */;
+			targetProxy = 84A76B820D79FF6CB137DCEA /* PBXContainerItemProxy */;
+		};
+		7D72C54B4DC039B1CDB7B24D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 103E25E958C5BC22477947F7 /* NotificationService */;
+			targetProxy = 47A0DE722B89471BB5C45892 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		2976479C7305549C04268255 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = BlitzKVM/BlitzKVM.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = BlitzKVM/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fmdlabs.blitzkvm;
+				PRODUCT_NAME = BlitzKVM;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		2AC35160843129E9A8F65C4B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fmdlabs.blitzkvm.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BlitzKVM.app/BlitzKVM";
+			};
+			name = Release;
+		};
+		3BA453E6A6FE148427C5F09A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3E3C5DFBFC7AF1AA7857BF49 /* Base.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		7B299E27426551F41D59F951 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = NotificationService/NotificationService.entitlements;
+				INFOPLIST_FILE = NotificationService/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fmdlabs.blitzkvm.notifications;
+				PRODUCT_NAME = NotificationService;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		AC458DC1492F53018DBE5769 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = BlitzKVM/BlitzKVM.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = BlitzKVM/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fmdlabs.blitzkvm;
+				PRODUCT_NAME = BlitzKVM;
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		AE6345F97CF2620A013BCAF4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3E3C5DFBFC7AF1AA7857BF49 /* Base.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		B471E736231E779C71E6AFB6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = NotificationService/NotificationService.entitlements;
+				INFOPLIST_FILE = NotificationService/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fmdlabs.blitzkvm.notifications;
+				PRODUCT_NAME = NotificationService;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		D3B8DDB3E67A3E1FB6F5D1A3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.fmdlabs.blitzkvm.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BlitzKVM.app/BlitzKVM";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		F1125948CF000FB7898C7A58 /* Build configuration list for PBXProject "BlitzKVM" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3BA453E6A6FE148427C5F09A /* Debug */,
+				AE6345F97CF2620A013BCAF4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F9D4AC73FA9A6026453F76C5 /* Build configuration list for PBXNativeTarget "NotificationService" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B471E736231E779C71E6AFB6 /* Debug */,
+				7B299E27426551F41D59F951 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FAEBE7BD0EC1CF6443102392 /* Build configuration list for PBXNativeTarget "BlitzKVM" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2976479C7305549C04268255 /* Debug */,
+				AC458DC1492F53018DBE5769 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FB9CBA809174D094F2B6B763 /* Build configuration list for PBXNativeTarget "BlitzKVMTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D3B8DDB3E67A3E1FB6F5D1A3 /* Debug */,
+				2AC35160843129E9A8F65C4B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		C1AD73473ABE318A121AEF86 /* XCLocalSwiftPackageReference "../apple/ApprovalKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../apple/ApprovalKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		5541C3D6E8683AA018A86B4A /* ApprovalKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ApprovalKit;
+		};
+		A8A479C15EFD60EDA3454793 /* ApprovalKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ApprovalKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 54087D91A855888543DEB639 /* Project object */;
+}

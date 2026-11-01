@@ -1,0 +1,118 @@
+# XcodeGen spec for BlitzKVM.xcodeproj: run `xcodegen` in ios/ after
+# changing targets, files or settings, and commit both.
+name: BlitzKVM
+options:
+  bundleIdPrefix: com.fmdlabs
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+packages:
+  ApprovalKit:
+    path: ../apple/ApprovalKit
+targets:
+  BlitzKVM:
+    type: application
+    platform: iOS
+    sources:
+      - path: BlitzKVM
+      - path: Shared
+    dependencies:
+      - package: ApprovalKit
+      - target: NotificationService
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.fmdlabs.blitzkvm
+        PRODUCT_NAME: BlitzKVM
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+    entitlements:
+      path: BlitzKVM/BlitzKVM.entitlements
+      properties:
+        aps-environment: development
+        com.apple.security.application-groups:
+          - group.com.fmdlabs.blitzkvm
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.fmdlabs.blitzkvm.shared
+        com.apple.developer.usernotifications.time-sensitive: true
+    info:
+      path: BlitzKVM/Info.plist
+      properties:
+        CFBundleDisplayName: BlitzKVM
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        BKKeychainAccessGroup: $(AppIdentifierPrefix)com.fmdlabs.blitzkvm.shared
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSFaceIDUsageDescription: Face ID confirms each approval and unlocks the passwords you store for your computers.
+        NSCameraUsageDescription: The camera scans the pairing code that BlitzKVM shows on your Mac.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.fmdlabs.blitzkvm.pair
+            CFBundleURLSchemes:
+              - blitzkvm-pair
+  NotificationService:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: NotificationService
+      - path: Shared
+    dependencies:
+      - package: ApprovalKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.fmdlabs.blitzkvm.notifications
+        PRODUCT_NAME: NotificationService
+        TARGETED_DEVICE_FAMILY: "1"
+    entitlements:
+      path: NotificationService/NotificationService.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.fmdlabs.blitzkvm
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.fmdlabs.blitzkvm.shared
+    info:
+      path: NotificationService/Info.plist
+      properties:
+        CFBundleDisplayName: BlitzKVM Notifications
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        BKKeychainAccessGroup: $(AppIdentifierPrefix)com.fmdlabs.blitzkvm.shared
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+  BlitzKVMTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: BlitzKVMTests
+    dependencies:
+      - target: BlitzKVM
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.fmdlabs.blitzkvm.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1"
+schemes:
+  BlitzKVM:
+    build:
+      targets:
+        BlitzKVM: all
+        BlitzKVMTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - BlitzKVMTests
+    archive:
+      config: Release

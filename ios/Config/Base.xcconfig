@@ -1,0 +1,11 @@
+// Build settings shared by the app, its notification service extension and
+// the tests. Signing is automatic; the team comes from Local.xcconfig, which
+// is gitignored (copy Local.xcconfig.example).
+
+CODE_SIGN_STYLE = Automatic
+IPHONEOS_DEPLOYMENT_TARGET = 18.0
+SWIFT_VERSION = 5.0
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+
+#include? "Local.xcconfig"

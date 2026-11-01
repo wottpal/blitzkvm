@@ -1,0 +1,4 @@
+// Copy to Local.xcconfig (gitignored) and set the Apple Developer team that
+// signs the app and its extension (FMD Labs). Find the team ID in Xcode ›
+// Settings › Accounts, or at developer.apple.com › Membership.
+DEVELOPMENT_TEAM = XXXXXXXXXX
