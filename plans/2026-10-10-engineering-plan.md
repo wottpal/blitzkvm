@@ -713,6 +713,7 @@ The independent review (`plans/2026-10-10-engineering-plan-review.md`, merged in
 | 2026-10-18 | Every quality level encodes up to 60 fps (minimal and low were 15 and 30); off a LAN the encoder's peak follows the measured rate, at 0.55× when the JetKVM runs Tailscale itself (§32) |
 | 2026-10-18 | A JetKVM reached over its own Tailscale gets a direct path tried, through public STUN servers (on by default, Settings › Connection); off a LAN frames are paced at 1.25× the peak cap on firmware with D18 (§33) |
 | 2026-10-18 | A LAN path to the device's own subnet counts as a LAN while its lowest round trip of a minute stays under 30 ms (Wi-Fi); maximum on a LAN encodes every captured frame up to 1080p60's pixel rate; input keeps the picture presenting for a second (§34) |
+| 2026-11-01 | Remote approvals (§36): a broker on the JetKVM (firmware D20), a root daemon on the remote Mac, approvers on Macs and the iPhone (FMD Labs team, `com.fmdlabs.blitzkvm`), an opt-in Cloudflare Worker relay whose URL never enters the repository. The 1Password CLI is always answered on the remote Mac's own prompt (a click, or the password typed), never by an `op` wrapper |
 
 ## 18. PM to-dos
 
@@ -1752,6 +1753,53 @@ Each change alone: the source rate at maximum (engine, fixed level) keys 60 → 
 ### Open
 
 - Not tried on the rig across real networks (lid closed at home, opened on another network, and back); the engine's retries and the path monitor are unchanged, so the worst case is the old behavior plus probes.
+
+## 36. Remote approvals (2026-11-01)
+
+**Ask (PM):** prompts on the remote Mac (1Password CLI access by AI agents, sudo, macOS password dialogs, the lock screen, agents asking for a yes) should reach the owner's iPhone and Macs and be answered with Face ID or Touch ID. The Mac mini has no Touch ID, Touch ID can't be emulated over USB (the Magic Keyboard is paired to the Secure Enclave), and 1Password accepts only Touch ID, an Apple Watch or a password. Build plan: `~/.claude/plans/fizzy-hatching-petal.md` (owner's machine); protocol: `approval/PROTOCOL.md`.
+
+### Findings (rig, macOS 27, over Tailscale)
+
+| # | Finding | Evidence |
+|---|---|---|
+| R1 | An `op` call raises 1Password's "Access Requested" window: owned by the 1Password app, layer 101, 400×346 pt, centered on the main display. It doesn't take the keyboard focus: the app in front keeps it, so Return would go there | gui-session agent's window list; screenshots |
+| R2 | With 1Password unlocked, a click on Authorize authorizes at once, without a password, and brings 1Password's main window to the front | one click through the JetKVM's pointer |
+| R3 | The prompt closes by itself about a minute after the `op` process exits | screenshots |
+| R4 | A LaunchAgent bootstrapped into `gui/<uid>` from SSH sees the frontmost app, window owners, layers and bounds (names hidden) and the screens, with no permission prompt | spike agent |
+| R5 | `IOConsoleUsers` gives the secure-input pid and the lock state to any user | `ioreg` |
+| R6 | The host link's gVisor stack takes a TCP listener; the Mac reaches it at the JetKVM's link-local address on the NCM interface | D20 on the rig: link up, asks answered |
+| R7 | HPKE (DHKEM P-256, AES-256-GCM) and ECDSA interoperate between CryptoKit and Go (circl) both ways | vectors, interop test |
+| R8 | Workers' Durable Objects with hibernating WebSockets carry the relay; one Worker per owner account | deployed relay, emulator broker through it |
+
+### Design
+
+- **Protocol** (`approval/`): signed JSON envelopes (P-256, raw r‖s), HPKE boxes, one owner-signed roster per broker (owners, approvers with presence/transport/seal keys, targets, relay; sequence-numbered, so revocations can't be rolled back), asks signed by the target's root daemon, requests by the broker, decisions by an approver's presence key (Secure Enclave, Touch ID / Face ID); denials may use the transport key. Matching code: two digits of the ask's digest.
+- **Broker** (`approval/broker`, MIT, in the firmware as D20 and in the emulator): link to the daemon on the host link's port 4023, approvers on `/approvals/v1/ws` (no browsers) and through the relay; screen steps only for an approved screen ask within 60 s, the secret once, keys limited to Return/Escape/Tab/Backspace/Shift/Caps Lock outside the secret; session input blocked and key states hidden while it acts; no keys in logs.
+- **Daemon** (`remote/`): root; evidence from IOConsoleUsers and its agent; 1Password → click at the measured Authorize point (R1, R2), password only if 1Password then asks for it; dialogs and the lock screen → Mac password into a field held by a verified Apple process; sudo through a PAM shim in `sudo_local`.
+- **Approvers:** BlitzKVM on a Mac (direct, else relay) and the iOS app (relay only: HTTP inbox/outbox, APNs alerts whose content the notification extension decrypts).
+
+### Results
+
+- D20 on the rig (fork.9 plus D20): a fake daemon on the mini asked over the USB link; a test approver on this Mac approved over the tailnet; the daemon verified the decision (grant 10, code 37 on both ends). Screen steps: Shift taps and a "secret" of Shift taps went through; a second secret and a letter key were refused; no key in the device log.
+- The deployed relay carried an emulator broker's requests to a Mac approver (WebSocket) and a phone approver (HTTP), and their decisions back.
+- The real `blitzkvm-remote` on the mini (user mode, no root): `confirm` approved (exit 0) and denied (exit 1); the GUI agent saw 1Password's prompt and the daemon asked within 4 s; approved, the JetKVM clicked Authorize ("authorized") and the app that had the front got it back. The first approval missed: with a requester name on two lines the window keeps its 400×346 but the panel inside grows, and Authorize sits 40 pt above the window's bottom instead of 61. The driver now tries 61, then 40, re-checking the prompt before each click; a miss lands on the panel.
+
+### Decisions (worth revisiting)
+
+- Signed bytes instead of a canonical encoding; one roster instead of certificates and revocation lists.
+- 1Password: a pointer click, never Return; the approver may attach the 1Password password, used only if 1Password asks for it.
+- The key map for typing comes from the remote Mac's own input source (`UCKeyTranslate` in the agent), not from per-layout tables in the firmware.
+- The firmware vendors `approval/` (`third_party/blitzkvm-approval`, synced by a script) until the module can be fetched.
+- Approvals are on while the broker has a roster; they need the host link, which can't be turned off meanwhile.
+
+### Review
+
+One independent review. Fixed: pairing (the broker learned the token and could have the owner admit its own key; now it sees only the token's hash, and the inviting owner checks an HMAC with the token), the firmware's stale copy of the broker (now checked against its BlitzKVM commit in CI), key maps limited to character keys with Shift and Option, typing a secret a character at a time with an abort and an exact count to erase, padded secrets, serialized rosters, replayed pairings, a slow link handshake holding a slot, an old link cancelling a newer one's requests, the session's input slipping into the broker's typing, key bytes in a trace log, the relay's socket and storage limits and endpoint binding, and on the remote Mac the agent's signature, grants anchored on terminals, and display-safe text. Kept: sudo's own 5-minute cache. A follow-up review: unlock requests are now signed by the asking approver's transport key and checked by the remote Mac (no UI sent them before, so any unlock ask came from the relay or the JetKVM), and the Mac's review panel takes the keyboard on any click while every Touch ID or password prompt first releases a device window's keyboard capture.
+
+### Open
+
+- Root install, the sudo plugin, SecurityAgent dialogs, the lock screen and the locked-1Password password field on the rig need the owner (sudo password; typing a password needs a test account or the owner at hand).
+- APNs: the relay's push path is tested against a mock; one real push needs the APNs key (owner).
 
 ## Appendix A: Key sources
 

@@ -48,6 +48,19 @@ jobs:
         working-directory: third_party/openh264-go
         run: go test -count=1 ./...
 
+      # The firmware builds this module with its own Go (1.25): keep it there.
+      - name: Test approval module (the firmware's Go)
+        working-directory: approval
+        env:
+          GOTOOLCHAIN: go1.25.1
+        run: go vet ./... && go test -race -count=1 ./...
+
+      - name: ApprovalKit (Swift)
+        run: swift test --package-path apple/ApprovalKit
+
+      - name: Remote side (Swift, PAM shim)
+        run: swift test --package-path remote/blitzkvm-remote && make -C remote/pam test
+
       - name: Vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
@@ -57,3 +70,25 @@ jobs:
       # Unsigned; JetKVM's own firmware is downloaded, the BlitzKVM build is left out.
       - name: Native app (bundle)
         run: make -C macos app SIGN_IDENTITY=- COPY_TO=
+
+  relay:
+    name: Relay (Cloudflare Worker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

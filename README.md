@@ -18,6 +18,7 @@ BlitzKVM started from [lkarlslund/jetkvm-desktop](https://github.com/lkarlslund/
 - **Follows you.** An open window moves between a device's LAN address and its tailnet name as you leave home or come back, without reconnecting by hand.
 - **Everything a KVM needs.** Keyboard capture including system shortcuts, an absolute pointer that goes where you hover, paste as keystrokes, virtual media, serial console, ATX/DC power, Wake Computer, several devices as tabs.
 - **Clipboard sync with a Mac.** Copy on one Mac, paste on the other: text, rich text and images, over the JetKVM's USB cable, with nothing installed on the remote Mac but a key (BlitzKVM firmware).
+- **Remote approvals.** sudo, a 1Password CLI prompt, a password dialog or the lock screen on the remote Mac asks your iPhone or this Mac, and Face ID or Touch ID answers it: signed approvals the remote Mac checks itself, or a click or password the JetKVM types for that one approval (BlitzKVM firmware).
 - **JetKVM Setup.** Firmware, password and Tailscale on the device, each with one button.
 - **Updates itself.** From signed, notarized GitHub releases, after asking or on its own when you quit.
 
@@ -114,6 +115,16 @@ With the BlitzKVM firmware (0.5.9-fork.8 or later) and a Mac on the other end, J
 - **Turn Off** stops syncing and keeps the key on the remote Mac; **Remove…** takes the key off the remote Mac and turns the USB link off.
 - On macOS 15.4 and later, macOS may ask whether BlitzKVM may read the clipboard. Allow it, or set BlitzKVM to Always Allow in System Settings › Privacy & Security › Paste from Other Apps; the setup row says so when macOS asks or refuses.
 
+### Remote approvals
+
+With the BlitzKVM firmware (D20) and a Mac on the other end, the remote Mac's prompts come to you: `sudo` (also in an AI agent's terminal), `blitzkvm-remote confirm` (for scripts and agents that want a yes), the 1Password CLI's access prompt, macOS password dialogs and the lock screen. A notification and a review panel show what asks, on which computer, through which processes, with a two-digit code that the remote terminal shows too; you approve with Touch ID (or this Mac's password), Face ID on the iPhone app, or deny. Nothing changes for prompts nobody approves: they time out and ask for the password as before.
+- **What an approval does:** sudo and `confirm` get a decision signed by your device's Secure Enclave key, which the remote Mac's root daemon checks itself; the JetKVM can't forge one. 1Password's prompt gets a click on its Authorize button, at the spot the daemon measured, never a Return (the prompt doesn't take the keyboard focus, so Return would go to the app in front); when 1Password is locked, the JetKVM types the 1Password password you stored. Dialogs and the lock screen get the Mac password typed into the field the daemon saw holding secure input. "Allow for 10 min" (sudo, `confirm`) lets the same agent ask again without asking you; after an approved sudo, sudo's own 5-minute cache applies as after a typed password.
+- **On the remote Mac** (JetKVM Setup › Approvals › Install, over clipboard sync's login and `sudo` with the password you stored): a root daemon (`blitzkvm-remote`), a LaunchAgent that reports which windows are on screen (no permissions: no Accessibility, no screen recording, no Apple Events) and a sudo plugin in `/etc/pam.d/sudo_local`. It needs Clipboard Sync set up first (approvals use its USB link and login).
+- **The lock screen:** Unlock (Settings › Approvals on a Mac, the JetKVM's page on the iPhone) asks a locked computer to raise an unlock request naming the device that asked; approving it types the Mac's password at the lock screen. Only an approver's signed request can raise one, never the relay or the JetKVM.
+- **Passwords** you let the JetKVM type live on your devices only, sealed to a Secure Enclave key that needs Touch ID or Face ID: an approval hands one to the JetKVM for that request, encrypted to a key the broker made for it, and the JetKVM forgets it once typed.
+- **Devices:** this Mac pairs your iPhone with a QR code (Settings › Approvals); the iPhone gets requests and answers them through the relay. Owners (the first Mac, and the devices it makes owners) add and remove approvers; a removed one can't approve anything, also not on a JetKVM that missed the removal, once the remote Mac has seen it.
+- **The relay** is a small Cloudflare Worker (`relay/`) that holds the Apple push key and passes sealed boxes between the JetKVM and your devices; it never sees a request's contents or a password. Its URL goes into Settings › Approvals; without one, only Macs that reach the JetKVM directly (LAN or tailnet) get requests.
+
 ### Audio
 
 View › Play Audio (on by default, for all windows; turned off it mutes at once, turned on it reconnects windows that connected without it): the remote computer's sound plays on this Mac.
@@ -137,19 +148,21 @@ The BlitzKVM firmware is JetKVM's open-source firmware ([jetkvm/kvm](https://git
 - STUN servers for the app's own sessions, so it can reach the JetKVM past the Tailscale it runs itself.
 - Hardening: other websites can't reach the device through your browser (cross-site requests, DNS rebinding), malformed input can't crash it, and secrets stay out of its logs.
 - A switch, in JetKVM Setup, that turns off the web interface for browsers while this app keeps connecting.
-- An opt-in USB network link to the computer, for clipboard sync. The device runs its own network stack there, so none of its services (web interface, SSH) is reachable from the computer over the cable.
+- An opt-in USB network link to the computer, for clipboard sync. The device runs its own network stack there, so none of its services (web interface, SSH) is reachable from the computer over the cable; while remote approvals are on, one port there takes the computer's approval daemon, which speaks only the approval protocol.
+- The approval broker for remote approvals (D20): it checks signatures, offers requests to your devices, and clicks or types for an approved screen request with the session's input blocked and no key in its logs.
 
 Install it with JetKVM Setup (one button; the previous build stays on the device as a backup), and switch back to JetKVM's own release from the same menu. JetKVM's automatic updates replace it with their next release. Installing any firmware other than JetKVM's own is at your own risk.
 
 ## Privacy and security
 
-- **No telemetry.** The app talks to your JetKVMs, to GitHub once a day to look for updates (Settings turns that off), to pkgs.tailscale.com only when you install Tailscale from JetKVM Setup, and to public STUN servers for the direct path (below). The update check sends nothing but the request for the latest release's appcast.
+- **No telemetry.** The app talks to your JetKVMs, to GitHub once a day to look for updates (Settings turns that off), to pkgs.tailscale.com only when you install Tailscale from JetKVM Setup, to public STUN servers for the direct path (below), and, with remote approvals, to the relay set in Settings › Approvals. The update check sends nothing but the request for the latest release's appcast.
 - **Direct path** (on by default; Settings › Connection turns it off): when the app reaches a JetKVM over the Tailscale the JetKVM runs itself, this Mac, and the JetKVM with the BlitzKVM firmware, ask public STUN servers (Cloudflare, Google) for their internet addresses. Those servers learn the two addresses and nothing else; the session never passes them. It is protected like every WebRTC session: ICE credentials and DTLS-SRTP, whose certificate fingerprints travel over Tailscale. `BLITZKVM_STUN_SERVERS` names other STUN servers.
 - **Identity before input.** A session accepts input only after the device's ID matches the one pinned on first connect.
 - **HTTPS trust on first use.** The device's certificate authority is pinned; a change stops the session before any password is sent, and the app asks whether to trust the new one.
 - **Passwords** live in the login keychain.
 - **JetKVM Setup** turns on Developer Mode on the device and adds the app's own SSH key (`~/Library/Application Support/BlitzKVM/SSH/`) to it, keeping any others.
 - **Browser access off** (optional, BlitzKVM firmware with the switch): the device refuses every web browser, so other websites can't reach it through yours; only apps like this one connect. JetKVM's own firmware ignores the setting.
+- **Remote approvals** (optional, BlitzKVM firmware): every request is signed by the remote Mac's root daemon and the JetKVM, every decision by an approver's Secure Enclave key; the remote Mac checks decisions itself against a roster only your owner devices can sign. Messages to and from your devices are sealed (HPKE) end to end, through the relay too; the relay (Cloudflare) learns only which devices talk to which JetKVM and when. A typed password travels encrypted to a key made for that one request, and is typed only into a window the remote Mac's root daemon checked (1Password, macOS's own password dialogs, the lock screen). Browsers can't reach the broker.
 - **Clipboard sync** (optional, BlitzKVM firmware with the USB link): the remote Mac accepts the app's clipboard key (`~/Library/Application Support/BlitzKVM/SSH/clipboard_ed25519`) only from the JetKVM's end of the USB link, and the app pins the remote Mac's SSH host key at setup. The session is SSH end to end, so the JetKVM relays it without seeing the clipboard. Items a password manager marks as private aren't synced.
 
 Report security issues privately as described in [SECURITY.md](SECURITY.md).
@@ -172,6 +185,11 @@ The rest of this README is for contributors, human or agent. [`AGENTS.md`](AGENT
 | `pkg/input` | Keyboard mapping and layout-aware paste; `layouts_gen.go` is generated. |
 | `pkg/netimpair` | The slow-link model behind `BLITZKVM_IMPAIR`. |
 | `pkg/emulator`, `test/emulator-serve` | A firmware-faithful fake JetKVM (behaves like firmware 0.5.9) and its CLI, so everything can be tested without hardware. |
+| `approval/` | Remote approvals' protocol (`PROTOCOL.md`), a Go module of its own (MIT; the firmware builds it with Go 1.25): `wire` (envelopes, HPKE boxes, rosters, asks, decisions) and `broker` (the broker the firmware and the emulator run). `testdata/vectors.json` pins the protocol for Swift and TypeScript. |
+| `apple/ApprovalKit` | The protocol in Swift for the app, the iOS app and the remote daemon: keys (Secure Enclave), the password vault, the approver's state (`ApprovalCenter`) and its WebSockets. |
+| `remote/` | What runs on the remote Mac: `blitzkvm-remote` (root daemon, GUI agent, `confirm`), the sudo plugin's PAM shim (C) and the install scripts. |
+| `ios/` | The iPhone app (approver; FMD Labs team). |
+| `relay/` | The relay: a Cloudflare Worker with a Durable Object per JetKVM, APNs pushes; deployed by the owner. |
 | `third_party/openh264-go` | Vendored OpenH264 bindings with static libraries (cgo), wired in by a `replace` in `go.mod`; used by the emulator and tests, never by the app. |
 | `tools/` | Latency probe, quality bench and the text upscaler's training (each with a README). |
 | `plans/` | Engineering plan: roadmap, decisions, measurements. |
@@ -201,7 +219,11 @@ Run root targets from the repository root and macOS targets with `make -C macos 
 | `make generate-check` | Regenerates, then fails if `git diff` is not empty, so it also fails on any uncommitted change |
 | `make check` | What CI runs (`.github/workflows/ci.yml`): vet, generate-check, race tests, timing tests, govulncheck, OpenH264 tests, Swift tests |
 | `make layouts UPSTREAM=../kvm` | Regenerates `pkg/input/layouts_gen.go` from a `jetkvm/kvm` checkout |
-| `make emulator` | Runs the emulator on `http://127.0.0.1:8080` (no password) |
+| `make emulator` | Runs the emulator on `http://127.0.0.1:8080` (no password); `go run ./test/emulator-serve --approvals` adds D20's broker, its host link at `127.0.0.1:4023` |
+| `go -C approval test -race ./...` | The approval protocol and broker (run it with `GOTOOLCHAIN=go1.25.1` too: the firmware's Go) |
+| `swift test --package-path apple/ApprovalKit` | ApprovalKit, incl. the protocol vectors |
+| `swift test --package-path remote/blitzkvm-remote`, `make -C remote/pam test` | The remote daemon and the sudo plugin's shim |
+| `npm --prefix relay ci && npm --prefix relay test` | The relay (Workers runtime, APNs mocked) |
 | `make -C macos app` | Builds and signs `macos/build/BlitzKVM.app`; a signed build is also copied to `~/Downloads` |
 | `make -C macos firmware` | Bundles the firmware builds JetKVM Setup installs, pinned by SHA-256 in `macos/Support/Firmware.json`: the BlitzKVM build from `FORK_BINARY` (default: `bin/jetkvm_app` of a [wottpal/kvm](https://github.com/wottpal/kvm) clone next to this repository), and JetKVM's own release from its GitHub release (downloaded once into `macos/build/firmware-cache`). `make app` runs it; a build whose binary is missing is left out |
 | `make -C macos licenses` | Assembles `macos/build/licenses/Licenses.txt` (BlitzKVM › Licenses…): BlitzKVM's license, FSR's, the Go standard library's and every Go module the helper links (from the module cache), and the bundled firmware's GPL-2.0 with its source links, libopus and LVGL. `make app` runs it |
@@ -275,7 +297,7 @@ Ask the owner before you:
 
 - act on real hardware beyond view-only use;
 - push to `main` or to any remote other than the working branch;
-- notarize or publish a build;
+- notarize or publish a build, deploy the relay, or submit the iOS app;
 - delete images from a real device's storage;
 - change the roadmap or a decision recorded in the plan.
 
@@ -325,6 +347,7 @@ Where things live:
 - SSH keys: `~/Library/Application Support/BlitzKVM/SSH/`, `id_ed25519` for JetKVM Setup on the device and `clipboard_ed25519` for clipboard sync with remote Macs.
 - Logs: `~/Library/Logs/BlitzKVM/app.log` holds app messages and each helper's stderr.
 - Update settings: the app's user defaults (`xyz.scio.blitzkvm`, Sparkle's `SU…` keys).
+- Remote approvals: paired JetKVMs and their rosters in `~/Library/Application Support/BlitzKVM/approvals.json`; this Mac's approver keys (Secure Enclave key references and the seal key) in the login keychain, service `xyz.scio.blitzkvm.approvals`; passwords for the JetKVM to type in the same keychain under `xyz.scio.blitzkvm.approvals.vault`, sealed to a Secure Enclave key that needs Touch ID or the Mac's password. On the JetKVM: `/userdata/jetkvm/approvals/` (broker key, roster). On the remote Mac: `/Library/Application Support/BlitzKVM/Remote/` (daemon, its key and roster), `/usr/local/lib/pam/pam_blitzkvm.so` and one line in `/etc/pam.d/sudo_local`.
 
 ### Troubleshooting
 
