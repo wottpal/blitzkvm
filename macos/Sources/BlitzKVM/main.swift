@@ -57,7 +57,7 @@ struct Options {
     /// Self-test: play the device's audio (silently) and expect this codec
     /// ("opus", "pcmu") or none ("none"). Without it, self-tests play none.
     var expectAudio: String?
-    /// `--open settings|shortcuts|permissions|licenses|devices`: opens that
+    /// `--open settings|shortcuts|approvals|permissions|licenses|devices`: opens that
     /// window (or Settings tab) at launch (and logs its window number, for
     /// `screencapture -l`).
     var openWindow: String?
@@ -164,6 +164,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         updater = MainActor.assumeIsolated { Updater(start: !isSelfTest || Updater.feedOverride != nil) }
+        // Remote approvals: the JetKVMs this Mac approves for (none in self-tests).
+        if !isSelfTest { MainActor.assumeIsolated { ApprovalService.shared.start() } }
         NSApp.mainMenu = buildMenu()
         if let address = options.device {
             connectAdHoc(address)
@@ -171,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showDevices()
         }
         switch options.openWindow {
-        case "settings", "shortcuts", "permissions":
+        case "settings", "shortcuts", "approvals", "permissions":
             showSettings()
             settingsWindow?.select(SettingsTab(rawValue: options.openWindow?.capitalized ?? "") ?? .general)
             AppLog.log("opened settings: window number \(settingsWindow?.window?.windowNumber ?? 0)")

@@ -175,6 +175,41 @@ public struct CommandResult: Decodable {
     public var invalid: String?
 }
 
+/// The hostLinkRun command (pkg/engine/hostlink.go): runs a command on the
+/// remote Mac over clipboard sync's SSH login, with the same user,
+/// privateKeyPath and hostKey (the pinned host key). Params also take
+/// `command`, `stdin` (bytes for its standard input, base64 in JSON as Go's
+/// []byte; never logged) and `timeout` (seconds, default 120). The result
+/// is {stdout, stderr, exitCode}; the command fails when the Mac can't be
+/// reached or the command outlives the timeout. The remote approvals
+/// installer uses it (RemoteInstall).
+public enum HostLinkRun {
+    public static let command = "hostLinkRun"
+
+    public struct Result: Decodable, Equatable {
+        public var stdout: String
+        public var stderr: String
+        public var exitCode: Int
+
+        public init(stdout: String, stderr: String, exitCode: Int) {
+            self.stdout = stdout; self.stderr = stderr; self.exitCode = exitCode
+        }
+    }
+
+    public static func params(sync: ClipboardSync, privateKeyPath: String, command: String, stdin: Data? = nil,
+                              timeout: Int? = nil) -> JSONValue {
+        var p: [String: JSONValue] = [
+            "user": .string(sync.user),
+            "privateKeyPath": .string(privateKeyPath),
+            "hostKey": .string(sync.hostKey),
+            "command": .string(command),
+        ]
+        if let stdin { p["stdin"] = .string(stdin.base64EncodedString()) }
+        if let timeout { p["timeout"] = .number(Double(timeout)) }
+        return .object(p)
+    }
+}
+
 /// Subset of the Go session.Snapshot the app displays.
 public struct SessionSnapshot: Decodable, Equatable {
     public var Phase: String

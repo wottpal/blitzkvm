@@ -32,6 +32,10 @@ final class JetKVMSetupModel: ObservableObject {
     @Published private(set) var clipboard = Row<ClipboardRowState>()
     /// The firmware has the USB link clipboard sync needs; nil until checked.
     @Published private(set) var hasHostLink: Bool?
+    /// Remote approvals (BlitzKVM firmware D20), a row of its own.
+    let approvals: ApprovalsSetupModel
+    /// The firmware has the approval broker; nil until checked.
+    @Published private(set) var hasApprovals: Bool?
     /// The firmware builds this app ships, the recommended BlitzKVM
     /// build first.
     let builds: [(build: FirmwareBuild, binary: URL)] = JetKVMSetupModel.bundledFirmware()
@@ -45,10 +49,12 @@ final class JetKVMSetupModel: ObservableObject {
 
     init(controller: DeviceWindowController) {
         self.controller = controller
+        approvals = ApprovalsSetupModel(controller: controller)
     }
 
     var isWorking: Bool {
         firmware.isWorking || tailscale.isWorking || password.isWorking || browserAccess.isWorking || clipboard.isWorking
+            || approvals.isWorking
     }
 
     func cancel() {
@@ -65,6 +71,7 @@ final class JetKVMSetupModel: ObservableObject {
             if !password.isWorking { await checkPassword() }
             if !browserAccess.isWorking { await checkBrowserAccess() }
             if !clipboard.isWorking { checkClipboard() }
+            if hasApprovals == true, !approvals.isWorking { await approvals.check() }
             let ssh = await canSSH
             if !firmware.isWorking { await checkFirmware(ssh: ssh) }
             record()
@@ -143,6 +150,7 @@ final class JetKVMSetupModel: ObservableObject {
         let features = (try? await engine.call("getFirmwareFeatures", as: [String].self)) ?? []
         hasBrowserAccessSwitch = features.contains("browserAccess")
         hasHostLink = features.contains("hostLink")
+        hasApprovals = features.contains("approvals")
         guard hasBrowserAccessSwitch == true else { return }
         do {
             browserAccess.value = try await engine.call("getBrowserAccessState", as: EnabledState.self).enabled
@@ -619,6 +627,7 @@ final class JetKVMSetupModel: ObservableObject {
             && (password.value != nil || password.error != nil)
             && (hasBrowserAccessSwitch == false || browserAccess.value != nil || browserAccess.error != nil)
             && (hasHostLink == false || clipboard.value != nil || clipboard.error != nil)
+            && (hasApprovals == false || approvals.row.value != nil || approvals.row.error != nil)
     }
 
     var report: [String: Any] {
@@ -628,6 +637,7 @@ final class JetKVMSetupModel: ObservableObject {
         return ["firmware": text(firmware), "tailscale": text(tailscale), "password": text(password),
                 "browserAccess": hasBrowserAccessSwitch == false ? "no switch" : text(browserAccess),
                 "clipboard": hasHostLink == false ? "no USB link" : text(clipboard),
+                "approvals": hasApprovals == false ? "no broker" : text(approvals.row),
                 "bundledFirmware": builds.map(\.build.title)]
     }
 
@@ -662,8 +672,9 @@ final class JetKVMSetupModel: ObservableObject {
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func describe(_ error: Error) -> String {
+    static func describe(_ error: Error) -> String {
         if let error = error as? SetupError { return error.message }
+        if let error = error as? ApprovalError { return error.message }
         if let error = error as? EngineError { return error.message.prefix(1).uppercased() + error.message.dropFirst() + "." }
         return error.localizedDescription
     }

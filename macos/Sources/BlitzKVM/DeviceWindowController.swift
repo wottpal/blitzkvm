@@ -199,6 +199,9 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         window.collectionBehavior.insert(.fullScreenPrimary)
         super.init(window: window)
         window.delegate = self
+        NotificationCenter.default.addObserver(forName: ApprovalService.releaseKeyboard, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.input.setCaptured(false) }
+        }
         buildContent()
         engine.delegate = self
         decoder.onFrame = { [weak self] buffer, header in
@@ -969,6 +972,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             }
             device.lastConnected = Date()
             onConnected?(self)
+            // Approvals reach the JetKVM where this window does (roaming too).
+            ApprovalService.shared.deviceConnected(engine: engine, address: address)
             if showsSetupOnConnect {
                 showsSetupOnConnect = false
                 showSetup()

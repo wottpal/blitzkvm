@@ -2,16 +2,19 @@ import AppKit
 import SwiftUI
 
 /// BlitzKVM › Settings…: a toolbar tab each for updates and the connection,
-/// shortcuts that stay on this Mac, and the permissions the app needs.
+/// shortcuts that stay on this Mac, remote approvals, and the permissions
+/// the app needs.
 enum SettingsTab: String, CaseIterable {
     case general = "General"
     case shortcuts = "Shortcuts"
+    case approvals = "Approvals"
     case permissions = "Permissions"
 
     var symbol: String {
         switch self {
         case .general: "gearshape"
         case .shortcuts: "keyboard"
+        case .approvals: "checkmark.shield"
         case .permissions: "hand.raised"
         }
     }
@@ -28,6 +31,8 @@ enum SettingsTab: String, CaseIterable {
             })
         case .shortcuts:
             AnyView(SettingsPane { ShortcutsSettings(store: LocalShortcuts.shared) })
+        case .approvals:
+            AnyView(SettingsPane { ApprovalsSettings(service: .shared) })
         case .permissions:
             AnyView(SettingsPane { PermissionsSection(permissions: permissions) }
                 .onAppear { permissions.startWatching() }

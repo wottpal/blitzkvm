@@ -3,7 +3,8 @@ import SwiftUI
 
 /// Set Up JetKVM: the BlitzKVM firmware, a password and Tailscale,
 /// each with its state and the one action that moves it forward; below them,
-/// optional features the firmware offers (browser access, clipboard sync).
+/// optional features the firmware offers (browser access, clipboard sync,
+/// approvals).
 struct JetKVMSetupView: View {
     @ObservedObject var model: JetKVMSetupModel
     let deviceName: String
@@ -27,10 +28,13 @@ struct JetKVMSetupView: View {
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                if model.hasBrowserAccessSwitch == true || model.hasHostLink == true {
+                if model.hasBrowserAccessSwitch == true || model.hasHostLink == true || model.hasApprovals == true {
                     Section("Optional") {
                         if model.hasBrowserAccessSwitch == true { browserAccessRow }
                         if model.hasHostLink == true { clipboardRow }
+                        if model.hasApprovals == true {
+                            ApprovalsSetupRow(model: model.approvals) { confirming = .clipboardSetUp }
+                        }
                     }
                 }
             }
@@ -321,14 +325,14 @@ struct JetKVMSetupView: View {
 
 // MARK: - Row
 
-private struct RowAction {
+struct RowAction {
     var title: String
     var perform: () -> Void
 }
 
 /// What a row shows for its state: the state, a paragraph on what it means,
 /// then either a badge (done) or the action that moves it forward.
-private struct RowContent {
+struct RowContent {
     var detail: String
     /// The second paragraph, Markdown (for a link).
     var note: String?
@@ -338,7 +342,7 @@ private struct RowContent {
     var menu: [RowAction] = []
 }
 
-private struct SetupRow<Value: Equatable>: View {
+struct SetupRow<Value: Equatable>: View {
     let symbol: String
     let tint: Color
     let title: String

@@ -5,6 +5,7 @@
 #   make icon       compile the Icon Composer source and standalone fallback
 #   make firmware   bundle the firmware builds JetKVM Setup installs
 #   make licenses   assemble the licenses the app shows (BlitzKVM › Licenses…)
+#   make remote     build the remote side of approvals that JetKVM Setup installs
 #   make selftest   end-to-end run against the in-repo emulator
 #   make selftest-stalls   the picture survives link stalls and hidden windows
 #   make selftest-refresh  still refreshes follow typing pauses (fork firmware D13)
@@ -46,7 +47,7 @@ EMULATOR_ADDR ?= 127.0.0.1:18080
 # bin/jetkvm_app; JetKVM's own release is downloaded once at build time.
 FORK_BINARY ?= $(abspath ../../kvm/bin/jetkvm_app)
 
-.PHONY: app engine swift icon firmware licenses release test selftest selftest-extras selftest-stalls selftest-refresh selftest-audio selftest-roaming selftest-update run install notarize clean
+.PHONY: app engine swift icon firmware licenses remote release test selftest selftest-extras selftest-stalls selftest-refresh selftest-audio selftest-roaming selftest-update run install notarize clean
 
 engine:
 	cd .. && GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o macos/build/blitzkvm-engine ./cmd/blitzkvm-engine
@@ -63,7 +64,24 @@ firmware:
 licenses: engine swift
 	sh scripts/licenses.sh Support/Firmware.json build/licenses/Licenses.txt
 
-app: engine swift icon firmware licenses
+# The remote side of approvals, which JetKVM Setup installs on the remote
+# Mac: ../remote's own build (blitzkvm-remote for arm64, pam_blitzkvm.so,
+# the launchd plists, install.sh and uninstall.sh), signed with the app's
+# identity (hardened runtime; the binary as xyz.scio.blitzkvm.remote, which
+# its daemon requires of its agent). Left out, with a warning, while
+# ../remote doesn't build, so the app still does.
+REMOTE_FILES := blitzkvm-remote pam_blitzkvm.so xyz.scio.blitzkvm.remote.plist xyz.scio.blitzkvm.remote.agent.plist install.sh uninstall.sh
+remote:
+	@rm -rf build/remote
+	@if [ -f ../remote/Makefile ] && $(MAKE) -C ../remote SIGN_IDENTITY="$(SIGN_IDENTITY)" SIGN_FLAGS="$(SIGN_FLAGS)" \
+		&& (cd ../remote/build && test -z "$$(for f in $(REMOTE_FILES); do test -f $$f || echo $$f; done)"); then \
+		mkdir -p build/remote && for f in $(REMOTE_FILES); do cp "../remote/build/$$f" build/remote/; done; \
+		codesign --verify --strict build/remote/blitzkvm-remote build/remote/pam_blitzkvm.so && echo "bundling the remote side of approvals"; \
+	else \
+		echo "warning: ../remote didn't build: the app won't be able to install approvals on a remote Mac" >&2; \
+	fi
+
+app: engine swift icon firmware licenses remote
 	rm -rf "$(APP)"
 	mkdir -p "$(APP)/Contents/MacOS" "$(APP)/Contents/Helpers" "$(APP)/Contents/Resources" "$(APP)/Contents/Frameworks"
 	cp "$$(swift build -c release --arch arm64 --show-bin-path)/BlitzKVM" "$(APP)/Contents/MacOS/BlitzKVM"
@@ -79,6 +97,7 @@ app: engine swift icon firmware licenses
 	cp build/firmware/Firmware.json build/firmware/*.xz "$(APP)/Contents/Resources/Firmware/"
 	cp build/licenses/Licenses.txt "$(APP)/Contents/Resources/Licenses.txt"
 	cp Support/InstallGuard.sh "$(APP)/Contents/Resources/InstallGuard.sh"
+	if [ -d build/remote ]; then ditto build/remote "$(APP)/Contents/Resources/Remote"; fi
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" --identifier xyz.scio.blitzkvm.engine "$(APP)/Contents/Helpers/blitzkvm-engine"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" "$(SPARKLE)/Autoupdate"
 	codesign --force $(SIGN_FLAGS) --sign "$(SIGN_IDENTITY)" "$(SPARKLE)/Updater.app"
