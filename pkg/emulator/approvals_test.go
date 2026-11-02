@@ -169,7 +169,8 @@ func TestApprovalsOverTheEmulator(t *testing.T) {
 			got = append(got, in.Type+" "+in.Data)
 		}
 	}
-	if strings.Join(got, "|") != "click 0.7500,0.6000|stroke 04:00|stroke 05:00" {
+	// The session's input is held from the approval on, before any step.
+	if strings.Join(got, "|") != "hold true|click 0.7500,0.6000|stroke 04:00|stroke 05:00" {
 		t.Fatalf("inputs %v", got)
 	}
 }

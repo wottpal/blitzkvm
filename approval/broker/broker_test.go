@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -50,6 +51,15 @@ type fakeHID struct {
 	mu      sync.Mutex
 	clicks  []wire.Point
 	strokes []wire.Stroke
+	holds   []bool
+	// gate, when set, makes Type wait for it (a slow keyboard).
+	gate chan struct{}
+}
+
+func (h *fakeHID) Hold(on bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.holds = append(h.holds, on)
 }
 
 func (h *fakeHID) Click(_ context.Context, x, y float64) error {
@@ -59,7 +69,14 @@ func (h *fakeHID) Click(_ context.Context, x, y float64) error {
 	return nil
 }
 
-func (h *fakeHID) Type(_ context.Context, s []wire.Stroke) error {
+func (h *fakeHID) Type(ctx context.Context, s []wire.Stroke) error {
+	if h.gate != nil {
+		select {
+		case <-h.gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.strokes = append(h.strokes, s...)
@@ -593,6 +610,193 @@ func TestRelayCarriesRequestsAndDecisions(t *testing.T) {
 	_ = relay.Write(h.ctx, mustJSON(map[string]any{"op": "from", "from": h.phone.id, "box": wire.Bytes(box)}))
 	if m := d.read(); m["op"] != "decision" {
 		t.Fatalf("daemon got %v", m)
+	}
+}
+
+// Admitting an iPhone changes the roster but not the relay: the roster must
+// reach the new approver over the same relay connection, not get lost while
+// the connection restarts (the iPhone would wait for its admission forever).
+func TestRelayCarriesNewRosterToNewApprover(t *testing.T) {
+	h := &harness{t: t, hid: &fakeHID{}, synced: true, mac: newParty(t), phone: newParty(t)}
+	h.target, _ = wire.NewSigningKey()
+	var cancel context.CancelFunc
+	h.ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	relayEnds := make(chan *chanConn, 4)
+	b, err := New(Config{Store: &memStore{files: map[string][]byte{}}, HID: h.hid, Logf: t.Logf,
+		DialRelay: func(ctx context.Context, url string) (Conn, error) {
+			mine, theirs := connPair()
+			relayEnds <- mine
+			return theirs, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.b = b
+	h.roster = wire.Roster{V: 1, Seq: 1, Issued: time.Now().Unix(), Broker: b.Identity(), Relay: "https://relay.example",
+		Owners: []string{h.mac.id}, Approvers: []wire.Approver{h.mac.approver("Mac", "macos")},
+		Targets: []wire.Target{{ID: h.target.ID(), Name: "Mac mini", Key: h.target.Public()}}}
+	env, _ := wire.Sign(h.mac.presence, "roster", h.roster)
+	if err := b.Enable(env); err != nil {
+		t.Fatal(err)
+	}
+	go b.Run(h.ctx)
+	relay := <-relayEnds
+	read := func() map[string]any {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for {
+			d, err := relay.Read(ctx)
+			if err != nil {
+				t.Fatalf("relay connection: %v", err)
+			}
+			var m map[string]any
+			_ = json.Unmarshal(d, &m)
+			if m["op"] != "ping" {
+				return m
+			}
+		}
+	}
+	_ = relay.Write(h.ctx, mustJSON(map[string]any{"op": "hello", "nonce": wire.Bytes(wire.Nonce(32))}))
+	if m := read(); m["op"] != "auth" {
+		t.Fatalf("auth: %v", m)
+	}
+	if m := read(); m["op"] != "allow" || len(m["approvers"].([]any)) != 1 {
+		t.Fatalf("allow: %v", m)
+	}
+	// The Mac, reaching the broker through the relay, admits the iPhone.
+	next := h.roster
+	next.Seq, next.Issued = 2, time.Now().Unix()
+	next.Approvers = append(append([]wire.Approver(nil), next.Approvers...), h.phone.approver("iPhone", "ios"))
+	rosterEnv, _ := wire.Sign(h.mac.presence, "roster", next)
+	box, _ := wire.SealBox(b.Identity().Seal, mustJSON(map[string]any{"op": "roster", "roster": rosterEnv}))
+	_ = relay.Write(h.ctx, mustJSON(map[string]any{"op": "from", "from": h.mac.id, "box": wire.Bytes(box)}))
+	allowed, toPhone := false, false
+	for !allowed || !toPhone {
+		m := read()
+		switch {
+		case m["op"] == "allow":
+			allowed = len(m["approvers"].([]any)) == 2
+		case m["op"] == "send" && m["to"] == h.phone.id:
+			toPhone = true
+		}
+	}
+	select {
+	case <-relayEnds:
+		t.Fatal("the broker dialed the relay again for a roster with the same relay")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// An open request is pushed to the iPhone again (each time under a new
+// collapse id), every 20 s, 10 s for a 1Password prompt, never to the Mac;
+// once answered, the iPhone gets one quiet push that replaces it, and no
+// more repeats.
+func TestRepeatsUntilAnswered(t *testing.T) {
+	for _, tc := range []struct {
+		kind  string
+		every time.Duration
+	}{{wire.KindSudo, repeatOther}, {wire.KindOnePassword, repeatOnePassword}} {
+		t.Run(tc.kind, func(t *testing.T) {
+			h := &harness{t: t, hid: &fakeHID{}, synced: true, mac: newParty(t), phone: newParty(t)}
+			h.target, _ = wire.NewSigningKey()
+			var cancel context.CancelFunc
+			h.ctx, cancel = context.WithCancel(context.Background())
+			defer cancel()
+			relayEnds := make(chan *chanConn, 4)
+			b, err := New(Config{Store: &memStore{files: map[string][]byte{}}, HID: h.hid, Logf: t.Logf,
+				Now:    func() time.Time { return time.Now().Add(time.Duration(h.offset.Load())) },
+				Synced: func() bool { return true },
+				DialRelay: func(ctx context.Context, url string) (Conn, error) {
+					mine, theirs := connPair()
+					relayEnds <- mine
+					return theirs, nil
+				}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.b = b
+			h.roster = wire.Roster{V: 1, Seq: 1, Issued: time.Now().Unix(), Broker: b.Identity(), Relay: "https://relay.example",
+				Owners: []string{h.mac.id}, Approvers: []wire.Approver{h.mac.approver("Mac", "macos"), h.phone.approver("iPhone", "ios")},
+				Targets: []wire.Target{{ID: h.target.ID(), Name: "Mac mini", Key: h.target.Public()}}}
+			env, _ := wire.Sign(h.mac.presence, "roster", h.roster)
+			if err := b.Enable(env); err != nil {
+				t.Fatal(err)
+			}
+			go b.runRelay(h.ctx) // no Run: the test drives repeat() and the clock
+			relay := <-relayEnds
+			read := func(wait time.Duration) map[string]any {
+				ctx, cancel := context.WithTimeout(context.Background(), wait)
+				defer cancel()
+				for {
+					d, err := relay.Read(ctx)
+					if err != nil {
+						return nil
+					}
+					var m map[string]any
+					_ = json.Unmarshal(d, &m)
+					if m["op"] != "ping" {
+						return m
+					}
+				}
+			}
+			_ = relay.Write(h.ctx, mustJSON(map[string]any{"op": "hello", "nonce": wire.Bytes(wire.Nonce(32))}))
+			read(5 * time.Second) // auth
+			read(5 * time.Second) // allow
+			d, _ := h.connectDaemon(h.target)
+			id, _ := d.ask(h.target, tc.kind, wire.SecretNone, false)
+			reqEnv := envFrom(t, d.read()["request"])
+			for i := 0; i < 2; i++ { // the first push, to both
+				if m := read(5 * time.Second); m["op"] != "send" || m["push"] == nil {
+					t.Fatalf("first push: %v", m)
+				}
+			}
+			for n := 1; n <= 2; n++ {
+				b.repeat()
+				if m := read(300 * time.Millisecond); m != nil {
+					t.Fatalf("repeated early: %v", m)
+				}
+				h.offset.Add(int64(tc.every))
+				b.repeat()
+				m := read(5 * time.Second)
+				push, _ := m["push"].(map[string]any)
+				if m["to"] != h.phone.id || push["collapse"] != fmt.Sprintf("%s.%d", id, n) || push["quiet"] != nil || push["repeat"] != true {
+					t.Fatalf("repeat %d: %v", n, m)
+				}
+				if m := read(300 * time.Millisecond); m != nil {
+					t.Fatalf("a repeat went to the Mac too: %v", m)
+				}
+			}
+			// The phone denies through the relay.
+			var req wire.Request
+			_ = reqEnv.Peek(&req)
+			dec, _ := wire.Sign(h.phone.transport, "decision", wire.Decision{V: 1, Request: reqEnv.DigestHex(), Ask: req.Ask.DigestHex(),
+				Decision: wire.Deny, Approver: h.phone.id, Issued: time.Now().Unix()})
+			box, _ := wire.SealBox(b.Identity().Seal, mustJSON(map[string]any{"op": "decision", "decision": dec}))
+			_ = relay.Write(h.ctx, mustJSON(map[string]any{"op": "from", "from": h.phone.id, "box": wire.Bytes(box)}))
+			ended := map[string]map[string]any{}
+			for len(ended) < 2 {
+				m := read(5 * time.Second)
+				if m == nil {
+					t.Fatal("no status")
+				}
+				if m["op"] == "send" {
+					p, _ := m["push"].(map[string]any)
+					ended[m["to"].(string)] = p
+				}
+			}
+			if p := ended[h.phone.id]; p == nil || p["collapse"] != id+".end" || p["quiet"] != true {
+				t.Fatalf("the phone's end push: %v", p)
+			}
+			if p := ended[h.mac.id]; p != nil {
+				t.Fatalf("the Mac got a push: %v", p)
+			}
+			h.offset.Add(int64(tc.every))
+			b.repeat()
+			if m := read(300 * time.Millisecond); m != nil {
+				t.Fatalf("repeated after the answer: %v", m)
+			}
+		})
 	}
 }
 

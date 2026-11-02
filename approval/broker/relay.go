@@ -28,8 +28,13 @@ func (r *relayConn) send(msg any) {
 	case r.out <- data:
 	case <-r.done:
 	default:
-		r.close()
+		go r.close() // closing may wait on the relay
 	}
+}
+
+// announce tells the relay about a pairing, by its hash.
+func (r *relayConn) announce(hash []byte, until time.Time) {
+	r.send(map[string]any{"op": "pairing", "hash": wire.Bytes(hash), "expires": until.Unix()})
 }
 
 func (r *relayConn) close() {
@@ -73,7 +78,7 @@ func (b *Broker) runRelay(ctx context.Context) {
 			continue
 		}
 		started := time.Now()
-		err := b.relaySession(ctx, url+"/v1/b/"+b.ID()+"/ws", changed)
+		err := b.relaySession(ctx, url, changed)
 		if ctx.Err() != nil {
 			return
 		}
@@ -100,22 +105,34 @@ type relayMsg struct {
 	Box   wire.Bytes `json:"box"`
 }
 
-func (b *Broker) relaySession(ctx context.Context, url string, changed <-chan struct{}) error {
+func (b *Broker) relaySession(ctx context.Context, base string, changed <-chan struct{}) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	c, err := b.cfg.DialRelay(ctx, url)
+	c, err := b.cfg.DialRelay(ctx, base+"/v1/b/"+b.ID()+"/ws")
 	if err != nil {
 		return err
 	}
-	r := &relayConn{c: c, out: make(chan []byte, 256), done: make(chan struct{})}
+	r := &relayConn{c: c, out: make(chan []byte, 1024), done: make(chan struct{})}
 	defer r.close()
+	// Only another relay (or none) ends the session: a roster that keeps
+	// the relay is sent through it, to the approvers it just admitted too.
 	go func() {
-		select {
-		case <-ctx.Done():
-		case <-changed: // another relay, or none
-		case <-r.done:
+		for {
+			select {
+			case <-ctx.Done():
+			case <-r.done:
+			case <-changed:
+				b.mu.Lock()
+				same := b.roster != nil && strings.TrimRight(b.roster.Relay, "/") == base
+				changed = b.rosterCh
+				b.mu.Unlock()
+				if same {
+					continue
+				}
+			}
+			r.close()
+			return
 		}
-		r.close()
 	}()
 	read := func() (*relayMsg, error) {
 		readCtx, done := context.WithTimeout(ctx, 2*idleTimeout)
@@ -134,7 +151,7 @@ func (b *Broker) relaySession(ctx context.Context, url string, changed <-chan st
 	if err != nil {
 		return err
 	}
-	if hello.Op != "hello" || len(hello.Nonce) == 0 {
+	if hello.Op != "hello" || len(hello.Nonce) != 32 {
 		return errors.New("unexpected relay hello")
 	}
 	auth, err := wire.Sign(b.key, "relay", wire.RelayAuth{V: 1, Role: "broker", Broker: b.ID(), Key: b.key.Public(),
@@ -159,9 +176,19 @@ func (b *Broker) relaySession(ctx context.Context, url string, changed <-chan st
 			}
 		}
 	}()
+	// The allow list and live pairings go out as the session is installed,
+	// under the lock, so setRoster's next list can only follow them.
 	b.mu.Lock()
-	roster := b.roster
 	b.relay = r
+	if b.roster != nil {
+		r.sendAllow(b.roster)
+	}
+	now := b.cfg.Now()
+	for hash, until := range b.pairings {
+		if until.After(now) {
+			r.announce([]byte(hash), until)
+		}
+	}
 	b.mu.Unlock()
 	defer func() {
 		b.mu.Lock()
@@ -170,9 +197,6 @@ func (b *Broker) relaySession(ctx context.Context, url string, changed <-chan st
 		}
 		b.mu.Unlock()
 	}()
-	if roster != nil {
-		r.sendAllow(roster)
-	}
 	b.cfg.Logf("approvals: relay connected")
 	ping := time.NewTicker(30 * time.Second)
 	defer ping.Stop()

@@ -19,10 +19,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/wottpal/blitzkvm/approval/broker"
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
+	"github.com/wottpal/blitzkvm/approval/broker"
 
 	"github.com/wottpal/blitzkvm/pkg/client"
 	"github.com/wottpal/blitzkvm/pkg/logging"

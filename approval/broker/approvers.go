@@ -28,7 +28,7 @@ func (a *approverConn) send(msg any) {
 	case a.out <- data:
 	case <-a.done:
 	default:
-		a.close()
+		go a.close() // an approver that doesn't read loses its socket; closing may wait on it
 	}
 }
 
@@ -85,8 +85,9 @@ func (b *Broker) ServeApprover(ctx context.Context, c Conn) {
 	}()
 	nonce := wire.Nonce(32)
 	a.send(map[string]any{"op": "hello", "broker": b.ID(), "nonce": wire.Bytes(nonce)})
+	timeout := authTimeout // until the hello is answered
 	read := func() (*frame, error) {
-		readCtx, done := context.WithTimeout(ctx, idleTimeout)
+		readCtx, done := context.WithTimeout(ctx, timeout)
 		defer done()
 		data, err := c.Read(readCtx)
 		if err != nil {
@@ -124,6 +125,7 @@ func (b *Broker) ServeApprover(ctx context.Context, c Conn) {
 	}
 	b.direct[id][a] = true
 	b.mu.Unlock()
+	timeout = idleTimeout
 	a.send(map[string]string{"op": "ready"})
 	defer func() {
 		b.mu.Lock()
@@ -182,6 +184,18 @@ func (b *Broker) checkHello(env *wire.Envelope, nonce []byte) (string, error) {
 // routing replies: decisions, rosters and pairings carry their own
 // signatures.
 func (b *Broker) fromApprover(id string, box []byte) {
+	if !b.allowBox(id) {
+		return
+	}
+	if id == "" {
+		// An enrollment is opened (an HPKE open) only while a pairing is live.
+		b.mu.Lock()
+		live := len(b.pairings) > 0
+		b.mu.Unlock()
+		if !live {
+			return
+		}
+	}
 	data, err := b.seal.OpenBox(box)
 	if err != nil {
 		return
@@ -217,17 +231,70 @@ func (b *Broker) fromApprover(id string, box []byte) {
 		b.mu.Lock()
 		link, roster := b.link, b.roster
 		b.mu.Unlock()
-		if link == nil || roster == nil {
+		if link == nil || roster == nil || roster.Target(link.target) == nil {
 			return
 		}
-		if _, err := wire.VerifyUnlock(roster, m.Unlock, link.target, b.cfg.Now()); err != nil {
+		now := b.cfg.Now()
+		u, err := wire.VerifyUnlock(roster, m.Unlock, link.target, now)
+		if err != nil {
 			b.cfg.Logf("approvals: unlock request refused: %v", err)
+			return
+		}
+		// Each signed request once, and one per approver every 30 s, as the
+		// target allows: replays cost the link nothing.
+		b.mu.Lock()
+		for n, until := range b.unlocks {
+			if now.After(until) {
+				delete(b.unlocks, n)
+			}
+		}
+		_, seen := b.unlocks[string(u.Nonce)]
+		recent := now.Sub(b.lastUnlock[u.Approver]) < unlockEvery
+		if !seen && !recent {
+			b.unlocks[string(u.Nonce)] = now.Add(2 * wire.ClockSkew)
+			b.lastUnlock[u.Approver] = now
+		}
+		b.mu.Unlock()
+		if seen || recent {
 			return
 		}
 		link.send(map[string]any{"op": "unlock", "unlock": m.Unlock})
 	case "sync":
-		b.sync(id)
+		now := b.cfg.Now()
+		b.mu.Lock()
+		ok := now.Sub(b.lastSync[id]) >= syncEvery
+		if ok {
+			b.lastSync[id] = now
+		}
+		b.mu.Unlock()
+		if ok {
+			b.sync(id)
+		}
 	}
+}
+
+// allowBox counts a box from an approver id ("" for enrollments) against
+// its budget, and against the broker's for all.
+func (b *Broker) allowBox(id string) bool {
+	now := b.cfg.Now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	take := func(key string, limit int) bool {
+		w := b.boxes[key]
+		if w == nil || now.Sub(w.start) >= boxWindow {
+			if len(b.boxes) > 4*wire.MaxApprovers {
+				clear(b.boxes)
+			}
+			w = &window{start: now}
+			b.boxes[key] = w
+		}
+		if w.n >= limit {
+			return false
+		}
+		w.n++
+		return true
+	}
+	return take("\x00all", 4*boxesPerWindow) && take(id, boxesPerWindow)
 }
 
 // sync sends an approver the roster and the open requests.
@@ -242,10 +309,10 @@ func (b *Broker) sync(id string) {
 	}
 	b.mu.Unlock()
 	if roster != nil {
-		b.deliver(id, map[string]any{"op": "roster", "roster": roster}, "")
+		b.deliver(id, map[string]any{"op": "roster", "roster": roster}, nil)
 	}
 	for _, env := range open {
-		b.deliver(id, map[string]any{"op": "request", "request": env}, "")
+		b.deliver(id, map[string]any{"op": "request", "request": env}, nil)
 	}
 }
 
@@ -290,24 +357,32 @@ func (b *Broker) decide(env *wire.Envelope) {
 		wipe(padded)
 	}
 	p.by, p.decided = d.Approver, now
+	typing := wire.Typing(p.verified.Ask.Kind)
 	if d.Decision == wire.Approve {
 		p.state, p.secret = "approved", secret
+		if typing {
+			// From the approval until the request ends, only the broker
+			// presses keys on the target.
+			p.holds = true
+			b.holding++
+		}
 	} else {
 		p.state, p.ended = "denied", now
 	}
 	b.record(p, "")
 	link := b.link
 	id, target, state := p.verified.Ask.ID, p.verified.Ask.Target, p.state
-	typing := wire.Typing(p.verified.Ask.Kind)
-	sent := link != nil && link.target == target
+	sent := link != nil && link.target == target && roster.Target(target) != nil
 	b.mu.Unlock()
-	if sent {
-		link.send(map[string]any{"op": "decision", "id": id, "decision": env})
-	} else {
+	b.applyHold()
+	// Everyone hears of it (iPhones with the push that ends it), also when
+	// the target can't be told.
+	b.status(id, map[string]any{"op": "status", "id": id, "state": state, "by": d.Approver}, true)
+	if !sent {
 		b.finish(id, target, "failed", "the target isn't connected")
 		return
 	}
-	b.broadcast(map[string]any{"op": "status", "id": id, "state": state, "by": d.Approver})
+	link.send(map[string]any{"op": "decision", "id": id, "decision": env})
 	if state == "approved" && !typing {
 		// Nothing to press: the target has what it needs.
 		b.finish(id, target, "done", "")
@@ -337,6 +412,10 @@ func (b *Broker) pairing(env *wire.Envelope) {
 		until = max
 	}
 	b.pairings[string(p.Hash)] = until
+	// The relay takes enrollments only for a pairing it was told about.
+	if b.relay != nil {
+		b.relay.announce(p.Hash, until)
+	}
 }
 
 // enroll passes a new device's enrollment for a live pairing to the owners
@@ -376,6 +455,6 @@ func (b *Broker) enroll(env *wire.Envelope) {
 	}
 	b.cfg.Logf("approvals: %q (%s) asks to become an approver", e.Approver.Name, e.Approver.Platform)
 	for _, id := range owners {
-		b.deliver(id, map[string]any{"op": "enrolling", "enroll": env}, "enroll")
+		b.deliver(id, map[string]any{"op": "enrolling", "enroll": env}, &push{collapse: "enroll"})
 	}
 }

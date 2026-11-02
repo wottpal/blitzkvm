@@ -101,7 +101,10 @@ func (e *Engine) replyResult(id int64, result any) {
 	if err != nil {
 		res.Error = err.Error()
 	}
-	_ = e.w.WriteJSON(engineipc.TypeCommandDone, res)
+	if err := e.w.WriteJSON(engineipc.TypeCommandDone, res); err != nil {
+		// Too large for a frame: the caller still gets an answer.
+		_ = e.w.WriteJSON(engineipc.TypeCommandDone, engineipc.CommandResult{ID: id, Error: "the result didn't fit: " + err.Error()})
+	}
 }
 
 func parseClipboardParams(raw json.RawMessage) (clipboardParams, []byte, error) {
@@ -679,6 +682,30 @@ type hostLinkRunResult struct {
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
 	ExitCode int    `json:"exitCode"`
+	// Truncated: the command wrote more than maxRunOutput to one of them.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// maxRunOutput caps what hostLinkRun keeps of stdout and of stderr: the
+// reply has to fit the IPC's frame.
+const maxRunOutput = 1 << 20
+
+// cappedBuffer keeps the first max bytes written to it.
+type cappedBuffer struct {
+	bytes.Buffer
+	max  int
+	over bool
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if room := c.max - c.Len(); len(p) > room {
+		c.over = true
+		if room > 0 {
+			c.Buffer.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	return c.Buffer.Write(p)
 }
 
 // hostLinkRun runs a command on the Mac (the pinned host key and this app's
@@ -692,6 +719,17 @@ func (e *Engine) hostLinkRun(cmd engineipc.Command) {
 	e.replyResult(cmd.ID, result)
 }
 
+// wipeParams zeroes the stdin (a sudo password) in the params as decoded
+// and in the raw IPC bytes once the command ran.
+func wipeParams(raw json.RawMessage, p *hostLinkRunParams) {
+	for i := range p.Stdin {
+		p.Stdin[i] = 0
+	}
+	for i := range raw {
+		raw[i] = 0
+	}
+}
+
 func (e *Engine) runOnMac(raw json.RawMessage) (*hostLinkRunResult, error) {
 	c := e.controller()
 	if c == nil {
@@ -701,6 +739,7 @@ func (e *Engine) runOnMac(raw json.RawMessage) (*hostLinkRunResult, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("hostLinkRun params: %w", err)
 	}
+	defer wipeParams(raw, &p)
 	if p.User == "" || p.HostKey == "" || p.Command == "" {
 		return nil, errors.New("hostLinkRun needs clipboard sync's user and host key, and a command")
 	}
@@ -724,8 +763,8 @@ func (e *Engine) runOnMac(raw json.RawMessage) (*hostLinkRunResult, error) {
 		return nil, err
 	}
 	defer session.Close()
-	var stdout, stderr bytes.Buffer
-	session.Stdout, session.Stderr = &stdout, &stderr
+	stdout, stderr := &cappedBuffer{max: maxRunOutput}, &cappedBuffer{max: maxRunOutput}
+	session.Stdout, session.Stderr = stdout, stderr
 	if len(p.Stdin) > 0 {
 		session.Stdin = bytes.NewReader(p.Stdin)
 	}
@@ -734,10 +773,13 @@ func (e *Engine) runOnMac(raw json.RawMessage) (*hostLinkRunResult, error) {
 	select {
 	case err = <-done:
 	case <-ctx.Done():
+		// sshd ignores most signals; closing the connection ends the session
+		// (and hangs up on the command).
 		_ = session.Signal(ssh.SIGTERM)
+		_ = sshClient.Close()
 		return nil, fmt.Errorf("the command on the remote Mac took too long: %w", ctx.Err())
 	}
-	res := &hostLinkRunResult{Stdout: stdout.String(), Stderr: stderr.String()}
+	res := &hostLinkRunResult{Stdout: stdout.String(), Stderr: stderr.String(), Truncated: stdout.over || stderr.over}
 	var exit *ssh.ExitError
 	switch {
 	case err == nil:

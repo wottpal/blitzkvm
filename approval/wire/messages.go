@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 )
 
 // Ask kinds.
@@ -35,10 +36,12 @@ func Typing(kind string) bool {
 // Limits.
 const (
 	MaxAskLifetime = 120 * time.Second
-	ClockSkew      = 60 * time.Second
-	MaxGrant       = 10
-	maxChain       = 8
-	maxText        = 2048
+	// maxTime bounds Unix times in asks (the year 3000), so their arithmetic can't overflow.
+	maxTime   = 32503680000
+	ClockSkew = 60 * time.Second
+	MaxGrant  = 10
+	maxChain  = 8
+	maxText   = 2048
 )
 
 // Ask is what the target wants approved.
@@ -57,8 +60,8 @@ type Ask struct {
 	// unlock ask (unlock asks only, and always).
 	RequestedBy string `json:"requestedBy,omitempty"`
 	Nonce       Bytes  `json:"nonce"`
-	Issued    int64      `json:"issued"`
-	Expires   int64      `json:"expires"`
+	Issued      int64  `json:"issued"`
+	Expires     int64  `json:"expires"`
 }
 
 type Requester struct {
@@ -121,7 +124,7 @@ func (a *Ask) Check(now time.Time) error {
 		return errors.New("ask nonce")
 	case a.Title == "" || len(a.Title) > maxText || len(a.Detail) > maxText:
 		return errors.New("ask text")
-	case a.Expires <= a.Issued || time.Duration(a.Expires-a.Issued)*time.Second > MaxAskLifetime:
+	case a.Issued <= 0 || a.Issued > maxTime || a.Expires <= a.Issued || a.Expires-a.Issued > int64(MaxAskLifetime/time.Second):
 		return errors.New("ask lifetime")
 	case a.Requester != nil && len(a.Requester.Chain) > maxChain:
 		return errors.New("ask chain too long")
@@ -231,8 +234,8 @@ func VerifyDecision(roster *Roster, req *Verified, env *Envelope, now time.Time)
 		return nil, ErrUnknownApprover
 	}
 	signer := approver.Presence
-	if env.Key == KID(approver.Transport) {
-		signer = approver.Transport
+	if env.Key == KID(approver.Transport) && peek.Decision == Deny {
+		signer = approver.Transport // a denial needs no presence
 	}
 	var d Decision
 	if err := env.Verify("decision", signer, &d); err != nil {
@@ -466,6 +469,39 @@ func CharStroke(s Stroke) bool {
 // Chars maps a secret to strokes per character (one, or a dead key and its
 // base); it fails before anything is typed if a character has none, or the
 // map has a stroke that isn't a CharStroke.
+// Check reports how many characters secret has when the map can type
+// each of them, without copying it.
+func (m *KeyMap) Check(secret []byte) (int, error) {
+	n := 0
+	for rest := secret; len(rest) > 0; n++ {
+		strokes, size := m.Next(rest)
+		if strokes == nil {
+			return 0, errors.New("the secret has a character the target's input source can't type")
+		}
+		for _, s := range strokes {
+			if !CharStroke(s) {
+				return 0, fmt.Errorf("the key map has a stroke that types no character (0x%02x, modifiers 0x%02x)", s[0], s[1])
+			}
+		}
+		rest = rest[size:]
+	}
+	return n, nil
+}
+
+// Next returns the strokes of the first character of rest and its length
+// in bytes; nil strokes when the map can't type it.
+func (m *KeyMap) Next(rest []byte) ([]Stroke, int) {
+	r, size := utf8.DecodeRune(rest)
+	if r == utf8.RuneError && size <= 1 {
+		return nil, 1
+	}
+	strokes, ok := m.Map[string(r)]
+	if !ok || len(strokes) == 0 || len(strokes) > 2 {
+		return nil, size
+	}
+	return strokes, size
+}
+
 func (m *KeyMap) Chars(secret string) ([][]Stroke, error) {
 	var out [][]Stroke
 	for _, r := range secret {

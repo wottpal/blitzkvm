@@ -28,20 +28,33 @@ const FeatureApprovals = "approvals"
 
 type approvalsHID struct{ s *Server }
 
-func (h approvalsHID) Click(_ context.Context, x, y float64) error {
+func (h approvalsHID) Click(ctx context.Context, x, y float64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	h.s.mu.Lock()
 	defer h.s.mu.Unlock()
 	h.s.appendInputLocked("approvals", "click", fmt.Sprintf("%.4f,%.4f", x, y))
 	return nil
 }
 
-func (h approvalsHID) Type(_ context.Context, strokes []wire.Stroke) error {
+func (h approvalsHID) Type(ctx context.Context, strokes []wire.Stroke) error {
 	h.s.mu.Lock()
 	defer h.s.mu.Unlock()
 	for _, st := range strokes {
+		if err := ctx.Err(); err != nil { // as the firmware, between strokes
+			return err
+		}
 		h.s.appendInputLocked("approvals", "stroke", fmt.Sprintf("%02x:%02x", st[0], st[1]))
 	}
 	return nil
+}
+
+// Hold is recorded; the emulator's session input isn't blocked.
+func (h approvalsHID) Hold(on bool) {
+	h.s.mu.Lock()
+	defer h.s.mu.Unlock()
+	h.s.appendInputLocked("approvals", "hold", fmt.Sprint(on))
 }
 
 type dirStore struct{ dir string }
@@ -188,7 +201,8 @@ func (s *Server) setApprovalsEnabled(raw any) (broker.State, error) {
 		return broker.State{}, errors.New("missing enabled")
 	}
 	if !params.Enabled {
-		return s.approvals.State(), s.approvals.Disable()
+		err := s.approvals.Disable()
+		return s.approvals.State(), err
 	}
 	var env wire.Envelope
 	if err := json.Unmarshal(params.Roster, &env); err != nil {

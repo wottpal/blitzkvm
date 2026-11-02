@@ -77,15 +77,15 @@ func (l *linkConn) writer() {
 type deadliner interface{ SetReadDeadline(time.Time) error }
 
 type linkMsg struct {
-	Op       string          `json:"op"`
-	Auth     *wire.Envelope  `json:"auth"`
-	Roster   *wire.Envelope  `json:"roster"`
-	Ask      *wire.Envelope  `json:"ask"`
-	ID       string          `json:"id"`
-	Seq      int             `json:"seq"`
-	Step     *wire.Step      `json:"step"`
-	OK       bool            `json:"ok"`
-	Note     string          `json:"note"`
+	Op     string         `json:"op"`
+	Auth   *wire.Envelope `json:"auth"`
+	Roster *wire.Envelope `json:"roster"`
+	Ask    *wire.Envelope `json:"ask"`
+	ID     string         `json:"id"`
+	Seq    int            `json:"seq"`
+	Step   *wire.Step     `json:"step"`
+	OK     bool           `json:"ok"`
+	Note   string         `json:"note"`
 }
 
 // ServeLink serves the target daemon on one host-link connection until it
@@ -317,7 +317,7 @@ func (b *Broker) takeAsk(l *linkConn, env *wire.Envelope) (*wire.Envelope, error
 		return nil, errors.New("too many requests")
 	}
 	b.asks = append(b.asks, now)
-	p := &pending{link: l, verified: verified, env: reqEnv, sealKey: seal, state: "pending"}
+	p := &pending{link: l, verified: verified, env: reqEnv, sealKey: seal, state: "pending", pushed: now}
 	b.pending[ask.ID] = p
 	b.record(p, "")
 	var ids []string
@@ -327,7 +327,7 @@ func (b *Broker) takeAsk(l *linkConn, env *wire.Envelope) (*wire.Envelope, error
 	b.mu.Unlock()
 	b.cfg.Logf("approvals: request %s (%s)", ask.ID, ask.Kind)
 	for _, id := range ids {
-		b.deliver(id, map[string]any{"op": "request", "request": reqEnv}, ask.ID)
+		b.deliver(id, map[string]any{"op": "request", "request": reqEnv}, &push{collapse: ask.ID})
 	}
 	return reqEnv, nil
 }
@@ -343,12 +343,15 @@ func (b *Broker) finish(id, target, state, note string) {
 	if state == "done" && p.state != "approved" {
 		state = "failed"
 	}
+	leftPending := p.state == "pending"
 	p.state, p.ended = state, b.cfg.Now()
 	wipe(p.secret)
 	p.secret = nil
+	b.stopLocked(p)
 	b.record(p, note)
 	b.mu.Unlock()
-	b.broadcast(map[string]any{"op": "status", "id": id, "state": state, "note": note})
+	b.applyHold()
+	b.status(id, map[string]any{"op": "status", "id": id, "state": state, "note": note}, leftPending)
 }
 
 // linkGone fails what this connection was still driving (not what a newer
@@ -385,12 +388,24 @@ func (b *Broker) step(ctx context.Context, target, id string, s *wire.Step) (int
 	if s == nil {
 		return 0, errors.New("no step")
 	}
+	actions := 0
+	for _, set := range []bool{s.Click != nil, s.Secret != nil, len(s.Keys) > 0, s.Erase > 0} {
+		if set {
+			actions++
+		}
+	}
+	if actions != 1 {
+		return 0, errors.New("a step does exactly one thing")
+	}
 	b.mu.Lock()
 	p := b.pending[id]
 	switch {
 	case p == nil || p.verified.Ask.Target != target:
 		b.mu.Unlock()
 		return 0, errors.New("unknown request")
+	case b.roster == nil || b.roster.Target(target) == nil:
+		b.mu.Unlock()
+		return 0, errors.New("the target left the roster")
 	case p.state != "approved" || !wire.Typing(p.verified.Ask.Kind):
 		b.mu.Unlock()
 		return 0, errors.New("the request isn't approved for screen steps")
@@ -410,21 +425,31 @@ func (b *Broker) step(ctx context.Context, target, id string, s *wire.Step) (int
 		}
 		secret, p.secret, p.secretSet = p.secret, nil, true
 	}
-	b.mu.Unlock()
-	defer wipe(secret)
-
-	b.typing.Lock()
-	defer b.typing.Unlock()
+	// Abortable from here on, also while it waits for another step.
 	stepCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	b.mu.Lock()
 	p.stepCancel = cancel
 	b.mu.Unlock()
+	defer wipe(secret)
 	defer func() {
 		b.mu.Lock()
 		p.stepCancel = nil
 		b.mu.Unlock()
 	}()
+	select {
+	case b.typing <- struct{}{}:
+	case <-stepCtx.Done():
+		return 0, errors.New("stopped before it started")
+	}
+	defer func() { <-b.typing }()
+	// The request may have ended (cancelled, expired, failed) while this
+	// step waited its turn.
+	b.mu.Lock()
+	live := b.pending[id] == p && p.state == "approved" && b.cfg.Now().Sub(p.decided) <= stepWindow
+	b.mu.Unlock()
+	if !live || stepCtx.Err() != nil {
+		return 0, errors.New("the request ended before its step")
+	}
 	switch {
 	case s.Click != nil:
 		if s.Click.X < 0 || s.Click.X > 1 || s.Click.Y < 0 || s.Click.Y > 1 {
@@ -432,19 +457,24 @@ func (b *Broker) step(ctx context.Context, target, id string, s *wire.Step) (int
 		}
 		return 0, b.cfg.HID.Click(stepCtx, s.Click.X, s.Click.Y)
 	case s.Secret != nil:
-		chars, err := s.Secret.Chars(string(secret))
+		// Character by character from the bytes (which are wiped), never
+		// the whole secret as a string.
+		n, err := s.Secret.Check(secret)
 		if err != nil {
 			return 0, err
 		}
-		for i, strokes := range chars {
+		i := 0
+		for rest := secret; len(rest) > 0; i++ {
+			strokes, size := s.Secret.Next(rest)
 			if err := stepCtx.Err(); err != nil {
-				return i, fmt.Errorf("stopped after %d of %d characters", i, len(chars))
+				return i, fmt.Errorf("stopped after %d of %d characters", i, n)
 			}
 			if err := b.cfg.HID.Type(stepCtx, strokes); err != nil {
 				return i, err
 			}
+			rest = rest[size:]
 		}
-		return len(chars), nil
+		return i, nil
 	case len(s.Keys) > 0:
 		if err := wire.CheckKeys(s.Keys); err != nil {
 			return 0, err

@@ -124,7 +124,9 @@ per line, at most 64 KiB. One authenticated daemon connection at a time; a newer
 
 Steps, for approved asks of kind `onepassword`, `securityagent` and `unlock` only, within 60 s of the approval. The
 daemon sends the next step only after the previous one's `stepped`; `{"op":"abort","id":…}` stops the running step at
-once (between characters), and it answers `ok: false`.
+once (between characters), and it answers `ok: false`. From the approval of such an ask until it ends (`done`, a
+failure, the link closing), the broker holds the JetKVM's other input: keyboard and pointer reports of its sessions
+are dropped, so nothing lands between the steps or between the characters of a secret.
 
 - `{"click":{"x":0.70,"y":0.55}}`: an absolute pointer click, as fractions of the JetKVM's display.
 - `{"keys":[[hid, mods], …]}`: key strokes (HID usage, modifier byte), only Return, Escape, Tab, Backspace, Shift
@@ -152,7 +154,7 @@ same messages, wrapped (below). Each WebSocket message is one JSON object.
 
 | Direction | Message |
 |---|---|
-| B→A | `{"op":"roster","roster":env}`, `{"op":"request","request":env}`, `{"op":"status","id":…,"state":"approved\|denied\|done\|failed\|expired\|cancelled","by":id,"note":…}`, `{"op":"enrolling","enroll":env}` (to owners) |
+| B→A | `{"op":"roster","roster":env}`, `{"op":"request","request":env}` (a repeat to an iPhone adds `"repeat":n`, below), `{"op":"status","id":…,"state":"approved\|denied\|done\|failed\|expired\|cancelled","by":id,"note":…}`, `{"op":"enrolling","enroll":env}` (to owners) |
 | A→B | `{"op":"decision","decision":env}`, `{"op":"roster","roster":env}` (an owner's new roster), `{"op":"pairing","pairing":env}` (owner-signed, `t = "pairing"`, payload `{"v":1,"hash":b64(SHA-256 of the token),"expires":n}`), `{"op":"unlock","unlock":env}` (`t = "unlock"`, payload `{"v":1,"broker":kid,"target":kid,"approver":id,"nonce":b64,"issued":n}`, signed by the approver's transport key: neither the relay nor the JetKVM can make a locked Mac ask for its password), `{"op":"sync"}` (asks for the roster and the pending requests) |
 | new→B | `{"op":"enroll","enroll":env}` with `t = "enroll"`, payload `{"v":1,"pairing":b64(SHA-256 of the token),"approver":{…roster approver…},"mac":b64}`, signed by the new presence key |
 
@@ -165,6 +167,10 @@ the MAC (the broker and the relay never see the token, so they can't enroll a de
 signing a roster that contains the new approver. The new device takes its first roster only from the inviting owner
 and not older than the QR code's `seq`.
 
+Delivery: an owner's app sends its open pairings again with every `sync` (when a channel comes up), and keeps its
+newest roster pending until the broker answers with it: a broker that answers a `sync` with an older roster gets the
+pending one again. A closed pairing code is forgotten at once (its enrollment is no longer offered).
+
 ## Relay
 
 `relay/` (Cloudflare Worker, one Durable Object per broker id). The relay authenticates every party by key, holds
@@ -174,10 +180,19 @@ no roster of its own and sees only boxes.
   `{"op":"auth","auth":env}` (`t = "relay"`, payload `{"v":1,"role":"broker","broker":kid,"key":b64,"nonce":b64,
   "issued":n}`, signed by the broker key, `kid(key)` = the URL's broker); relay → `{"op":"ready"}` once it checks out
   (on approver sockets too). Then broker → relay:
-  `{"op":"allow","approvers":[{"id":…,"transport":b64,"platform":…}]}` (who may use this broker's relay), and
-  `{"op":"send","to":id,"box":b64,"push":{"collapse":id}}` (deliver to the approver: its relay WebSocket if one is
-  open, else queue it for 2 minutes, and push to its phones only when `push` is present: requests carry it, status
-  and roster updates don't). Relay → broker: `{"op":"from","from":id,"box":b64}`.
+  `{"op":"allow","approvers":[{"id":…,"transport":b64,"platform":…}]}` (who may use this broker's relay),
+  `{"op":"pairing","hash":b64,"expires":n}` (a live pairing, by its hash: the relay takes enrollments only for these),
+  and `{"op":"send","to":id,"box":b64,"push":{"collapse":id,"quiet":true}}` (deliver to the approver: its relay
+  WebSocket if one is open, else queue it for 2 minutes, and push to its phones only when `push` is present;
+  `quiet` asks for a push without sound). Relay → broker: `{"op":"from","from":id,"box":b64}`. The broker sends the
+  allow list and its live pairings again on every connection; an approver it drops from the allow list loses its
+  queued boxes, its phones' tokens and its socket.
+- What the broker pushes, to the roster's iPhones (`platform` `ios`): a request when it arrives (collapse id = the
+  ask's id; to Macs on the relay too, where the box goes to their socket instead), again every 10 s (`onepassword`)
+  or 20 s (other kinds) while it's pending and more than 5 s from expiring, each as `{"op":"request",…,"repeat":n}`
+  under the collapse id `<id>.<n>` (a notification of its own: iOS doesn't promise to alert again for a replaced
+  one), and once it leaves pending the status, quiet, under `<id>.end`, which replaces the request's notification.
+  Status and roster updates otherwise carry no push.
 - `GET /v1/b/{broker}/approver/{id}` (WebSocket, for Macs): hello/auth as above with `"role":"approver"` signed by
   that approver's transport key. Approver → relay `{"op":"box","box":b64}`; relay → approver the broker's boxes as
   `{"op":"box","box":b64}`.
@@ -185,12 +200,30 @@ no roster of its own and sees only boxes.
   `"outbox"` for the POSTs; the relay requires it to match.
 - `POST /v1/b/{broker}/inbox`, `POST /v1/b/{broker}/devices`, `POST /v1/b/{broker}/outbox` (phones): the body is an
   envelope (`t = "relay"`) signed by the approver's transport key, payload `{"v":1,"role":"approver","broker":kid,
-  "approver":id,"endpoint":…,"issued":n,"nonce":b64, …}` plus `"box"` (inbox), `"apns":{"token":hex,"env":"sandbox|production"}`
-  (devices) or nothing (outbox: returns the queued boxes for that approver). The relay accepts it when the approver
-  is in the broker's allow list, `issued` is within 120 s and the nonce is new.
-- `POST /v1/b/{broker}/enroll` (a device that isn't an approver yet): body `{"box":b64}` (an `enroll` message sealed
-  to the broker), at most 8 KiB, unauthenticated, at most 10 per hour per broker. The relay forwards it as
-  `{"op":"from","from":"","box":…}`; the broker accepts nothing but `enroll` from an empty `from`.
-- Push: an APNs alert (`mutable-content`, `interruption-level` `time-sensitive`, category `APPROVAL`,
-  `apns-collapse-id`), with `{"bka":{"b":broker,"x":box}}` when the box fits (3.5 KB), else without `x` (the app
-  fetches its outbox).
+  "approver":id,"endpoint":…,"issued":n,"nonce":b64, …}` plus:
+  - inbox: `"box"`, at most 60 a minute per approver;
+  - devices: `"apns":{"token":hex,"env":"sandbox|production"}` adds a token (4 per approver, newest kept);
+    `"apns":{"remove":true,"token":hex}` removes one, `"apns":{"remove":true}` all of the approver's (an iPhone that
+    forgets the JetKVM);
+  - outbox: `"ack":n`, the `last` of the previous answer (0 at first). The answer is `{"boxes":[b64…],"last":n}`, and
+    boxes stay queued until a later request acknowledges them, so an answer lost on the way loses nothing. Without
+    `ack` the boxes leave the queue as they are returned.
+
+  The relay accepts the request when the approver is in the broker's allow list, `issued` is within 120 s and the
+  nonce is new. Any failed check answers `401 unauthorized`, without saying which.
+- `POST /v1/b/{broker}/enroll` (a device that isn't an approver yet): body `{"box":b64,"pairing":b64}` (an `enroll`
+  message sealed to the broker, and the pairing's hash), at most 8 KiB, unauthenticated. The relay takes it only for
+  a pairing the broker announced and that hasn't expired, 3 per pairing, 5 an hour per client address (IPv6: per
+  /64) and 30 an hour per broker, and forwards it as `{"op":"from","from":"","box":…}`; the broker accepts nothing
+  but `enroll` from an empty `from`.
+- Push: an APNs alert (`mutable-content`, `interruption-level` `time-sensitive`, category `APPROVAL`, sound,
+  `apns-collapse-id`; a quiet one `interruption-level` `passive`, no sound, no category), with
+  `{"bka":{"b":broker,"x":box}}` when the box fits (3.5 KB), else without `x` (the app fetches its outbox). At most
+  360 pushes an hour per broker, of which 300 repeats, and 2000 a day per device token (a request takes up to 7 per
+  iPhone). A device token gets at most 12 alerting pushes a minute and 120 an hour; beyond those a push still comes,
+  quietly.
+- Sockets: at most 16 waiting for their auth (10 s each; the oldest goes first), one per party once authenticated
+  (a newer one replaces it). A socket silent for 75 s is closed (the broker pings every 30 s, Macs every 20 s). A
+  broker not seen for 90 days is forgotten with everything queued for it.
+- `BROKERS` (optional, a Worker variable): the broker ids this relay serves, separated by spaces or commas; others
+  get `404`. Unset, any broker key may use it.
