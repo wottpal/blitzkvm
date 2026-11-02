@@ -25,7 +25,7 @@ How the app protects sessions is described in the README under [Privacy and secu
 Known limits of remote approvals, not vulnerabilities by themselves (reports that go past them are welcome):
 
 - **Root on the remote computer** can fake everything the daemon reports there.
-- **Installing on the remote computer** sends its password through the user's own SSH login (`remote/README.md`, Threat model): a process already running as that user can read it, or swap the target key, during an install, a reinstall or a removal.
+- **Installing on the remote computer** the first time sends its password through the user's own SSH login (`remote/README.md`, Threat model): a process already running as that user can read it, or swap the target key. Updates and removal go through the installed daemon on an owner's signed order instead, without the password; an order that runs anything but the files the owner signed is in scope.
 - **Macs without a Secure Enclave** (virtual machines) keep the approver keys in the login keychain; Touch ID then guards them only in the app.
 - **The relay** can delay or drop boxes and pushes, and sees who talks to which JetKVM and when. Any broker key may use a relay unless its `BROKERS` list names the brokers; a broker reaches only the phones that registered with it.
 

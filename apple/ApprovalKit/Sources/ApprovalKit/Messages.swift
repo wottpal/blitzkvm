@@ -373,6 +373,61 @@ public struct ScreenShot: Codable, Sendable {
     }
 }
 
+/// An owner's order to the target daemon to update or remove the remote side
+/// (PROTOCOL.md, Maintenance): signed with the owner's presence key, so the
+/// daemon (root) needs no password. `update` names the staged files by their
+/// SHA-256 (hex); `remove` names uninstall.sh alone.
+public struct MaintainOrder: Codable, Sendable, Equatable {
+    public static let update = "update", remove = "remove"
+    /// What an update stages, besides nothing else.
+    public static let updateFiles: Set<String> = ["blitzkvm-remote", "pam_blitzkvm.so", "install.sh", "uninstall.sh",
+                                                  "xyz.scio.blitzkvm.remote.plist", "xyz.scio.blitzkvm.remote.agent.plist"]
+    public static let removeFiles: Set<String> = ["uninstall.sh"]
+
+    public var v = 1
+    public var broker: String
+    public var target: String
+    public var action: String
+    public var nonce: B64Data
+    public var issued: Int64
+    /// The staging directory the files are in (the user's: they are copied
+    /// and checked before anything uses them).
+    public var stage: String
+    public var files: [String: String]
+
+    public init(broker: String, target: String, action: String, stage: String, files: [String: String], issued: Int64) {
+        self.broker = broker; self.target = target; self.action = action; self.stage = stage; self.files = files
+        self.issued = issued; nonce = B64Data(Wire.randomBytes(32))
+    }
+
+    /// The files an action stages.
+    public static func files(for action: String) -> Set<String>? {
+        switch action {
+        case update: updateFiles
+        case remove: removeFiles
+        default: nil
+        }
+    }
+
+    /// Checks an order against the roster: an owner signed it with its
+    /// presence key, for this broker and target, within the clock skew, with
+    /// the files its action stages.
+    public static func verify(_ env: Envelope, roster: Roster, target: String, now: Int64) throws -> MaintainOrder {
+        guard let owner = roster.approvers.first(where: { Wire.kid($0.presence.data) == env.k }), roster.isOwner(owner.id) else {
+            throw WireError.roster("not signed by an owner")
+        }
+        let o = try env.open(MaintainOrder.self, type: "maintain", key: owner.presence.data)
+        guard o.v == 1, o.broker == roster.broker.id, o.target == target else { throw WireError.invalid("order for another target") }
+        guard abs(o.issued - now) <= Limits.clockSkew else { throw WireError.invalid("order outside the clock skew") }
+        guard o.nonce.data.count == 32, let want = files(for: o.action), Set(o.files.keys) == want,
+              o.files.values.allSatisfy({ $0.count == 64 && $0.allSatisfy(\.isHexDigit) && $0 == $0.lowercased() }),
+              o.stage.range(of: #"^(/private)?/tmp/blitzkvm-remote\.[A-Za-z0-9]{6,}$"#, options: .regularExpression) != nil else {
+            throw WireError.invalid("order fields")
+        }
+        return o
+    }
+}
+
 /// A request's screen, as approvers show it.
 public struct RequestScreen: Equatable, Sendable {
     public let jpeg: Data

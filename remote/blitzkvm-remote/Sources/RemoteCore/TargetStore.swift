@@ -135,7 +135,7 @@ public struct TargetStore {
 
     /// Writes a new file next to `url` with `mode` from the start, then
     /// renames it into place.
-    static func writeAtomically(_ data: Data, to url: URL, mode: mode_t) throws {
+    public static func writeAtomically(_ data: Data, to url: URL, mode: mode_t) throws {
         let tmp = url.path + ".\(getpid()).tmp"
         unlink(tmp)
         let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, mode)

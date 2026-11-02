@@ -179,6 +179,17 @@ Delivery: an owner's app sends its open pairings again with every `sync` (when a
 newest roster pending until the broker answers with it: a broker that answers a `sync` with an older roster gets the
 pending one again. A closed pairing code is forgotten at once (its enrollment is no longer offered).
 
+## Maintenance: owner → target daemon
+
+An owner's order to update or remove the remote side, without the remote Mac's password: `t = "maintain"`,
+payload `{"v":1,"broker":kid,"target":kid,"action":"update|remove","nonce":b64(32),"issued":n,"stage":path,
+"files":{name:sha256 hex}}`, signed by the owner's presence key. It reaches the daemon over its local socket
+(`{"op":"maintain","order":env}`, from `blitzkvm-remote maintain` in the user's session), not through the broker.
+The daemon accepts it only from an owner of its own roster, for its target and the roster's broker, within ±60 s, once
+per nonce, with exactly the files the action needs (`update`: blitzkvm-remote, pam_blitzkvm.so, install.sh,
+uninstall.sh and the two launchd plists; `remove`: uninstall.sh), each of whose copy in a root-only directory has the
+signed hash, and binaries signed with the daemon's own Team ID. `remote/README.md` has the steps.
+
 ## Relay
 
 `relay/` (Cloudflare Worker, one Durable Object per broker id). The relay authenticates every party by key, holds

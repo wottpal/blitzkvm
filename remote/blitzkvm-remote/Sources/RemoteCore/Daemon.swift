@@ -38,6 +38,13 @@ public final class Daemon {
         // SCDynamicStore, not Host: Host's name can wait seconds on reverse DNS.
         public var computerName = (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? "this Mac"
         public var driverTuning = ScreenDriver.Tuning()
+        /// Maintenance orders: the Team ID new binaries must be signed by
+        /// (this daemon's own; nil: no orders), where their job runs, how
+        /// signatures are checked and how the job is started.
+        public var maintainTeam: String?
+        public var maintainRoot = MaintainRoot.system
+        public var codeCheck: (URL, String) -> Bool = Maintenance.satisfies
+        public var launchMaintenance: (URL) throws -> Void = Maintenance.launch
 
         public init(paths: Paths) { self.paths = paths }
     }
@@ -55,6 +62,8 @@ public final class Daemon {
     /// Unlock requests seen (nonce -> until) and each approver's last one.
     var unlockNonces: [Data: Int64] = [:]
     var lastUnlock: [String: Int64] = [:]
+    /// Maintenance orders seen (nonce -> until).
+    var maintainNonces: [Data: Int64] = [:]
     var link: LinkClient!
     var listener: Int32 = -1
     var clients: [ObjectIdentifier: Client] = [:]

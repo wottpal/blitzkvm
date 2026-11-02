@@ -105,6 +105,64 @@ public enum RemoteInstall {
     /// Removes the installation (uninstall.sh, sent inline: nothing to stage).
     public static func uninstallCommand(script: String) -> String { sudo(script) }
 
+    // MARK: Through the daemon
+
+    /// Where the remote side lives (install.sh's STATE): root's, readable.
+    public static let stateDirectory = "/Library/Application Support/BlitzKVM/Remote"
+
+    /// An owner's signed order (MaintainOrder) on standard input, handed to
+    /// the installed daemon as the user: no password. The binary is root's,
+    /// in root's directory; the daemon checks the order and the files.
+    public static let maintainCommand = quote(stateDirectory + "/blitzkvm-remote") + " maintain"
+
+    /// The order for the payload's files: an update stages them all, a
+    /// removal uninstall.sh alone. nil when the payload isn't what the
+    /// daemon takes.
+    public static func order(_ action: String, broker: String, target: String, staged: Staged, files: [String: String],
+                             issued: Int64) -> MaintainOrder? {
+        guard let names = MaintainOrder.files(for: action), names.isSubset(of: files.keys) else { return nil }
+        return MaintainOrder(broker: broker, target: target, action: action, stage: staged.directory,
+                             files: files.filter { names.contains($0.key) }, issued: issued)
+    }
+
+    /// How an order went: the daemon took it (0), refused it (1, with why),
+    /// or can't take orders (2, or a daemon from before them): then only
+    /// the password path is left.
+    public enum MaintainResult: Equatable {
+        case started, refused(String), unsupported
+    }
+
+    public static func maintainResult(_ result: HostLinkRun.Result) -> MaintainResult {
+        let said = (result.stdout + "\n" + result.stderr).split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        switch result.exitCode {
+        case 0: return .started
+        case 1 where said.contains(where: { $0.hasPrefix("BlitzKVM: ") }):
+            let why = said.last { $0.hasPrefix("BlitzKVM: ") }!.dropFirst(10)
+            return .refused(why.prefix(1).uppercased() + why.dropFirst())
+        default: return .unsupported
+        }
+    }
+
+    /// The job's state: running, done, failed: <why>, or gone (removed).
+    public static let statusCommand = "if [ -d \(quote(stateDirectory)) ]; then cat \(quote(stateDirectory + "/maintain.status")) "
+        + "2>/dev/null || echo running; else echo gone; fi"
+
+    public enum MaintainStatus: Equatable {
+        case running, done, gone, failed(String)
+    }
+
+    public static func maintainStatus(_ output: String) -> MaintainStatus {
+        let line = output.split(separator: "\n").last.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        switch line {
+        case "done": return .done
+        case "gone": return .gone
+        case let s where s.hasPrefix("failed: "):
+            let why = s.dropFirst(8).replacingOccurrences(of: "install: ", with: "").replacingOccurrences(of: "uninstall: ", with: "")
+            return .failed(why.prefix(1).uppercased() + why.dropFirst())
+        default: return .running
+        }
+    }
+
     /// Removes the staging directory (as the user).
     public static func cleanupCommand(staging: String) -> String? {
         isStagingDirectory(staging) ? "rm -rf \(quote(staging))" : nil

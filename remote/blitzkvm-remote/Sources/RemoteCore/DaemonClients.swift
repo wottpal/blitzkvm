@@ -92,6 +92,7 @@ extension Daemon {
         switch m.op {
         case "confirm": confirm(c, m)
         case "pam": pam(c, m)
+        case "maintain": maintain(c, m)
         case "agent": attachAgent(c)
         default: c.conn.close()
         }

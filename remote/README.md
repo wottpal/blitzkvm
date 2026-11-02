@@ -16,6 +16,7 @@ Modes of `blitzkvm-remote`:
 - **`agent`** (LaunchAgent `xyz.scio.blitzkvm.remote.agent`, Aqua sessions): reports what the session shows, twice a second and only when it changed: the frontmost app, windows at layer 101 (owner and bounds) and SecurityAgent's dialog windows, the main display's size, the input source and its key map, Caps Lock. Brings an app back to the front when the daemon asks. With `KeepOnePasswordRunning` set in its user defaults (domain `xyz.scio.blitzkvm.remote`; JetKVM Setup's Keep 1Password Running sets it over SSH, no sudo), it opens 1Password again in the background a few seconds after it quits, at most every 30 s, and only the app whose signature is 1Password's.
 - **`confirm "QUESTION" [--grant] [--timeout 120] [--detail TEXT]`**: for scripts and agents. Prints `BlitzKVM: approve on your iPhone or Mac (code 47)…` to stderr; exits 0 approved, 1 denied, 2 no answer or unavailable.
 - **`pam --user U --service S --tty T --pid P`**: run by the PAM module inside sudo. Lines it prints reach the terminal; exit 0 only on a verified approval, 3 at once while the installer's `maintenance` flag exists.
+- **`maintain < ORDER`**: hands an owner's signed update or removal order (below) to the daemon; the BlitzKVM app runs it as the user over clipboard sync's login. Exits 0 once the daemon runs the order, 1 when it refused it (the line says why), 2 when it takes no orders.
 
 ## What it needs
 
@@ -28,7 +29,8 @@ Nothing from the user but the install: no Accessibility, Screen Recording, Autom
 - Typing happens only on evidence root checked right before each step: the process holding secure input, identified by its code signature (1Password's Developer ID, Apple's SecurityAgent or loginwindow), and the lock state; window facts count only from an agent signed like the daemon.
 - While the broker types a secret, the daemon reads secure input itself every 20 ms and aborts the step the moment the holder or the lock changes; it erases what the broker reports typed only while that field still has the keyboard.
 - The PAM module runs only a binary that root owns in directories only root can change, and falls back to the password on anything but a verified approval.
-- Not covered: the install. The app runs `install.sh` and `uninstall.sh` over clipboard sync's SSH login, as the user, with `/usr/bin/sudo -S` and the Mac password on stdin; the user's login shell starts that command and reads its startup files (`~/.zshenv`) first. Anything already running as that user can change those files, or the key's line in `~/.ssh/authorized_keys`, and so read the password or swap the target key the owner signs. Install on a Mac whose user account you trust, as you would type the password there yourself. Updating and removing through the root daemon instead (an owner-signed request, a package the daemon checks) would close this; it isn't built yet.
+- Updates and removal need no password: an owner orders them (below), and the daemon checks the order and every file itself.
+- Not covered: the first install (and an update or removal of a daemon from before orders). The app runs `install.sh` and `uninstall.sh` over clipboard sync's SSH login, as the user, with `/usr/bin/sudo -S` and the Mac password on stdin; the user's login shell starts that command and reads its startup files (`~/.zshenv`) first. Anything already running as that user can change those files, or the key's line in `~/.ssh/authorized_keys`, and so read the password or swap the target key the owner signs. Install on a Mac whose user account you trust, as you would type the password there yourself.
 
 ## How it works
 
@@ -51,11 +53,21 @@ Asks wait 120 s (the protocol's longest), 1Password's 60 s; `confirm --timeout` 
 
 **Key map:** for every printable ASCII character, the plainest strokes on the active input source (`UCKeyTranslate` with no modifier, Shift, Option, Shift+Option; a character only a dead key types is the dead key, then Space), as HID usages for the JetKVM's keyboard. On a keyboard macOS treats as ISO, the usages of the two keys it swaps (§ and `) swap too. The daemon drops a map from the agent unless every entry is one character typed by one or two character strokes (usages 0x04–0x27, 0x2C–0x38 or 0x64, with Shift and Option at most), the broker's `wire.CharStroke`.
 
+## Updates and removal
+
+Once installed, the remote side updates and removes itself on an owner's order, with no password and no sudo:
+
+1. The app stages the files as the user (as for an install) and signs a `maintain` order with its owner key (one Touch ID): the broker and target, `update` or `remove`, a nonce, the time, the staging directory and each file's SHA-256 (all six for an update, `uninstall.sh` for a removal). `blitzkvm-remote maintain` hands it to the daemon over the local socket.
+2. The daemon takes it only from an owner in its own roster, signed with that owner's presence key, for this target, within 60 s of its clock, and once (nonce). It copies each named file (a plain file, no link) into a new directory only root can change, checks its hash there, and checks that the new `blitzkvm-remote` and `pam_blitzkvm.so` are signed with its own Team ID and identifiers. A daemon without a Developer ID takes no orders.
+3. It writes `running` to `maintain.status` and starts a launchd job of its own (`xyz.scio.blitzkvm.remote.maintain`), so its own restart doesn't stop the job. The job runs `install.sh --update` (keeps the roster, link.json and whether sudo approvals are installed) or `uninstall.sh` from that directory, then writes `done` or `failed: …` to `maintain.status` (a removal leaves no state directory) and appends its output to the log.
+
+The app reads `maintain.status` to report the outcome. A daemon from before orders answers that it takes none, and the app falls back to the password path.
+
 ## Files
 
 | Where | What |
 |---|---|
-| `/Library/Application Support/BlitzKVM/Remote/` | `blitzkvm-remote`, `target.key`, `roster.json`, `link.json`, `maintenance` (installer only) |
+| `/Library/Application Support/BlitzKVM/Remote/` | `blitzkvm-remote`, `target.key`, `roster.json`, `link.json`, `maintenance` (installer only), `maintain.status` (the last order's outcome) |
 | `/usr/local/lib/pam/pam_blitzkvm.so`, `/etc/pam.d/sudo_local` | sudo approvals (`install.sh --no-sudo` leaves them out) |
 | `/Library/LaunchDaemons/xyz.scio.blitzkvm.remote.plist`, `/Library/LaunchAgents/xyz.scio.blitzkvm.remote.agent.plist` | launchd jobs |
 | `/Library/Logs/BlitzKVM/remote.log` | the daemon's log; both also log to the unified log (subsystem `xyz.scio.blitzkvm.remote`) |

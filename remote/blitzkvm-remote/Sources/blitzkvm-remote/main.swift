@@ -12,6 +12,7 @@ let usage = """
            blitzkvm-remote agent [--user-mode] [--socket PATH]
            blitzkvm-remote confirm QUESTION [--grant] [--timeout SECONDS] [--detail TEXT] [--user-mode] [--socket PATH]
            blitzkvm-remote pam --user U --service S --tty T --pid P [--state DIR] [--socket PATH]
+           blitzkvm-remote maintain [--user-mode] [--socket PATH] < ORDER
     """
 
 /// `--flag`, `--key value` and positionals, in any order.
@@ -87,7 +88,10 @@ func runDaemon(_ o: Options) -> Never {
         config.endpoint = endpoint
     }
     // The agent's word drives clicks: it must be signed like this daemon.
-    if let team = CodeSigning.ownIdentity()?.team { config.agentRequirement = CodeSigning.agentRequirement(team: team) }
+    if let team = CodeSigning.ownIdentity()?.team {
+        config.agentRequirement = CodeSigning.agentRequirement(team: team)
+        config.maintainTeam = team // new binaries must be signed like this one
+    }
     config.insecureAgent = o.flags.contains("--insecure-agent")
     if config.insecureAgent {
         Log.info("WARNING: --insecure-agent: any local process may act as the agent and steer screen asks; for tests only")
@@ -130,6 +134,22 @@ func runConfirm(_ o: Options) -> Never {
     exit(outcome.confirmExit)
 }
 
+/// An owner's signed update or removal order (the BlitzKVM app sends it over
+/// clipboard sync's login, as the user): read from standard input, handed
+/// to the daemon, which checks it. Exit 0 once the daemon runs it.
+func runMaintain(_ o: Options) -> Never {
+    let input = FileHandle.standardInput.readDataToEndOfFile()
+    guard input.count <= 64 << 10, let order = try? JSONDecoder().decode(Envelope.self, from: input) else {
+        fail("blitzkvm-remote maintain: wants a signed order on standard input")
+    }
+    let (outcome, text) = RequesterClient.request(socket: o.paths.socket, LocalMessage(op: "maintain", order: order), timeout: 60,
+                                                  requireRoot: !o.userMode) {
+        print(Display.safe($0, maxBytes: 1024))
+    }
+    if let text, !text.isEmpty { print(Display.safe(text, maxBytes: 1024)) }
+    exit(outcome == .approved ? 0 : outcome == .unavailable ? 2 : 1)
+}
+
 /// Run as root by pam_blitzkvm.so inside sudo: its stdout goes to the
 /// user's terminal line by line; exit 0 only on a verified approval.
 func runPam(_ o: Options) -> Never {
@@ -158,5 +178,6 @@ case "agent":
     Agent(socket: options.paths.socket, checkServerIsRoot: !options.userMode).run()
 case "confirm": runConfirm(options)
 case "pam": runPam(options)
+case "maintain": runMaintain(options)
 default: fail(usage)
 }

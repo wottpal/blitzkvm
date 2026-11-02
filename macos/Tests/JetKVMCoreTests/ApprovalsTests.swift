@@ -339,6 +339,46 @@ final class ApprovalsTests: XCTestCase {
         XCTAssertTrue(command.contains("exec </dev/null"), "the password line doesn't reach the steps")
     }
 
+    /// An update order the app signs verifies the way the daemon checks it,
+    /// and the daemon's answers and job states read back right.
+    func testMaintenanceThroughTheDaemon() throws {
+        let (center, k) = try owner(withTarget: true)
+        let roster = try XCTUnwrap(center.roster(brokerKey.id))
+        let staged = RemoteInstall.Staged(directory: "/tmp/blitzkvm-remote.Ab12Cd", linkAddress: "fe80::1")
+        var files: [String: String] = [:]
+        for name in MaintainOrder.updateFiles { files[name] = String(repeating: "ab", count: 32) }
+        files["notes.txt"] = String(repeating: "cd", count: 32) // staged, not ordered
+        let now = Int64(Date().timeIntervalSince1970)
+        let update = try XCTUnwrap(RemoteInstall.order(MaintainOrder.update, broker: brokerKey.id, target: target.id, staged: staged,
+                                                       files: files, issued: now))
+        XCTAssertEqual(Set(update.files.keys), MaintainOrder.updateFiles)
+        let signed = try Envelope.sign(update, type: "maintain", with: k.presence)
+        XCTAssertEqual(try MaintainOrder.verify(signed, roster: roster, target: target.id, now: now), update)
+        XCTAssertThrowsError(try MaintainOrder.verify(try Envelope.sign(update, type: "maintain", with: k.transport), roster: roster,
+                                                      target: target.id, now: now), "the transport key needs no Touch ID")
+        let remove = try XCTUnwrap(RemoteInstall.order(MaintainOrder.remove, broker: brokerKey.id, target: target.id, staged: staged,
+                                                       files: files, issued: now))
+        XCTAssertEqual(Array(remove.files.keys), ["uninstall.sh"])
+        XCTAssertNil(RemoteInstall.order(MaintainOrder.update, broker: brokerKey.id, target: target.id, staged: staged,
+                                         files: ["install.sh": files["install.sh"]!], issued: now), "files missing")
+
+        XCTAssertEqual(RemoteInstall.maintainCommand, #"'/Library/Application Support/BlitzKVM/Remote/blitzkvm-remote' maintain"#)
+        func result(_ code: Int, _ out: String) -> HostLinkRun.Result {
+            HostLinkRun.Result(stdout: out, stderr: "", exitCode: code)
+        }
+        XCTAssertEqual(RemoteInstall.maintainResult(result(0, "BlitzKVM: updating; the daemon restarts\n")), .started)
+        XCTAssertEqual(RemoteInstall.maintainResult(result(1, "BlitzKVM: install.sh isn't the file the owner signed\n")),
+                       .refused("Install.sh isn't the file the owner signed"))
+        XCTAssertEqual(RemoteInstall.maintainResult(result(2, "BlitzKVM: this daemon can't check signatures\n")), .unsupported)
+        XCTAssertEqual(RemoteInstall.maintainResult(result(1, "usage: blitzkvm-remote daemon …\n")), .unsupported,
+                       "a binary from before orders")
+        XCTAssertEqual(RemoteInstall.maintainStatus("running\n"), .running)
+        XCTAssertEqual(RemoteInstall.maintainStatus("done\n"), .done)
+        XCTAssertEqual(RemoteInstall.maintainStatus("gone\n"), .gone)
+        XCTAssertEqual(RemoteInstall.maintainStatus("failed: install: /usr/local isn't root's; install with --no-sudo\n"),
+                       .failed("/usr/local isn't root's; install with --no-sudo"))
+    }
+
     /// The real remote/install/install.sh takes the options the app passes:
     /// run as this test's user, both steps get past its argument checks to
     /// its root check.
@@ -367,6 +407,10 @@ final class ApprovalsTests: XCTestCase {
             let output = try shell(String(try XCTUnwrap(command).dropFirst(prefix.count)), allowFailure: true)
             XCTAssertTrue(output.contains("install: run as root"), output)
         }
+        // The daemon's job runs it with --update.
+        let update = try shell("/bin/sh \(RemoteInstall.quote(staging + "/install.sh")) --update \(RemoteInstall.quote(staging)) 2>&1",
+                               allowFailure: true)
+        XCTAssertTrue(update.contains("install: run as root"), update)
     }
 
     func testQuotingSurvivesTheShell() throws {

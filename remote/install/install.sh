@@ -8,6 +8,10 @@
 #                                  genesis roster
 #   install.sh [--no-sudo] STAGE   installs everything; --no-sudo leaves PAM
 #                                  (sudo approvals) out
+#   install.sh --update STAGE      updates an installation: the roster and
+#                                  link.json stay, and so does PAM (or its
+#                                  absence); run by the daemon on an owner's
+#                                  order (blitzkvm-remote maintain)
 #
 # STAGE holds blitzkvm-remote, pam_blitzkvm.so, roster.json (the genesis
 # roster, owner-signed, naming this target), link.json and the two plists.
@@ -36,11 +40,13 @@ die() {
 }
 
 identity=0
+update=0
 pam=1
 stage=""
 for arg in "$@"; do
 	case "$arg" in
 	--identity) identity=1 ;;
+	--update) update=1 ;;
 	--no-sudo) pam=0 ;;
 	-*) die "unknown option $arg" ;;
 	*)
@@ -49,7 +55,7 @@ for arg in "$@"; do
 		;;
 	esac
 done
-[ -n "$stage" ] && [ -d "$stage" ] || die "usage: install.sh [--identity] [--no-sudo] STAGE"
+[ -n "$stage" ] && [ -d "$stage" ] || die "usage: install.sh [--identity | --update] [--no-sudo] STAGE"
 [ "$(id -u)" -eq 0 ] || die "run as root"
 
 # put SRC DST MODE: copies a staged file into place, root-owned, atomically.
@@ -77,7 +83,14 @@ if [ "$identity" -eq 1 ]; then
 	exec "$BIN" daemon --print-identity
 fi
 
-for f in roster.json link.json "$DAEMON_LABEL.plist" "$AGENT_LABEL.plist"; do
+if [ "$update" -eq 1 ]; then
+	[ -f "$STATE/roster.json" ] || die "nothing to update: no roster installed"
+	[ -f "$PAM_MODULE" ] || pam=0
+	needed="$DAEMON_LABEL.plist $AGENT_LABEL.plist"
+else
+	needed="roster.json link.json $DAEMON_LABEL.plist $AGENT_LABEL.plist"
+fi
+for f in $needed; do
 	[ -f "$stage/$f" ] || die "missing $stage/$f"
 done
 if [ "$pam" -eq 1 ]; then
@@ -103,8 +116,10 @@ failed() {
 }
 trap failed EXIT
 
-put "$stage/link.json" "$STATE/link.json" 0644
-"$BIN" daemon --install-roster "$stage/roster.json"
+if [ "$update" -eq 0 ]; then
+	put "$stage/link.json" "$STATE/link.json" 0644
+	"$BIN" daemon --install-roster "$stage/roster.json"
+fi
 
 if [ "$pam" -eq 1 ]; then
 	rootdir /usr/local/lib/pam

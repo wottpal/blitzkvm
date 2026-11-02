@@ -38,7 +38,8 @@ public struct LinkMessage: Codable {
 /// One line on the daemon's local socket.
 ///
 /// Requesters: `confirm` (any user) and `pam` (root: the PAM module's
-/// client) each send one request, then read `info` lines and one `result`.
+/// client) each send one request, then read `info` lines and one `result`;
+/// so does `maintain` (an owner's signed order, from any user).
 /// The agent sends `agent`, then `facts` whenever they change; the daemon
 /// sends it `refresh` (answer with facts now, echoing `seq`) and `activate`.
 public struct LocalMessage: Codable, Equatable {
@@ -60,13 +61,15 @@ public struct LocalMessage: Codable, Equatable {
     public var facts: AgentFacts?
     public var seq: Int?
     public var app: AppRef?
+    // maintain: an owner's signed order
+    public var order: Envelope?
 
     public init(op: String, title: String? = nil, detail: String? = nil, grant: Bool? = nil, timeout: Int? = nil,
                 user: String? = nil, service: String? = nil, tty: String? = nil, pid: Int32? = nil, text: String? = nil,
-                result: String? = nil, facts: AgentFacts? = nil, seq: Int? = nil, app: AppRef? = nil) {
+                result: String? = nil, facts: AgentFacts? = nil, seq: Int? = nil, app: AppRef? = nil, order: Envelope? = nil) {
         self.op = op; self.title = title; self.detail = detail; self.grant = grant; self.timeout = timeout
         self.user = user; self.service = service; self.tty = tty; self.pid = pid; self.text = text
-        self.result = result; self.facts = facts; self.seq = seq; self.app = app
+        self.result = result; self.facts = facts; self.seq = seq; self.app = app; self.order = order
     }
 }
 

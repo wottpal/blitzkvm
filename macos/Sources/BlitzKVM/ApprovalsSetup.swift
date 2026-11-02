@@ -39,6 +39,10 @@ final class ApprovalsSetupModel: ObservableObject {
 
     var isInstalled: Bool { on?.target != nil }
 
+    /// Installed and its daemon connected: it updates and removes the remote
+    /// side on this owner's order, without the password.
+    var daemonMaintains: Bool { on?.target != nil && on?.connected == true }
+
     /// Targets whose agent keeps 1Password running, as this Mac set them.
     private static let keepKey = "approvalsKeepOnePasswordRunning"
     private static var keeping: Set<String> { Set(UserDefaults.standard.stringArray(forKey: keepKey) ?? []) }
@@ -146,10 +150,20 @@ final class ApprovalsSetupModel: ObservableObject {
             let computer = computerName
             let wasInstalled = on.target != nil
             let context = LAContext()
-            try await ApprovalService.authenticate(context, reason: "install approvals on \(computer)")
-            let password = try typed ?? on.target.flatMap { try service.vault.secret(target: $0.id, kind: SecretKind.mac, context: context) }
-            guard let password, !password.isEmpty else { throw SetupError("Enter the password of \(sync.user) on \(computer).") }
+            defer { context.invalidate() }
+            try await ApprovalService.authenticate(context, reason: wasInstalled ? "update approvals on \(computer)" : "install approvals on \(computer)")
             let installer = RemoteApprovalsInstaller(engine: controller.engine, sync: sync, computer: computer)
+            // Installed and connected: its daemon updates it on this owner's
+            // signed order, with no password through the user's login.
+            if typed == nil, let target = on.target, on.connected,
+               try await installer.maintain(MaintainOrder.update, brokerID: on.brokerID, target: target, payload: payload,
+                                            presence: keys.presence(with: context), progress: { row.progress = $0 }) {
+                await waitForTarget(target.id, engine: controller.engine)
+                AppLog.log("approvals: updated on \(computer) through its daemon")
+                return
+            }
+            let password = try typed ?? on.target.flatMap { try service.vault.secret(target: $0.id, kind: SecretKind.mac, context: context) }
+            guard let password, !password.isEmpty else { throw SetupError(Self.needsPassword(sync.user, computer, daemon: on.connected)) }
             row.progress = "Uploading to \(computer)…"
             let staged = try await installer.stage(payload)
             do {
@@ -183,12 +197,22 @@ final class ApprovalsSetupModel: ObservableObject {
             let payload = try RemoteApprovalsPayload.load()
             let computer = computerName
             let context = LAContext()
+            defer { context.invalidate() }
             try await ApprovalService.authenticate(context, reason: "remove approvals from \(computer)")
-            let password = try typed ?? service.vault.secret(target: target.id, kind: SecretKind.mac, context: context)
-            guard let password, !password.isEmpty else { throw SetupError("Enter the password of \(sync.user) on \(computer).") }
-            row.progress = "Removing from \(computer): approve its sudo request…"
             let installer = RemoteApprovalsInstaller(engine: controller.engine, sync: sync, computer: computer)
-            try await installer.uninstall(payload, password: password)
+            // Its daemon removes it on this owner's order when it can; else
+            // the password path.
+            var removed = false
+            if typed == nil, on.connected {
+                removed = try await installer.maintain(MaintainOrder.remove, brokerID: on.brokerID, target: target, payload: payload,
+                                                       presence: keys.presence(with: context), progress: { row.progress = $0 })
+            }
+            if !removed {
+                let password = try typed ?? service.vault.secret(target: target.id, kind: SecretKind.mac, context: context)
+                guard let password, !password.isEmpty else { throw SetupError(Self.needsPassword(sync.user, computer, daemon: on.connected)) }
+                row.progress = "Removing from \(computer): approve its sudo request…"
+                try await installer.uninstall(payload, password: password)
+            }
             row.progress = "Removing \(computer) from the approvals…"
             let roster = try center.update(on.brokerID, presence: keys.presence(with: context)) { r in
                 r.targets.removeAll { $0.id == target.id }
@@ -224,6 +248,14 @@ final class ApprovalsSetupModel: ObservableObject {
             let state = try await engine.call("getApprovalsState", as: DeviceApprovals.self)
             guard let seq = try? roster.peek(Roster.self).seq, (state.seq ?? 0) >= seq else { throw error }
         }
+    }
+
+    /// No password for the password path: after a daemon that takes no
+    /// orders (installed before them), store it in Settings first.
+    private static func needsPassword(_ user: String, _ computer: String, daemon: Bool) -> String {
+        daemon ? "The approvals daemon on \(computer) is from an older BlitzKVM and takes no orders: store the password of "
+            + "\(user) for \(computer) in Settings › Approvals, then try again (once; later updates need none)."
+            : "Enter the password of \(user) on \(computer)."
     }
 
     /// The daemon connects to the JetKVM within seconds of its start.
@@ -343,6 +375,39 @@ struct RemoteApprovalsInstaller {
         return true
     }
 
+    /// Updates or removes the remote side through its daemon: stages the
+    /// files, hands it the order signed with `presence`, and waits for the
+    /// job. False when that daemon takes no orders (from before them, or
+    /// without a Developer ID): the password path is left.
+    func maintain(_ action: String, brokerID: String, target: Target, payload: RemoteApprovalsPayload, presence: EnvelopeSigner,
+                  progress: (String) -> Void) async throws -> Bool {
+        progress("Uploading to \(computer)…")
+        let staged = try await stage(payload)
+        defer { Task { await cleanUp(staged) } }
+        guard let order = RemoteInstall.order(action, broker: brokerID, target: target.id, staged: staged, files: payload.files,
+                                              issued: Int64(Date().timeIntervalSince1970)) else { return false }
+        let signed = try Envelope.sign(order, type: "maintain", with: presence)
+        switch RemoteInstall.maintainResult(try await run(RemoteInstall.maintainCommand, stdin: try Wire.encoder.encode(signed))) {
+        case .unsupported:
+            return false
+        case .refused(let why):
+            throw SetupError(why)
+        case .started:
+            break
+        }
+        progress(action == MaintainOrder.update ? "Updating on \(computer)…" : "Removing from \(computer)…")
+        for _ in 0..<60 {
+            try await Task.sleep(for: .seconds(2))
+            let status = RemoteInstall.maintainStatus((try? await run(RemoteInstall.statusCommand, timeout: 20))?.stdout ?? "")
+            switch (status, action) {
+            case (.done, MaintainOrder.update), (.gone, MaintainOrder.remove): return true
+            case (.failed(let why), _): throw SetupError(why)
+            default: continue
+            }
+        }
+        throw SetupError("\(computer) didn't say how the \(action == MaintainOrder.update ? "update" : "removal") went.")
+    }
+
     func uninstall(_ payload: RemoteApprovalsPayload, password: String) async throws {
         _ = try await checked(RemoteInstall.uninstallCommand(script: try payload.uninstallScript),
                               stdin: RemoteInstall.sudoInput(password: password))
@@ -377,7 +442,7 @@ struct ApprovalsSetupRow: View {
                 Button(confirmation.action) { perform(confirmation) }
                 Button("Cancel", role: .cancel) {}
             } message: { confirmation in
-                Text(confirmation.message(computer: model.computerName, installed: model.isInstalled))
+                Text(confirmation.message(computer: model.computerName, installed: model.isInstalled, daemon: model.daemonMaintains))
             }
             .sheet(item: $asking) { purpose in
                 PasswordPrompt(purpose: purpose, computer: model.computerName) { password, remember in
@@ -429,11 +494,11 @@ struct ApprovalsSetupRow: View {
     }
 
     private func install() {
-        if model.hasMacPassword { confirming = .install } else { asking = .install }
+        if model.hasMacPassword || model.daemonMaintains { confirming = .install } else { asking = .install }
     }
 
     private func remove() {
-        if model.hasMacPassword { confirming = .remove } else { asking = .remove }
+        if model.hasMacPassword || model.daemonMaintains { confirming = .remove } else { asking = .remove }
     }
 
     private enum Confirmation: Identifiable {
@@ -450,7 +515,7 @@ struct ApprovalsSetupRow: View {
             }
         }
 
-        func message(computer: String, installed: Bool) -> String {
+        func message(computer: String, installed: Bool, daemon: Bool) -> String {
             switch self {
             case .turnOn:
                 return "This Mac becomes the owner of the JetKVM's approvals: it approves with Touch ID, and pairs your "
@@ -460,9 +525,15 @@ struct ApprovalsSetupRow: View {
                     ? "Your approvers are forgotten, and sudo on \(computer) asks for the password again. The remote side "
                         + "stays installed; remove it first to take it off \(computer)."
                     : "Your approvers are forgotten; turning approvals on again starts over."
+            case .install where daemon:
+                return "The approvals daemon on \(computer) installs this version on your signed order: one Touch ID here, "
+                    + "no password. It checks that the files are the ones you signed and are signed by BlitzKVM."
             case .install:
                 return "BlitzKVM installs a daemon and, for sudo, a PAM module on \(computer), over clipboard sync's login "
                     + "and with the stored password. sudo, password dialogs and 1Password there then ask your approvers."
+            case .remove where daemon:
+                return "The approvals daemon on \(computer) removes itself and the PAM module on your signed order, without "
+                    + "a password; sudo there asks for the password again. The passwords stored for it on this Mac go too."
             case .remove:
                 return "BlitzKVM takes the daemon and the PAM module off \(computer), with the stored password; sudo there "
                     + "asks for the password again. The passwords stored for it on this Mac go too."
