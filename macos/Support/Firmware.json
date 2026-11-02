@@ -2,9 +2,9 @@
   "builds": [
     {
       "kind": "blitzkvm",
-      "tag": "release/0.5.9-fork.11",
-      "sha256": "8f105e7c7d9b1fcccf9b5b7d2f406312aa0bfb64d3535ff1516f0785f0b1b2b1",
-      "size": 35807984,
+      "tag": "release/0.5.10-fork.1",
+      "sha256": "1e3c70b891bd06d6dbada61107373a3bce1a12744383216328dc540ca966fb2f",
+      "size": 36038648,
       "features": [
         "hidrpcWheel",
         "refreshRegions",
@@ -13,15 +13,16 @@
         "hostLink",
         "framePacing",
         "stunServers",
+        "noAutoUpdate",
         "approvals"
       ]
     },
     {
       "kind": "stock",
-      "tag": "release/0.5.9",
-      "sha256": "3b955de548b18b038341d43e8abec380813a81bfc40f082abf12031506aa1f0a",
-      "size": 31407424,
-      "url": "https://github.com/jetkvm/kvm/releases/download/release/0.5.9/jetkvm_app"
+      "tag": "release/0.5.10",
+      "sha256": "1090b8ff596fd7212c40d0ff24076e1041465f11b79a3cd694b258ffaf463a42",
+      "size": 31670868,
+      "url": "https://github.com/jetkvm/kvm/releases/download/release/0.5.10/jetkvm_app"
     }
   ]
 }
