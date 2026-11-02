@@ -113,7 +113,16 @@ func (s *Server) startApprovals() error {
 	b, err := broker.New(broker.Config{
 		Store: dirStore{dir: dir},
 		HID:   approvalsHID{s: s},
-		Logf:  func(format string, args ...any) { log.Info().Msgf(format, args...) },
+		// The test pattern's desktop, at the size the firmware sends.
+		Screen: func(context.Context) ([]byte, error) {
+			w, h := 640, 360
+			if s.cfg.Width > 0 && s.cfg.Height > 0 {
+				h = w * s.cfg.Height / s.cfg.Width &^ 1
+			}
+			img, _ := newPattern(Config{Width: w, Height: h, Desktop: true}, false, nil).next(0)
+			return broker.EncodeScreen(img)
+		},
+		Logf: func(format string, args ...any) { log.Info().Msgf(format, args...) },
 		DialRelay: func(ctx context.Context, url string) (broker.Conn, error) {
 			url = strings.Replace(strings.Replace(url, "https://", "wss://", 1), "http://", "ws://", 1)
 			c, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)

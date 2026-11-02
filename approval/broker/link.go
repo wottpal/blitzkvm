@@ -329,6 +329,7 @@ func (b *Broker) takeAsk(l *linkConn, env *wire.Envelope) (*wire.Envelope, error
 	for _, id := range ids {
 		b.deliver(id, map[string]any{"op": "request", "request": reqEnv}, &push{collapse: ask.ID})
 	}
+	go b.takeScreen(ask.ID)
 	return reqEnv, nil
 }
 

@@ -2,10 +2,13 @@ package broker
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"io"
 	"net"
 	"os"
@@ -1031,5 +1034,80 @@ func TestLinkAuthTimesOut(t *testing.T) {
 	case <-done:
 	case <-time.After(authTimeout + 2*time.Second):
 		t.Fatal("an unauthenticated link kept its slot")
+	}
+}
+
+func TestScreenFollowsTheRequest(t *testing.T) {
+	h := newHarness(t)
+	jpeg := []byte("\xff\xd8 a picture of the screen \xff\xd9")
+	h.b.cfg.Screen = func(context.Context) ([]byte, error) { return jpeg, nil }
+	mac := h.connectApprover(h.mac)
+	mac.next("roster")
+	d, err := h.connectDaemon(h.target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := d.ask(h.target, wire.KindSudo, wire.SecretNone, false)
+	d.read()
+	mac.next("request")
+	check := func(m map[string]any) {
+		t.Helper()
+		env := envFrom(t, m["screen"])
+		s, err := wire.VerifyScreen(&h.roster, env, decodeBytes(m["jpeg"]))
+		if err != nil || s.Request != id {
+			t.Fatalf("screen %v: %v", s, err)
+		}
+		// The signature covers the picture: another one doesn't verify.
+		if _, err := wire.VerifyScreen(&h.roster, env, append(decodeBytes(m["jpeg"]), 0)); err == nil {
+			t.Fatal("a changed picture verified")
+		}
+	}
+	check(mac.next("screen"))
+	// An approver that connects later gets it with the open request.
+	phone := h.connectApprover(h.phone)
+	phone.next("request")
+	check(phone.next("screen"))
+}
+
+func TestEncodeScreenFits(t *testing.T) {
+	// Noise compresses worst: a large noisy picture still fits, smaller.
+	img := image.NewYCbCr(image.Rect(0, 0, 1280, 720), image.YCbCrSubsampleRatio422)
+	for i := range img.Y {
+		img.Y[i] = byte(i*7919 ^ i>>3)
+	}
+	for i := range img.Cb {
+		img.Cb[i], img.Cr[i] = byte(i*31), byte(i*17)
+	}
+	data, err := EncodeScreen(img)
+	if err != nil || len(data) > wire.MaxScreen {
+		t.Fatalf("%d bytes: %v", len(data), err)
+	}
+	got, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := got.Bounds().Dx(); w >= 1280 || w < 160 {
+		t.Fatalf("width %d", w)
+	}
+}
+
+func TestScreenFromYUYV(t *testing.T) {
+	// Limited-range black and white, then grey with colour: full range out.
+	frame := []byte{16, 128, 235, 128, 126, 16, 126, 240}
+	img, err := ScreenFromYUYV(4, 1, frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := img.Y; !bytes.Equal(got[:4], []byte{0, 255, 128, 128}) {
+		t.Fatalf("luma %v", got[:4])
+	}
+	if img.Cb[0] != 128 || img.Cr[0] != 128 || img.Cb[1] != 0 || img.Cr[1] != 255 {
+		t.Fatalf("chroma %v %v", img.Cb[:2], img.Cr[:2])
+	}
+	if _, err := ScreenFromYUYV(3, 1, frame); err == nil {
+		t.Fatal("odd width")
+	}
+	if _, err := ScreenFromYUYV(4, 2, frame); err == nil {
+		t.Fatal("short frame")
 	}
 }

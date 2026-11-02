@@ -11,6 +11,7 @@ struct ReviewView: View {
     @State private var error: String?
     @State private var addingPassword = false
     @State private var approvedCount = 0
+    @State private var showsScreen = false
 
     private enum Action { case approve, grant, deny }
 
@@ -81,7 +82,25 @@ struct ReviewView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
                 } footer: {
-                    Text("Approve only if \(c.targetName) shows the same code where the request was made.")
+                    Text(Kind.isTyping(c.kind) ? "Approving lets the JetKVM answer this prompt on \(c.targetName)."
+                        : "Approve only if \(c.targetName) shows the same code where the request was made.")
+                }
+            }
+
+            if let shot = center.screens[r.id], let image = UIImage(data: shot.jpeg) {
+                Section {
+                    Button { showsScreen = true } label: {
+                        ScreenImage(image: image)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Screen of \(c.targetName)")
+                    .accessibilityHint("Shows it larger")
+                    .listRowInsets(EdgeInsets())
+                } footer: {
+                    Text("\(c.targetName) at \(shot.taken.formatted(date: .omitted, time: .standard)), when the request came in.")
+                }
+                .fullScreenCover(isPresented: $showsScreen) {
+                    ScreenViewer(image: image, title: c.targetName)
                 }
             }
 
@@ -219,6 +238,54 @@ struct ReviewView: View {
                 try await session.deny(r)
             } catch {
                 self.error = ErrorText.describe(error)
+            }
+        }
+    }
+}
+
+/// The remote screen as the JetKVM saw it, edge to edge in its row.
+private struct ScreenImage: View {
+    let image: UIImage
+
+    var body: some View {
+        Image(uiImage: image)
+            .resizable()
+            .scaledToFit()
+            .frame(maxWidth: .infinity)
+    }
+}
+
+/// The screen picture on its own: pinch to zoom, drag to pan.
+private struct ScreenViewer: View {
+    let image: UIImage
+    let title: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var zoom: CGFloat = 1
+    @GestureState private var pinch: CGFloat = 1
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geo in
+                let fit = min(geo.size.width / image.size.width, geo.size.height / image.size.height)
+                let scale = fit * min(max(zoom * pinch, 1), 6)
+                ScrollView([.horizontal, .vertical]) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: image.size.width * scale, height: image.size.height * scale)
+                        .frame(minWidth: geo.size.width, minHeight: geo.size.height)
+                }
+                .scrollIndicators(.hidden)
+                .gesture(MagnifyGesture()
+                    .updating($pinch) { value, state, _ in state = value.magnification }
+                    .onEnded { value in zoom = min(max(zoom * value.magnification, 1), 6) })
+                .onTapGesture(count: 2) { withAnimation(.snappy) { zoom = zoom > 1 ? 1 : 2.5 } }
+            }
+            .background(.black)
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
         }
     }

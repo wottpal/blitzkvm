@@ -1,6 +1,8 @@
 #if targetEnvironment(simulator) && DEBUG
 import ApprovalKit
+import CryptoKit
 import Foundation
+import UIKit
 
 /// `-demo` (Simulator, Debug): a paired JetKVM with two open requests, made
 /// with software keys in memory, to look at the screens without hardware.
@@ -80,8 +82,48 @@ enum DemoData {
                                           "issued": ask.issued, "expires": ask.expires]
             let request = try Envelope.sign(bytes: JSONSerialization.data(withJSONObject: payload), type: "request", with: broker)
             session.center.receive(box: try box(["op": "request", "request": try json(request)]), from: info.id)
+            // The JetKVM's picture of the screen, as the broker sends it.
+            let jpeg = screen(showing: ask)
+            let shot = ScreenShot(v: 1, request: ask.id, taken: now, sha256: B64Data(Data(SHA256.hash(data: jpeg))))
+            session.center.receive(box: try box(["op": "screen", "screen": try json(try Envelope.sign(shot, type: "screen", with: broker)),
+                                                 "jpeg": B64.encode(jpeg)]), from: info.id)
         }
         return session
+    }
+
+    /// A made-up remote desktop: a terminal with the command, or a password dialog.
+    private static func screen(showing ask: Ask) -> Data {
+        let size = CGSize(width: 640, height: 400)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: format).jpegData(withCompressionQuality: 0.7) { ctx in
+            let cg = ctx.cgContext
+            let colors = [UIColor(red: 0.16, green: 0.22, blue: 0.42, alpha: 1).cgColor, UIColor(red: 0.42, green: 0.25, blue: 0.48, alpha: 1).cgColor]
+            if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors as CFArray, locations: [0, 1]) {
+                cg.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: size.width, y: size.height), options: [])
+            }
+            UIColor(white: 0.12, alpha: 0.85).setFill()
+            UIBezierPath(rect: CGRect(x: 0, y: 0, width: size.width, height: 14)).fill()
+            let mono = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+            if ask.kind == Kind.securityAgent {
+                let dialog = CGRect(x: 200, y: 110, width: 240, height: 180)
+                UIColor(white: 0.93, alpha: 1).setFill()
+                UIBezierPath(roundedRect: dialog, cornerRadius: 10).fill()
+                (ask.title as NSString).draw(in: dialog.insetBy(dx: 16, dy: 20),
+                                             withAttributes: [.font: UIFont.boldSystemFont(ofSize: 12), .foregroundColor: UIColor.black])
+                UIColor.white.setFill()
+                UIBezierPath(roundedRect: CGRect(x: 216, y: 200, width: 208, height: 22), cornerRadius: 5).fill()
+                return
+            }
+            let window = CGRect(x: 60, y: 50, width: 520, height: 300)
+            UIColor(white: 0.08, alpha: 0.96).setFill()
+            UIBezierPath(roundedRect: window, cornerRadius: 10).fill()
+            let lines = ["alex@mac-mini ~ % \(ask.title)", "BlitzKVM: approve on your iPhone or Mac…", "Password:"]
+            for (i, line) in lines.enumerated() {
+                (line as NSString).draw(at: CGPoint(x: window.minX + 14, y: window.minY + 30 + CGFloat(i) * 16),
+                                        withAttributes: [.font: mono, .foregroundColor: UIColor(white: 0.9, alpha: 1)])
+            }
+        }
     }
 }
 #endif

@@ -349,6 +349,36 @@ public struct APNsRegistration: Codable, Sendable {
     public init(removing token: String?) { self.token = token; remove = true }
 }
 
+/// The broker's picture of the target's screen, taken when a request came
+/// in (the JetKVM's HDMI capture). Its JPEG travels beside the envelope,
+/// bound by its hash.
+public struct ScreenShot: Codable, Sendable {
+    public var v: Int
+    public var request: String
+    public var taken: Int64
+    public var sha256: B64Data
+
+    public init(v: Int, request: String, taken: Int64, sha256: B64Data) {
+        self.v = v; self.request = request; self.taken = taken; self.sha256 = sha256
+    }
+
+    public static let maxJPEG = 64 << 10
+
+    /// Checks the broker's signature and that `jpeg` is the picture it signed.
+    public static func verify(_ env: Envelope, jpeg: Data, roster: Roster) throws -> ScreenShot {
+        let s = try env.open(ScreenShot.self, type: "screen", key: roster.broker.key.data)
+        guard s.v == 1, s.request.count == 32, Data(hex: s.request) != nil, !jpeg.isEmpty, jpeg.count <= maxJPEG,
+              s.sha256.data == Data(SHA256.hash(data: jpeg)) else { throw WireError.invalid("screen") }
+        return s
+    }
+}
+
+/// A request's screen, as approvers show it.
+public struct RequestScreen: Equatable, Sendable {
+    public let jpeg: Data
+    public let taken: Date
+}
+
 /// Asks the target to raise an unlock ask; signed with an approver's
 /// transport key (the approval itself then needs its presence key), so the
 /// relay and the JetKVM can't make a locked Mac ask for its password.

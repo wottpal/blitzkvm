@@ -65,7 +65,8 @@ export class Relay extends DurableObject<Env> {
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string") return close(ws, 1003, "text only");
-    if (utf8(message).length > L.MAX_MESSAGE) return close(ws, 1009, "too large");
+    const limit = peerOf(ws).role === "broker" ? L.MAX_BROKER_MESSAGE : L.MAX_MESSAGE;
+    if (utf8(message).length > limit) return close(ws, 1009, "too large");
     let msg: unknown;
     try {
       msg = JSON.parse(message);

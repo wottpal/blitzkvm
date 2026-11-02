@@ -103,7 +103,7 @@ private struct ApprovalList: View {
         VStack(spacing: 0) {
             ForEach(Array(open.prefix(Self.shown).enumerated()), id: \.element.id) { index, r in
                 if index > 0 { Divider() }
-                RequestCard(service: service, request: r, settling: settling)
+                RequestCard(service: service, request: r, settling: settling, screen: center.screens[r.id])
             }
             if open.count > Self.shown {
                 Divider()
@@ -119,7 +119,8 @@ private struct ApprovalList: View {
         }
         .padding(.top, 14) // below the close button
         .animation(.snappy(duration: 0.2), value: open.map(\.id) + ended.map(\.id))
-        .onChange(of: open.prefix(Self.shown).map(\.id)) {
+        // A picture of the screen arriving moves the cards below it too.
+        .onChange(of: open.prefix(Self.shown).map { $0.id + (center.screens[$0.id] == nil ? "" : "+") }) {
             changes += 1
             let change = changes
             settling = true
@@ -137,6 +138,7 @@ private struct RequestCard: View {
     @ObservedObject var service: ApprovalService
     let request: OpenRequest
     let settling: Bool
+    let screen: RequestScreen?
     @State private var typed = ""
     @State private var remember = true
     @State private var busy = false
@@ -166,6 +168,9 @@ private struct RequestCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             code(s)
+            if let shot = screen, let image = NSImage(data: shot.jpeg) {
+                ScreenThumbnail(image: image, taken: shot.taken, target: s.targetName)
+            }
             if request.state == "pending", service.answered[request.id] == nil, let password = s.password {
                 passwordSection(password, summary: s)
             }
@@ -346,6 +351,42 @@ private struct EndedCard: View {
             Spacer(minLength: 0)
         }
         .padding(16)
+    }
+}
+
+/// The remote screen as the JetKVM saw it when the request came in; a
+/// click shows it larger.
+private struct ScreenThumbnail: View {
+    let image: NSImage
+    let taken: Date
+    let target: String
+    @State private var enlarged = false
+
+    /// The card's width inside the panel's padding; the height follows the
+    /// picture (explicit sizes keep the panel's sizing simple).
+    private static let width: CGFloat = 388
+
+    var body: some View {
+        let aspect = image.size.width > 0 ? image.size.height / image.size.width : 0.6
+        Button { enlarged = true } label: {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: Self.width, height: min(Self.width * aspect, 260))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(.primary.opacity(0.1)))
+        }
+        .buttonStyle(.plain)
+        .help("\(target) at \(taken.formatted(date: .omitted, time: .standard)), when the request came in. Click to enlarge.")
+        .accessibilityLabel("Screen of \(target)")
+        .popover(isPresented: $enlarged, arrowEdge: .leading) {
+            let width = min(max(image.size.width, 640), 960)
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: width, height: width * aspect)
+                .padding(8)
+        }
     }
 }
 

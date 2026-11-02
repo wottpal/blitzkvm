@@ -357,6 +357,35 @@ func VerifyUnlock(roster *Roster, env *Envelope, target string, now time.Time) (
 	return &u, nil
 }
 
+// Screen is the broker's picture of the target's screen (the JetKVM's HDMI
+// capture), taken when a request comes in: approvers show it beside the
+// request. The JPEG travels next to the envelope, bound by its hash, so it
+// is base64-encoded once.
+type Screen struct {
+	V       int    `json:"v"`
+	Request string `json:"request"` // the ask's id
+	Taken   int64  `json:"taken"`
+	SHA256  Bytes  `json:"sha256"`
+}
+
+// MaxScreen bounds a screen's JPEG.
+const MaxScreen = 64 << 10
+
+// VerifyScreen checks a screen envelope and its JPEG against the roster's
+// broker key.
+func VerifyScreen(roster *Roster, env *Envelope, jpeg []byte) (*Screen, error) {
+	var s Screen
+	if err := env.Verify("screen", roster.Broker.Key, &s); err != nil {
+		return nil, fmt.Errorf("screen: %w", err)
+	}
+	sum := sha256.Sum256(jpeg)
+	if s.V != 1 || !isHex(s.Request) || len(s.Request) != 32 || len(jpeg) == 0 || len(jpeg) > MaxScreen ||
+		!bytes.Equal(s.SHA256, sum[:]) {
+		return nil, errors.New("screen payload")
+	}
+	return &s, nil
+}
+
 // Pairing announces an owner's one-time pairing token to the broker by its
 // hash only: the token itself travels in the QR code, so the broker (or
 // the relay) can't enroll a device of its own with it.

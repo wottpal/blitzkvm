@@ -133,8 +133,20 @@ describe("broker socket", () => {
     broker.send({ op: "later", x: 1 });
     broker.send({ op: "send", to: f.phone.presence.id, box: box() });
     await vi.waitFor(async () => expect(await count(f.broker.id, "queue")).toBe(1));
-    broker.send("x".repeat(64 * 1024 + 1));
+    broker.send("x".repeat(192 * 1024 + 1));
     expect((await broker.closed).code).toBe(1009);
+  });
+
+  it("carries a box with a screen, up to 192 KiB a message, while approvers stay at 64 KiB", async () => {
+    const { f, broker } = await setup();
+    // A 64 KiB JPEG, base64 twice (getRandomValues gives 64 KiB at most).
+    const screen = box(54 * 1024) + box(54 * 1024);
+    broker.send({ op: "send", to: f.phone.presence.id, box: screen });
+    await vi.waitFor(async () => expect(await count(f.broker.id, "queue")).toBe(1));
+    expect(await outbox(f)).toEqual([screen]);
+    const mac = await connectMac(f);
+    mac.send("x".repeat(64 * 1024 + 1));
+    expect((await mac.closed).code).toBe(1009);
   });
 
   it("revoking an approver closes its socket and forgets its queue and phones", async () => {

@@ -189,6 +189,36 @@ final class CenterTests: XCTestCase {
         XCTAssertEqual(Data(hex: "0aFf"), Data([0x0a, 0xff]))
     }
 
+    /// A picture of the screen goes with its open request, only when the
+    /// broker signed that very JPEG, and leaves with the request.
+    func testScreenGoesWithItsRequest() throws {
+        let k = keys()
+        let center = ApprovalCenter(keys: k, name: "Mac", platform: "macos", file: nil)
+        _ = try center.genesis(broker: brokerInfo, name: "x", direct: nil, relay: nil, presence: k.presence)
+        try center.update(brokerKey.id, presence: k.presence) { $0.targets.append(Target(name: "Mac mini", key: self.target.publicKey)) }
+        let now = Int64(Date().timeIntervalSince1970)
+        let askValue = Ask(target: target.id, kind: Kind.sudo, title: "sudo true", issued: now)
+        let ask = try Envelope.sign(askValue, type: "ask", with: target)
+        let req = try Envelope.sign(Request(ask: ask, seal: B64Data(SealKey().publicKey), issued: now, expires: now + 60),
+                                    type: "request", with: brokerKey)
+        let json = { (env: Envelope) in try JSONSerialization.jsonObject(with: Wire.encoder.encode(env)) }
+        center.receive(box: try box(["op": "request", "request": try json(req)], to: k), from: brokerKey.id)
+        let id = try XCTUnwrap(center.requests.first?.id)
+        let jpeg = Data("\u{ff}\u{d8} the screen \u{ff}\u{d9}".utf8)
+        let shot = ScreenShot(v: 1, request: id, taken: now, sha256: B64Data(Data(SHA256.hash(data: jpeg))))
+        func send(_ env: Envelope, _ picture: Data) throws {
+            center.receive(box: try box(["op": "screen", "screen": try json(env), "jpeg": B64.encode(picture)], to: k), from: brokerKey.id)
+        }
+        // Another picture than the one signed, or a signature by another key, is dropped.
+        try send(try Envelope.sign(shot, type: "screen", with: brokerKey), jpeg + Data([0]))
+        try send(try Envelope.sign(shot, type: "screen", with: target), jpeg)
+        XCTAssertTrue(center.screens.isEmpty)
+        try send(try Envelope.sign(shot, type: "screen", with: brokerKey), jpeg)
+        XCTAssertEqual(center.screens[id]?.jpeg, jpeg)
+        center.receive(box: try box(["op": "status", "id": id, "state": "denied"], to: k), from: brokerKey.id)
+        XCTAssertTrue(center.screens.isEmpty)
+    }
+
     func testVaultRoundTrip() throws {
         let vault = SecretVault(store: MemoryBlobStore())
         try vault.store("pässwörd^`", target: "t", kind: SecretKind.mac)

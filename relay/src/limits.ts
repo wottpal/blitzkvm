@@ -1,6 +1,9 @@
 // Limits, in bytes and seconds.
 
 export const MAX_MESSAGE = 64 * 1024; // a WebSocket message or a POST body
+// The broker's messages carry a request's screen (a JPEG of up to 64 KiB,
+// base64 twice by the time it's a box in a send).
+export const MAX_BROKER_MESSAGE = 192 * 1024;
 export const MAX_ENROLL = 8 * 1024; // an enroll POST body
 export const MIN_BOX = 65 + 16; // HPKE enc and the AEAD tag
 

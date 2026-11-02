@@ -302,9 +302,13 @@ func (b *Broker) sync(id string) {
 	b.mu.Lock()
 	roster := b.rosterEnv
 	var open []*wire.Envelope
+	var screens []map[string]any
 	for _, p := range b.pending {
 		if p.state == "pending" {
 			open = append(open, p.env)
+			if p.screen != nil {
+				screens = append(screens, p.screen)
+			}
 		}
 	}
 	b.mu.Unlock()
@@ -313,6 +317,9 @@ func (b *Broker) sync(id string) {
 	}
 	for _, env := range open {
 		b.deliver(id, map[string]any{"op": "request", "request": env}, nil)
+	}
+	for _, s := range screens {
+		b.deliver(id, s, nil)
 	}
 }
 

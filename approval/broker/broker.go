@@ -55,6 +55,9 @@ type Config struct {
 	Logf   func(format string, args ...any)
 	// DialRelay opens the relay's broker WebSocket at url (nil: no relay).
 	DialRelay func(ctx context.Context, url string) (Conn, error)
+	// Screen takes a JPEG of the target's screen (nil: requests come
+	// without one). It may take a few seconds while no session streams.
+	Screen func(ctx context.Context) ([]byte, error)
 }
 
 const (
@@ -84,6 +87,9 @@ const (
 	repeatOnePassword = 10 * time.Second
 	repeatOther       = 20 * time.Second
 	repeatMinLeft     = 5 * time.Second
+
+	// A request's screen: one grab at a time, given this long.
+	screenTimeout = 6 * time.Second
 )
 
 // Broker is one JetKVM's approval broker.
@@ -119,6 +125,8 @@ type Broker struct {
 	unlocks    map[string]time.Time // nonce -> until
 	lastUnlock map[string]time.Time
 	lastSync   map[string]time.Time
+	// screening is held while a screen is taken (the device's one core).
+	screening chan struct{}
 }
 
 // window counts events in a fixed window.
@@ -145,6 +153,8 @@ type pending struct {
 	repeats int
 	// holds: an approved screen request keeps the session's input blocked.
 	holds bool
+	// screen is the "screen" message once taken: a sync sends it again.
+	screen map[string]any
 }
 
 // Event is one line of the broker's recent history (no secrets).
@@ -178,7 +188,7 @@ func New(cfg Config) (*Broker, error) {
 	b := &Broker{cfg: cfg, rosterCh: make(chan struct{}), direct: map[string]map[*approverConn]bool{},
 		pending: map[string]*pending{}, pairings: map[string]time.Time{}, used: map[string]time.Time{},
 		typing: make(chan struct{}, 1), boxes: map[string]*window{}, unlocks: map[string]time.Time{},
-		lastUnlock: map[string]time.Time{}, lastSync: map[string]time.Time{}}
+		lastUnlock: map[string]time.Time{}, lastSync: map[string]time.Time{}, screening: make(chan struct{}, 1)}
 	if err := b.loadKeys(); err != nil {
 		return nil, err
 	}

@@ -27,7 +27,7 @@ Worker) carries sealed boxes and push notifications. Go (`approval/wire`), Swift
   Verifiers accept any valid signature (no low-S rule). Security.framework and Go's `ecdsa` use DER: convert.
 - `digest(env)`: SHA-256 of the signed message (not of the signature), lowercase hex where it appears in JSON.
 - Verifiers parse the payload only after the signature verifies, and only from `p`: what was signed is what is read.
-- Types: `roster`, `ask`, `request`, `decision`, `link`, `hello`, `pairing`, `enroll`, `relay`, `unlock`.
+- Types: `roster`, `ask`, `request`, `decision`, `link`, `hello`, `pairing`, `enroll`, `relay`, `unlock`, `screen`.
 
 ## Box (HPKE, RFC 9180)
 
@@ -154,9 +154,17 @@ same messages, wrapped (below). Each WebSocket message is one JSON object.
 
 | Direction | Message |
 |---|---|
-| B→A | `{"op":"roster","roster":env}`, `{"op":"request","request":env}` (a repeat to an iPhone adds `"repeat":n`, below), `{"op":"status","id":…,"state":"approved\|denied\|done\|failed\|expired\|cancelled","by":id,"note":…}`, `{"op":"enrolling","enroll":env}` (to owners) |
+| B→A | `{"op":"roster","roster":env}`, `{"op":"request","request":env}` (a repeat to an iPhone adds `"repeat":n`, below), `{"op":"screen","screen":env,"jpeg":b64}` (below), `{"op":"status","id":…,"state":"approved\|denied\|done\|failed\|expired\|cancelled","by":id,"note":…}`, `{"op":"enrolling","enroll":env}` (to owners) |
 | A→B | `{"op":"decision","decision":env}`, `{"op":"roster","roster":env}` (an owner's new roster), `{"op":"pairing","pairing":env}` (owner-signed, `t = "pairing"`, payload `{"v":1,"hash":b64(SHA-256 of the token),"expires":n}`), `{"op":"unlock","unlock":env}` (`t = "unlock"`, payload `{"v":1,"broker":kid,"target":kid,"approver":id,"nonce":b64,"issued":n}`, signed by the approver's transport key: neither the relay nor the JetKVM can make a locked Mac ask for its password), `{"op":"sync"}` (asks for the roster and the pending requests) |
 | new→B | `{"op":"enroll","enroll":env}` with `t = "enroll"`, payload `{"v":1,"pairing":b64(SHA-256 of the token),"approver":{…roster approver…},"mac":b64}`, signed by the new presence key |
+
+Screen: when a request comes in, a broker that can (the JetKVM: its HDMI capture) takes one picture of the
+target's screen and sends it after the request, without a push, as `{"op":"screen","screen":env,"jpeg":b64}`:
+`t = "screen"`, payload `{"v":1,"request":ask id,"taken":n,"sha256":b64}`, signed by the broker key; the JPEG
+(baseline, at most 64 KiB, about 640 pixels wide) travels beside the envelope, bound by its hash, so it is
+base64-encoded once. A sync sends it again with its open request. Approvers show it with the request only when the
+signature and the hash check out and the request is open; a broker that takes none (no capture, no signal, a grab
+already running) just sends none.
 
 Pairing: an owner makes a one-time token (5 minutes), tells the broker only its hash through `pairing`, and shows the
 token in a QR code with the broker's id, key and seal key, the relay URL and the roster's current `seq`. The new device
@@ -222,6 +230,7 @@ no roster of its own and sees only boxes.
   360 pushes an hour per broker, of which 300 repeats, and 2000 a day per device token (a request takes up to 7 per
   iPhone). A device token gets at most 12 alerting pushes a minute and 120 an hour; beyond those a push still comes,
   quietly.
+- Messages: 64 KiB each, 192 KiB on the broker's socket (a box with a screen).
 - Sockets: at most 16 waiting for their auth (10 s each; the oldest goes first), one per party once authenticated
   (a newer one replaces it). A socket silent for 75 s is closed (the broker pings every 30 s, Macs every 20 s). A
   broker not seen for 90 days is forgotten with everything queued for it.

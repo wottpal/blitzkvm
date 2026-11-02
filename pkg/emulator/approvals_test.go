@@ -2,8 +2,10 @@ package emulator
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"image/jpeg"
 	"net"
 	"net/http"
 	"strings"
@@ -144,8 +146,20 @@ func TestApprovalsOverTheEmulator(t *testing.T) {
 		_ = ws.WriteJSON(map[string]any{"op": "box", "box": wire.Bytes(box)})
 	}
 
-	_, reqEnv := ask(wire.KindSudo, wire.SecretNone)
+	sudoID, reqEnv := ask(wire.KindSudo, wire.SecretNone)
 	next("request")
+	// A picture of the screen follows, signed by the broker.
+	shot := next("screen")
+	var shotEnv wire.Envelope
+	var picture wire.Bytes
+	_ = json.Unmarshal(shot["screen"], &shotEnv)
+	_ = json.Unmarshal(shot["jpeg"], &picture)
+	if s, err := wire.VerifyScreen(&roster, &shotEnv, picture); err != nil || s.Request != sudoID {
+		t.Fatalf("screen: %v", err)
+	}
+	if _, err := jpeg.Decode(bytes.NewReader(picture)); err != nil {
+		t.Fatalf("screen jpeg: %v", err)
+	}
 	approve(reqEnv, "")
 	if m := read(); string(m["op"]) != `"decision"` {
 		t.Fatalf("daemon got %s", m["op"])

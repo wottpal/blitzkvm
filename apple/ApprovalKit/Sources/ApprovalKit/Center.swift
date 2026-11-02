@@ -93,7 +93,11 @@ public protocol CenterTransport: AnyObject {
 @MainActor
 public final class ApprovalCenter: ObservableObject {
     @Published public private(set) var brokers: [PairedBroker] = []
-    @Published public private(set) var requests: [OpenRequest] = []
+    @Published public private(set) var requests: [OpenRequest] = [] {
+        didSet { if !screens.isEmpty { screens = screens.filter { id, _ in requests.contains { $0.id == id } } } }
+    }
+    /// Pictures of the target's screen, by open request.
+    @Published public private(set) var screens: [String: RequestScreen] = [:]
     @Published public private(set) var history: [OpenRequest] = []
     @Published public private(set) var enrollments: [Enrollment] = []
 
@@ -167,6 +171,8 @@ public final class ApprovalCenter: ObservableObject {
         let state: String?
         let by: String?
         let note: String?
+        let screen: Envelope?
+        let jpeg: B64Data?
     }
 
     /// Opens and handles a box from a broker.
@@ -177,6 +183,7 @@ public final class ApprovalCenter: ObservableObject {
         case "request": if let env = m.request { add(request: env, brokerID: brokerID) }
         case "status": if let id = m.id, let state = m.state { status(id: id, state: state, by: m.by, note: m.note, brokerID: brokerID) }
         case "enrolling": if let env = m.enroll { enrolling(env, brokerID: brokerID) }
+        case "screen": if let env = m.screen, let jpeg = m.jpeg { screen(env, jpeg: jpeg.data, brokerID: brokerID) }
         default: break
         }
     }
@@ -224,6 +231,14 @@ public final class ApprovalCenter: ObservableObject {
         let r = OpenRequest(brokerID: brokerID, verified: verified, received: Date())
         requests.append(r)
         onRequest?(r)
+    }
+
+    /// A picture of the screen for an open request of this broker, signed
+    /// by its key.
+    func screen(_ env: Envelope, jpeg: Data, brokerID: String) {
+        guard let roster = roster(brokerID), let s = try? ScreenShot.verify(env, jpeg: jpeg, roster: roster),
+              screens[s.request] == nil, requests.contains(where: { $0.id == s.request && $0.brokerID == brokerID }) else { return }
+        screens[s.request] = RequestScreen(jpeg: jpeg, taken: Date(timeIntervalSince1970: TimeInterval(s.taken)))
     }
 
     func status(id: String, state: String, by: String?, note: String?, brokerID: String? = nil) {
