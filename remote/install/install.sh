@@ -158,8 +158,14 @@ launchctl bootout "system/$DAEMON_LABEL" 2>/dev/null || true
 launchctl bootstrap system "$DAEMON_PLIST"
 uid=$(stat -f %u /dev/console)
 if [ "$uid" -ne 0 ]; then
-	launchctl bootout "gui/$uid/$AGENT_LABEL" 2>/dev/null || true
-	launchctl bootstrap "gui/$uid" "$AGENT_PLIST" || echo "install: the agent starts at the next login" >&2
+	# Root outside the user's login session (sudo over SSH, the daemon's
+	# maintain job) may not reach its gui domain directly ("Could not find
+	# service" afterwards): in the user's context it does. Without the agent
+	# no 1Password prompt or password dialog is seen.
+	launchctl bootout "gui/$uid/$AGENT_LABEL" 2>/dev/null || launchctl asuser "$uid" launchctl bootout "gui/$uid/$AGENT_LABEL" 2>/dev/null || true
+	launchctl bootstrap "gui/$uid" "$AGENT_PLIST" 2>/dev/null ||
+		launchctl asuser "$uid" launchctl bootstrap "gui/$uid" "$AGENT_PLIST" ||
+		echo "install: the agent starts at the next login" >&2
 fi
 
 rm -f "$STATE/maintenance"

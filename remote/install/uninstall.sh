@@ -41,7 +41,7 @@ rmdir "$PAM_DIR" 2>/dev/null || true
 
 uid=$(stat -f %u /dev/console)
 if [ "$uid" -ne 0 ]; then
-	launchctl bootout "gui/$uid/$AGENT_LABEL" 2>/dev/null || true
+	launchctl bootout "gui/$uid/$AGENT_LABEL" 2>/dev/null || launchctl asuser "$uid" launchctl bootout "gui/$uid/$AGENT_LABEL" 2>/dev/null || true
 fi
 launchctl bootout "system/$DAEMON_LABEL" 2>/dev/null || true
 rm -f "$AGENT_PLIST" "$DAEMON_PLIST" /var/run/blitzkvm-remote.sock
