@@ -28,6 +28,11 @@ public final class BoxChannel: NSObject, URLSessionTaskDelegate, @unchecked Send
     private var backoff: TimeInterval = 1
     private var generation = 0
     private var pingTimer: DispatchSourceTimer?
+    /// When the other end last said anything (a pong, a box): a socket
+    /// silent for longer than `silence` is taken for dead.
+    private var lastHeard = Date()
+    private static let silence: TimeInterval = 45
+    private static let readyDeadline: TimeInterval = 10
 
     public init(url: URL, route: Route, brokerID: String, approverID: String, transport: EnvelopeSigner,
                 serverTrust: (@Sendable (SecTrust) -> Bool)? = nil,
@@ -119,6 +124,22 @@ public final class BoxChannel: NSObject, URLSessionTaskDelegate, @unchecked Send
         self.task = task
         task.resume()
         receive(task, gen: gen)
+        // A socket that opens but never gets to `ready` tries again.
+        queue.asyncAfter(deadline: .now() + Self.readyDeadline) { [weak self] in
+            guard let self, gen == self.generation, !self.authenticated, !self.stopped else { return }
+            self.retry(gen: gen)
+        }
+    }
+
+    /// Reconnects now (the network changed, the Mac woke): a socket that
+    /// looked open may be half-open.
+    public func restart() {
+        queue.async {
+            guard !self.stopped else { return }
+            self.backoff = 1
+            self.teardown()
+            self.connect()
+        }
     }
 
     private func retry(gen: Int) {
@@ -155,6 +176,7 @@ public final class BoxChannel: NSObject, URLSessionTaskDelegate, @unchecked Send
     }
 
     private func handle(_ data: Data, task: URLSessionWebSocketTask, gen: Int) {
+        lastHeard = Date()
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let op = obj["op"] as? String else { return }
         switch op {
         case "hello":
@@ -196,7 +218,15 @@ public final class BoxChannel: NSObject, URLSessionTaskDelegate, @unchecked Send
         pingTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + 20, repeating: 20)
-        timer.setEventHandler { task.send(.string("{\"op\":\"ping\"}")) { _ in } }
+        let gen = generation
+        lastHeard = Date()
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            // Pings get pongs: silence means the socket is gone (asleep, a
+            // network change) though it looks open.
+            if Date().timeIntervalSince(self.lastHeard) > Self.silence { return self.retry(gen: gen) }
+            task.send(.string("{\"op\":\"ping\"}")) { _ in }
+        }
         timer.resume()
         pingTimer = timer
     }
@@ -226,9 +256,9 @@ public struct RelayHTTP: Sendable {
     }
 
     private func signed(_ endpoint: String, approver: String, transport: EnvelopeSigner, box: Data? = nil,
-                        apns: APNsRegistration? = nil) async throws -> Data {
+                        apns: APNsRegistration? = nil, ack: Int64? = nil) async throws -> Data {
         let auth = RelayAuth(role: "approver", broker: brokerID, approver: approver, endpoint: endpoint,
-                             nonce: Wire.randomBytes(32), issued: Int64(Date().timeIntervalSince1970), box: box, apns: apns)
+                             nonce: Wire.randomBytes(32), issued: Int64(Date().timeIntervalSince1970), box: box, apns: apns, ack: ack)
         return try await post(endpoint, body: Wire.encoder.encode(try Envelope.sign(auth, type: "relay", with: transport)))
     }
 
@@ -242,15 +272,25 @@ public struct RelayHTTP: Sendable {
         _ = try await signed("devices", approver: approver, transport: transport, apns: APNsRegistration(token: token, env: env))
     }
 
-    /// Fetches (and clears) what the broker queued for this approver.
-    public func outbox(approver: String, transport: EnvelopeSigner) async throws -> [Data] {
-        let data = try await signed("outbox", approver: approver, transport: transport)
-        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        return (obj?["boxes"] as? [String] ?? []).compactMap(B64.decode)
+    /// Takes this phone's tokens (or one) off the relay: it gets no more
+    /// pushes from this broker.
+    public func unregister(token: String? = nil, approver: String, transport: EnvelopeSigner) async throws {
+        _ = try await signed("devices", approver: approver, transport: transport, apns: APNsRegistration(removing: token))
     }
 
-    /// Sends a not-yet-approver's enrollment.
-    public func enroll(box: Data) async throws {
-        _ = try await post("enroll", body: JSONSerialization.data(withJSONObject: ["box": B64.encode(box)]))
+    /// Fetches what the broker queued for this approver after `ack` (the
+    /// last box taken before; 0 for none): the relay keeps boxes until a
+    /// later fetch acknowledges them, so a lost answer loses nothing.
+    public func outbox(approver: String, transport: EnvelopeSigner, ack: Int64) async throws -> (boxes: [Data], last: Int64) {
+        let data = try await signed("outbox", approver: approver, transport: transport, ack: ack)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let boxes = (obj?["boxes"] as? [String] ?? []).compactMap(B64.decode)
+        return (boxes, (obj?["last"] as? NSNumber)?.int64Value ?? ack)
+    }
+
+    /// Sends a not-yet-approver's enrollment for the pairing (the hash of
+    /// the QR code's token) the broker announced to the relay.
+    public func enroll(box: Data, pairing: Data) async throws {
+        _ = try await post("enroll", body: JSONSerialization.data(withJSONObject: ["box": B64.encode(box), "pairing": B64.encode(pairing)]))
     }
 }

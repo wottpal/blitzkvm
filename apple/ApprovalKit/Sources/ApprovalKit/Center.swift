@@ -16,6 +16,9 @@ public struct PairedBroker: Codable, Identifiable, Hashable, Sendable {
     /// (a replay) isn't taken.
     public var minSeq: UInt64?
     public var roster: Envelope?
+    /// This owner's newest roster until the broker has it: sent again when
+    /// the broker answers with an older one.
+    public var pendingRoster: Envelope?
 
     public init(broker: BrokerInfo, name: String, relay: String?, direct: String?, ownerHint: String?, roster: Envelope?,
                 minSeq: UInt64? = nil) {
@@ -106,7 +109,10 @@ public final class ApprovalCenter: ObservableObject {
     private let file: URL?
     /// Pairing tokens this owner issued (in memory): an enrollment is
     /// offered only with a valid MAC under one of them.
-    private var invites: [Data: (token: Data, broker: String, expires: Int64)] = [:]
+    /// Open invites by pairing hash, with the signed pairing that goes to
+    /// the broker again on every sync until it expires (a channel may be
+    /// down when the code is shown).
+    private var invites: [Data: (token: Data, broker: String, expires: Int64, pairing: Envelope)] = [:]
 
     public init(keys: ApproverKeys, name: String, platform: String, file: URL?) {
         self.keys = keys; self.name = name; self.platform = platform; self.file = file
@@ -165,13 +171,32 @@ public final class ApprovalCenter: ObservableObject {
     public func receive(box: Data, from brokerID: String) {
         guard let data = try? keys.seal.open(box), let m = try? Wire.decoder.decode(Message.self, from: data) else { return }
         switch m.op {
-        case "roster": if let env = m.roster { _ = try? accept(roster: env, brokerID: brokerID) }
+        case "roster": if let env = m.roster { brokerRoster(env, brokerID: brokerID) }
         case "request": if let env = m.request { add(request: env, brokerID: brokerID) }
         case "status": if let id = m.id, let state = m.state { status(id: id, state: state, by: m.by, note: m.note, brokerID: brokerID) }
         case "enrolling": if let env = m.enroll { enrolling(env, brokerID: brokerID) }
         default: break
         }
     }
+
+    /// A roster from the broker. One older than a change this owner made
+    /// means the change didn't arrive (no channel was up, a box expired):
+    /// it goes again, and stays pending until the broker has it.
+    func brokerRoster(_ env: Envelope, brokerID: String) {
+        if var b = broker(brokerID), let pending = b.pendingRoster, let mine = try? pending.peek(Roster.self),
+           let theirs = try? env.peek(Roster.self) {
+            if theirs.seq < mine.seq {
+                send(["op": "roster", "roster": json(pending)], to: brokerID)
+                return
+            }
+            b.pendingRoster = nil // delivered, or another owner's is newer
+            upsert(b)
+        }
+        _ = try? accept(roster: env, brokerID: brokerID)
+    }
+
+    /// A change this owner made that the broker hasn't confirmed yet.
+    public func isUndelivered(_ brokerID: String) -> Bool { broker(brokerID)?.pendingRoster != nil }
 
     @discardableResult
     func accept(roster env: Envelope, brokerID: String) throws -> Roster {
@@ -182,7 +207,8 @@ public final class ApprovalCenter: ObservableObject {
         if current == nil, let min = b.minSeq, roster.seq < min { throw WireError.roster("older than the invite") }
         guard roster.broker == b.broker else { throw WireError.roster("another broker") }
         b.roster = env
-        if let relay = roster.relay { b.relay = relay }
+        // The roster says where the relay is, also when it says there's none.
+        b.relay = roster.relay
         upsert(b)
         // Requests from targets that left, enrollments that were admitted.
         requests.removeAll { $0.brokerID == brokerID && roster.target($0.ask.target) == nil }
@@ -254,8 +280,14 @@ public final class ApprovalCenter: ObservableObject {
         send(["op": "decision", "decision": json(env)], to: r.brokerID)
     }
 
-    /// Asks for the roster and the open requests.
-    public func sync(_ brokerID: String) { send(["op": "sync"], to: brokerID) }
+    /// Asks for the roster and the open requests, and passes on this
+    /// owner's open pairings again (the broker takes each once).
+    public func sync(_ brokerID: String) {
+        send(["op": "sync"], to: brokerID)
+        for invite in invites.values where invite.broker == brokerID && invite.expires > now() {
+            send(["op": "pairing", "pairing": json(invite.pairing)], to: brokerID)
+        }
+    }
 
     /// Asks the target to unlock its screen: it raises an unlock ask naming
     /// this approver, which then needs an approval (Touch ID / Face ID).
@@ -294,6 +326,10 @@ public final class ApprovalCenter: ObservableObject {
         roster.issued = now()
         let env = try Envelope.sign(roster, type: "roster", with: presence)
         try accept(roster: env, brokerID: brokerID)
+        if var b = broker(brokerID) {
+            b.pendingRoster = env
+            upsert(b)
+        }
         send(["op": "roster", "roster": json(env)], to: brokerID)
         return env
     }
@@ -305,7 +341,7 @@ public final class ApprovalCenter: ObservableObject {
         let expires = now() + 300
         let pairing = try Envelope.sign(Pairing(token: token, expires: expires), type: "pairing", with: presence)
         invites = invites.filter { $0.value.expires > now() }
-        invites[Pairing.hash(token)] = (token, brokerID, expires)
+        invites[Pairing.hash(token)] = (token, brokerID, expires, pairing)
         send(["op": "pairing", "pairing": json(pairing)], to: brokerID)
         return PairingInvite(broker: b.broker, name: b.name, relay: b.relay, direct: b.direct, token: token, owner: keys.id,
                              seq: b.decodedRoster?.seq)
@@ -321,6 +357,12 @@ public final class ApprovalCenter: ObservableObject {
     }
 
     public func decline(_ e: Enrollment) { enrollments.removeAll { $0.id == e.id } }
+
+    /// Forgets an invite that wasn't used (the pairing sheet closed): its
+    /// QR code can't enroll anyone any more.
+    public func withdraw(_ invite: PairingInvite) {
+        invites[Pairing.hash(invite.token.data)] = nil
+    }
 
     /// Removes an approver (and its ownership).
     public func revoke(_ approverID: String, brokerID: String, presence: EnvelopeSigner) throws {

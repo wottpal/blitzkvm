@@ -139,9 +139,12 @@ public struct Ask: Codable, Hashable, Sendable {
         guard [SecretKind.none, SecretKind.mac, SecretKind.onePassword].contains(secret) else { throw WireError.invalid("secret") }
         guard secret == SecretKind.none || Kind.isTyping(kind) else { throw WireError.invalid("secret for a non-typing ask") }
         guard !(isGrantable && Kind.isTyping(kind)) else { throw WireError.invalid("grantable typing ask") }
-        guard nonce.data.count == 32, !title.isEmpty, expires > issued, expires - issued <= Limits.maxAskLifetime else {
+        // Times in range before any arithmetic on them (no overflow trap).
+        guard nonce.data.count == 32, !title.isEmpty, issued > 0, issued < 32_503_680_000, expires > issued,
+              expires - issued <= Limits.maxAskLifetime else {
             throw WireError.invalid("ask fields")
         }
+        if let now, issued > now + Limits.clockSkew { throw WireError.invalid("ask from the future") }
         guard (kind == Kind.unlock) == (requestedBy != nil) else { throw WireError.invalid("unlock asks name who requested them") }
         guard title.utf8.count <= Limits.maxText, (detail?.utf8.count ?? 0) <= Limits.maxText,
               (requester?.chain.count ?? 0) <= Limits.maxChain else { throw WireError.invalid("ask too long") }
@@ -240,9 +243,12 @@ public struct VerifiedRequest: Hashable, Sendable {
 
     /// Checks a request against the roster.
     public init(_ env: Envelope, roster: Roster, now: Int64?) throws {
+        // Ids are the hashes of their keys: a roster (from a file a process
+        // could edit) can't map a known target's id to another key.
+        guard Wire.kid(roster.broker.key.data) == roster.broker.id else { throw WireError.roster("broker id") }
         let request = try env.open(Request.self, type: "request", key: roster.broker.key.data)
         let peek = try request.ask.peek(Ask.self)
-        guard let target = roster.target(peek.target) else { throw WireError.unknownTarget }
+        guard let target = roster.target(peek.target), Wire.kid(target.key.data) == target.id else { throw WireError.unknownTarget }
         let ask = try request.ask.open(Ask.self, type: "ask", key: target.key.data)
         try ask.check(now: now)
         envelope = env; self.request = request; self.ask = ask
@@ -324,17 +330,23 @@ public struct RelayAuth: Codable, Sendable {
     public var issued: Int64
     public var box: B64Data?
     public var apns: APNsRegistration?
+    /// outbox: the last box taken; the relay keeps the rest until acknowledged.
+    public var ack: Int64?
     public init(role: String, broker: String, approver: String?, endpoint: String, nonce: Data, issued: Int64,
-                box: Data? = nil, apns: APNsRegistration? = nil) {
+                box: Data? = nil, apns: APNsRegistration? = nil, ack: Int64? = nil) {
         self.role = role; self.broker = broker; self.approver = approver; self.endpoint = endpoint
-        self.nonce = B64Data(nonce); self.issued = issued; self.box = box.map(B64Data.init); self.apns = apns
+        self.nonce = B64Data(nonce); self.issued = issued; self.box = box.map(B64Data.init); self.apns = apns; self.ack = ack
     }
 }
 
+/// A phone's APNs token for the relay's devices endpoint; `remove` takes a
+/// token (or, without one, all of the approver's) off it.
 public struct APNsRegistration: Codable, Sendable {
-    public var token: String
-    public var env: String
+    public var token: String?
+    public var env: String?
+    public var remove: Bool?
     public init(token: String, env: String) { self.token = token; self.env = env }
+    public init(removing token: String?) { self.token = token; remove = true }
 }
 
 /// Asks the target to raise an unlock ask; signed with an approver's
@@ -454,7 +466,8 @@ public struct Step: Codable, Equatable, Sendable {
 extension Data {
     /// Decodes lowercase or uppercase hex; nil for anything else.
     public init?(hex: String) {
-        guard hex.count % 2 == 0 else { return nil }
+        // Hex digits only (UInt8(_:radix:) would take a sign).
+        guard hex.count % 2 == 0, hex.allSatisfy(\.isHexDigit) else { return nil }
         var out = Data(capacity: hex.count / 2)
         var i = hex.startIndex
         while i < hex.endIndex {

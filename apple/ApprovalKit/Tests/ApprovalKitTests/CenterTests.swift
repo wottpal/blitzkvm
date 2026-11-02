@@ -127,6 +127,68 @@ final class CenterTests: XCTestCase {
         XCTAssertTrue(center.requests.isEmpty, "a target outside the roster")
     }
 
+    /// A roster change the broker didn't get (no channel was up) goes again
+    /// when the broker answers a sync with the older roster.
+    func testUndeliveredRosterGoesAgain() throws {
+        let k = keys()
+        let center = ApprovalCenter(keys: k, name: "Mac", platform: "macos", file: nil)
+        let out = Recorder()
+        center.transport = out
+        let genesis = try center.genesis(broker: brokerInfo, name: "x", direct: nil, relay: "https://relay.example.workers.dev",
+                                         presence: k.presence)
+        let next = try center.update(brokerKey.id, presence: k.presence) { $0.relay = nil }
+        XCTAssertNil(center.broker(brokerKey.id)?.relay, "a roster without a relay takes it away")
+        XCTAssertTrue(center.isUndelivered(brokerKey.id))
+        out.sent.removeAll()
+        let json = { (env: Envelope) in try JSONSerialization.jsonObject(with: Wire.encoder.encode(env)) }
+        center.receive(box: try box(["op": "roster", "roster": try json(genesis)], to: k), from: brokerKey.id)
+        XCTAssertEqual(try envelope(try opened(out)["roster"]).digest, next.digest, "sent again")
+        XCTAssertEqual(center.roster(brokerKey.id)?.seq, 2, "the older roster isn't taken")
+        center.receive(box: try box(["op": "roster", "roster": try json(next)], to: k), from: brokerKey.id)
+        XCTAssertFalse(center.isUndelivered(brokerKey.id))
+        XCTAssertTrue(out.sent.isEmpty)
+    }
+
+    /// Open pairings go with every sync until withdrawn.
+    func testSyncPassesOpenPairingsOn() throws {
+        let k = keys()
+        let center = ApprovalCenter(keys: k, name: "Mac", platform: "macos", file: nil)
+        let out = Recorder()
+        center.transport = out
+        _ = try center.genesis(broker: brokerInfo, name: "x", direct: nil, relay: nil, presence: k.presence)
+        let invite = try center.invite(brokerKey.id, presence: k.presence)
+        out.sent.removeAll()
+        center.sync(brokerKey.id)
+        XCTAssertEqual(try opened(out)["op"] as? String, "pairing")
+        XCTAssertEqual(try opened(out)["op"] as? String, "sync")
+        center.withdraw(invite)
+        center.sync(brokerKey.id)
+        XCTAssertEqual(out.sent.count, 1)
+    }
+
+    /// A roster (from a file anyone running as the user can edit) that maps
+    /// a target's id to another key verifies no request.
+    func testATargetIDMustBeItsKeysHash() throws {
+        let impostor = SoftwareSigner()
+        var fake = Target(name: "Mac mini", key: impostor.publicKey)
+        fake.id = target.id
+        let roster = Roster(seq: 1, issued: 1, broker: brokerInfo, relay: nil, owners: [], approvers: [], targets: [fake])
+        let now = Int64(Date().timeIntervalSince1970)
+        let ask = try Envelope.sign(Ask(target: target.id, kind: Kind.sudo, title: "sudo", issued: now), type: "ask", with: impostor)
+        let req = try Envelope.sign(Request(ask: ask, seal: B64Data(SealKey().publicKey), issued: now, expires: now + 60),
+                                    type: "request", with: brokerKey)
+        XCTAssertThrowsError(try VerifiedRequest(req, roster: roster, now: now))
+    }
+
+    func testAsksOutOfTimeAndOddIDs() throws {
+        let now = Int64(Date().timeIntervalSince1970)
+        XCTAssertThrowsError(try Ask(target: target.id, kind: Kind.sudo, title: "x", issued: now + 3600).check(now: now), "from the future")
+        XCTAssertThrowsError(try Ask(target: target.id, kind: Kind.sudo, title: "x", issued: 40_000_000_000).check(now: nil))
+        XCTAssertNoThrow(try Ask(target: target.id, kind: Kind.sudo, title: "x", issued: now).check(now: now))
+        XCTAssertNil(Data(hex: "+f"))
+        XCTAssertEqual(Data(hex: "0aFf"), Data([0x0a, 0xff]))
+    }
+
     func testVaultRoundTrip() throws {
         let vault = SecretVault(store: MemoryBlobStore())
         try vault.store("pässwörd^`", target: "t", kind: SecretKind.mac)

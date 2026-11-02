@@ -132,6 +132,13 @@ public struct ApproverKeys {
         #endif
     }
 
+    /// Forgets the keys (an iPhone's stop working for good when Face ID
+    /// changes) and the vault's: the next loadOrCreate makes new ones, and
+    /// pairing starts over.
+    public static func reset(in store: BlobStore) {
+        for name in ["presence", "transport", "seal", "vault.key"] { store.remove(name) }
+    }
+
     /// Loads the keys, making them the first time.
     public static func loadOrCreate(in store: BlobStore) throws -> ApproverKeys {
         let hardware = hasSecureEnclave
