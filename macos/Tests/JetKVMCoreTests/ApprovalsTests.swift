@@ -57,6 +57,8 @@ final class ApprovalsTests: XCTestCase {
                        "ws://192.168.1.40/approvals/v1/ws")
         XCTAssertEqual(ApprovalAddress.relay(" https://relay.example.workers.dev/ "), "https://relay.example.workers.dev")
         XCTAssertNil(ApprovalAddress.relay("relay.example.workers.dev"))
+        XCTAssertNil(ApprovalAddress.relay("http://relay.example.workers.dev"), "plain http only to this Mac")
+        XCTAssertEqual(ApprovalAddress.relay("http://localhost:8787"), "http://localhost:8787")
         XCTAssertNil(ApprovalAddress.relay(""))
     }
 
@@ -201,7 +203,8 @@ final class ApprovalsTests: XCTestCase {
         XCTAssertEqual(s.evidence, [ApprovalSummary.Fact(label: "Screen", value: "Unlocked")])
         XCTAssertEqual(s.notificationTitle, "Mac mini: sudo shutdown -r now")
         XCTAssertEqual(s.notificationBody, "Code \(s.code)")
-        XCTAssertEqual(s.authenticationReason, "approve “sudo shutdown -r now” on Mac mini")
+        XCTAssertEqual(s.authenticationReason, "approve “sudo shutdown -r now” (code \(s.code)) on Mac mini")
+        XCTAssertNil(s.requestedBy)
     }
 
     func testAPasswordDialogNamesThePasswordTheJetKVMTypes() throws {
@@ -219,9 +222,15 @@ final class ApprovalsTests: XCTestCase {
         XCTAssertEqual(ApprovalSummary(r, broker: center.broker(brokerKey.id), passwordStored: false).password?.stored, false)
         // A long title is cut in the Touch ID reason.
         let long = Ask(target: target.id, kind: Kind.confirm, title: String(repeating: "x", count: 80), issued: Int64(Date().timeIntervalSince1970))
-        XCTAssertEqual(ApprovalSummary(try request(long, center: center, keys: k), broker: center.broker(brokerKey.id),
-                                       passwordStored: false).authenticationReason,
-                       "approve “\(String(repeating: "x", count: 59))…” on Mac mini")
+        let longRequest = try request(long, center: center, keys: k)
+        XCTAssertEqual(ApprovalSummary(longRequest, broker: center.broker(brokerKey.id), passwordStored: false).authenticationReason,
+                       "approve “\(String(repeating: "x", count: 59))…” (code \(longRequest.verified.code)) on Mac mini")
+        // Coordinates no screen has don't trap.
+        let odd = Ask(target: target.id, kind: Kind.securityAgent, title: "Dialog",
+                      evidence: Evidence(locked: false, window: Rect(x: 1e300, y: -1e300, w: 400, h: 1e7)),
+                      secret: SecretKind.mac, issued: Int64(Date().timeIntervalSince1970))
+        XCTAssertEqual(ApprovalSummary(try request(odd, center: center, keys: k), broker: center.broker(brokerKey.id),
+                                       passwordStored: false).evidence.last?.value, "400 × ? at ?, ?") // JSON has no NaN or infinity
     }
 
     func testArgumentsAndTimes() {
@@ -272,8 +281,12 @@ final class ApprovalsTests: XCTestCase {
         XCTAssertNil(RemoteInstall.identityCommand(staging: "/tmp/blitzkvm-remote.AbC123", files: ["../x": String(repeating: "a", count: 64)]))
         XCTAssertNil(RemoteInstall.identityCommand(staging: "/tmp/blitzkvm-remote.AbC123", files: ["x": "not a hash"]))
         XCTAssertNil(RemoteInstall.cleanupCommand(staging: "/"))
+        // The agent reads this domain and key (RemoteCore's OnePassword.keepRunning…).
+        XCTAssertEqual(RemoteInstall.keepOnePasswordCommand(true),
+                       "defaults write xyz.scio.blitzkvm.remote KeepOnePasswordRunning -bool true")
+        XCTAssertTrue(RemoteInstall.keepOnePasswordCommand(false).hasSuffix("; true"), "off succeeds when it was never on")
         let command = RemoteInstall.identityCommand(staging: "/tmp/blitzkvm-remote.AbC123", files: files)
-        XCTAssertTrue(command?.hasPrefix("sudo -k -S -p '' /bin/sh -c '") == true)
+        XCTAssertTrue(command?.hasPrefix("/usr/bin/sudo -k -S -p '' /bin/sh -c '") == true)
         XCTAssertEqual(RemoteInstall.sudoInput(password: "pässwörd"), Data("pässwörd\n".utf8))
     }
 
@@ -302,7 +315,7 @@ final class ApprovalsTests: XCTestCase {
         let command = try XCTUnwrap(RemoteInstall.installCommand(staging: staging, files: files, roster: roster,
                                                                   linkAddress: "fe80::4a:4bff:fe00:1", sudoApprovals: false))
         // Without the sudo prefix, as this test's user.
-        let prefix = "sudo -k -S -p '' "
+        let prefix = "/usr/bin/sudo -k -S -p '' "
         XCTAssertTrue(command.hasPrefix(prefix))
         let output = try shell(String(command.dropFirst(prefix.count)))
         XCTAssertTrue(output.contains("args=--no-sudo /private/var/tmp/blitzkvm-install."), output)
@@ -318,6 +331,12 @@ final class ApprovalsTests: XCTestCase {
         let refused = try shell(String(command.dropFirst(prefix.count)) + "; echo status=$?", allowFailure: true)
         XCTAssertTrue(refused.contains("the uploaded files changed"), refused)
         XCTAssertFalse(refused.contains("args="), refused)
+
+        // A symlink in the user's staging directory isn't followed by root.
+        _ = try shell("ln -sf /etc/hosts \(RemoteInstall.quote(staging))/blitzkvm-remote")
+        let linked = try shell(String(command.dropFirst(prefix.count)) + "; echo status=$?", allowFailure: true)
+        XCTAssertTrue(linked.contains("isn't a plain file"), linked)
+        XCTAssertTrue(command.contains("exec </dev/null"), "the password line doesn't reach the steps")
     }
 
     /// The real remote/install/install.sh takes the options the app passes:
@@ -338,7 +357,7 @@ final class ApprovalsTests: XCTestCase {
         }
         let (center, _) = try owner(withTarget: true)
         let roster = try XCTUnwrap(center.broker(brokerKey.id)?.roster)
-        let prefix = "sudo -k -S -p '' "
+        let prefix = "/usr/bin/sudo -k -S -p '' "
         let commands = [RemoteInstall.identityCommand(staging: staging, files: files),
                         RemoteInstall.installCommand(staging: staging, files: files, roster: roster,
                                                      linkAddress: "fe80::4a:4bff:fe00:1", sudoApprovals: true),

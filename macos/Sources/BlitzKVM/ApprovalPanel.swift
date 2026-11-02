@@ -3,7 +3,7 @@ import ApprovalKit
 import JetKVMCore
 import SwiftUI
 
-/// The floating panel that shows approval requests, newest first: over
+/// The floating panel that shows approval requests, oldest first: over
 /// other apps and full-screen windows, without taking the keyboard until
 /// its password field needs it. It closes once no request is left.
 @MainActor
@@ -33,8 +33,11 @@ final class ApprovalPanelController {
     private func makePanel() -> NSPanel {
         let host = NSHostingController(rootView: ApprovalPanelView(service: service))
         host.sizingOptions = [.preferredContentSize]
+        // No .fullSizeContentView: with it, sizing to the preferred content
+        // size loops at some heights on macOS 26 and AppKit raises ("more
+        // Update Constraints in Window passes than there are views").
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 300),
-                            styleMask: [.titled, .closable, .nonactivatingPanel, .fullSizeContentView],
+                            styleMask: [.titled, .closable, .nonactivatingPanel],
                             backing: .buffered, defer: true)
         panel.contentViewController = host
         panel.title = "Approval Requests"
@@ -83,21 +86,28 @@ struct ApprovalPanelView: View {
 private struct ApprovalList: View {
     @ObservedObject var service: ApprovalService
     @ObservedObject var center: ApprovalCenter
+    /// Briefly after the cards change, their buttons take no click: a card
+    /// that just moved under the pointer isn't approved by a click meant for
+    /// another.
+    @State private var settling = false
+    @State private var changes = 0
 
-    /// Three at most: more at once is unusual, and the panel must fit.
+    /// Three at most: more at once is unusual, and the panel must fit. The
+    /// oldest show: a new request goes below (or waits), so no card moves
+    /// when one arrives, and the next shows once one is answered.
     private static let shown = 3
 
     var body: some View {
-        let open = center.requests.sorted { $0.received > $1.received }
+        let open = center.requests.sorted { $0.received < $1.received }
         let ended = service.ended.map(\.request).filter { r in !open.contains { $0.id == r.id } }
         VStack(spacing: 0) {
             ForEach(Array(open.prefix(Self.shown).enumerated()), id: \.element.id) { index, r in
                 if index > 0 { Divider() }
-                RequestCard(service: service, request: r)
+                RequestCard(service: service, request: r, settling: settling)
             }
             if open.count > Self.shown {
                 Divider()
-                Text("\(open.count - Self.shown) more waiting")
+                Text("\(open.count - Self.shown) more waiting: they show once these are answered")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(12)
@@ -109,6 +119,15 @@ private struct ApprovalList: View {
         }
         .padding(.top, 14) // below the close button
         .animation(.snappy(duration: 0.2), value: open.map(\.id) + ended.map(\.id))
+        .onChange(of: open.prefix(Self.shown).map(\.id)) {
+            changes += 1
+            let change = changes
+            settling = true
+            Task {
+                try? await Task.sleep(for: .milliseconds(700))
+                if change == changes { settling = false }
+            }
+        }
     }
 }
 
@@ -117,16 +136,28 @@ private struct ApprovalList: View {
 private struct RequestCard: View {
     @ObservedObject var service: ApprovalService
     let request: OpenRequest
+    let settling: Bool
     @State private var typed = ""
     @State private var remember = true
     @State private var busy = false
     @State private var error: String?
     @State private var showsChain = false
+    @State private var showsTitle = false
+
+    /// A title longer than this may not fit three lines: it can be shown whole.
+    private static let longTitle = 120
 
     var body: some View {
         let s = service.summary(request)
         VStack(alignment: .leading, spacing: 12) {
             header(s)
+            if let by = s.requestedBy {
+                Label(s.requestedElsewhere ? "Asked for on \(by), not on this Mac." : "Asked for on this Mac.",
+                      systemImage: s.requestedElsewhere ? "exclamationmark.triangle" : "person.crop.circle.badge.checkmark")
+                    .font(.callout)
+                    .foregroundStyle(s.requestedElsewhere ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let detail = s.detail {
                 Text(detail)
                     .font(.callout)
@@ -167,8 +198,14 @@ private struct RequestCard: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(s.title)
                     .font(.headline)
-                    .lineLimit(3)
+                    .lineLimit(showsTitle ? nil : 3)
+                    .fixedSize(horizontal: false, vertical: showsTitle)
                     .textSelection(.enabled)
+                if s.title.count > Self.longTitle || s.title.contains("\n") {
+                    Button(showsTitle ? "Show Less" : "Show All") { showsTitle.toggle() }
+                        .buttonStyle(.link)
+                        .font(.callout)
+                }
                 Text("\(s.kindName) on \(s.targetName) · \(s.brokerName)")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -257,7 +294,7 @@ private struct RequestCard: View {
                 .disabled(needsPassword)
             }
             .controlSize(.large)
-            .disabled(busy)
+            .disabled(busy || settling)
         }
     }
 

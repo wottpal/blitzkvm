@@ -39,6 +39,17 @@ final class ApprovalsSetupModel: ObservableObject {
 
     var isInstalled: Bool { on?.target != nil }
 
+    /// Targets whose agent keeps 1Password running, as this Mac set them.
+    private static let keepKey = "approvalsKeepOnePasswordRunning"
+    private static var keeping: Set<String> { Set(UserDefaults.standard.stringArray(forKey: keepKey) ?? []) }
+    private static func setKeeping(_ id: String, _ keep: Bool) {
+        var ids = keeping
+        if keep { ids.insert(id) } else { ids.remove(id) }
+        UserDefaults.standard.set(ids.sorted(), forKey: keepKey)
+    }
+
+    var keepsOnePasswordRunning: Bool { on?.target.map { Self.keeping.contains($0.id) } ?? false }
+
     func refresh() { Task { await check() } }
 
     /// Reads the JetKVM's approvals and this Mac's part in them.
@@ -184,8 +195,22 @@ final class ApprovalsSetupModel: ObservableObject {
             }
             try await pushRoster(roster, engine: controller.engine)
             for kind in ApprovalSummary.passwordKinds { service.removePassword(target: target.id, kind: kind) }
+            try? await installer.keepOnePasswordRunning(false)
+            Self.setKeeping(target.id, false)
             withoutSudo = false
             AppLog.log("approvals: removed from \(computer)")
+        }
+    }
+
+    /// Has the agent on the computer keep 1Password running, or not: a user
+    /// default there, set over clipboard sync's login (no sudo).
+    func setKeepOnePasswordRunning(_ keep: Bool) {
+        perform(keep ? "Keeping 1Password running…" : "Letting 1Password quit…") { [self] controller in
+            guard let target = on?.target, let sync = controller.device.clipboardSync else { return }
+            let installer = RemoteApprovalsInstaller(engine: controller.engine, sync: sync, computer: computerName)
+            try await installer.keepOnePasswordRunning(keep)
+            Self.setKeeping(target.id, keep)
+            AppLog.log("approvals: \(keep ? "keeping" : "not keeping") 1Password running on \(computerName)")
         }
     }
 
@@ -323,6 +348,10 @@ struct RemoteApprovalsInstaller {
                               stdin: RemoteInstall.sudoInput(password: password))
     }
 
+    func keepOnePasswordRunning(_ keep: Bool) async throws {
+        _ = try await checked(RemoteInstall.keepOnePasswordCommand(keep))
+    }
+
     func cleanUp(_ staged: RemoteInstall.Staged) async {
         if let command = RemoteInstall.cleanupCommand(staging: staged.directory) { _ = try? await run(command, timeout: 30) }
     }
@@ -386,10 +415,13 @@ struct ApprovalsSetupRow: View {
                 return RowContent(detail: "On · \(approvers)", note: "Install on \(computer) to approve its prompts.",
                                   action: install, menu: [settings, turnOff])
             }
-            let note = model.withoutSudo ? "Installed without sudo: /usr/local isn't root's there."
-                : on.connected ? "sudo stays approved 5 minutes after each approval." : "Waiting for \(target.name) to connect."
+            let keep = model.keepsOnePasswordRunning
+            let note = (model.withoutSudo ? "Installed without sudo: /usr/local isn't root's there."
+                : on.connected ? "sudo stays approved 5 minutes after each approval." : "Waiting for \(target.name) to connect.")
+                + (keep ? " 1Password is kept running there." : "")
+            let keepRunning = RowAction(title: "Keep 1Password Running", checked: keep) { model.setKeepOnePasswordRunning(!keep) }
             return RowContent(detail: "\(target.name) · \(approvers)", note: note, badge: "On",
-                              menu: [settings, RowAction(title: "Reinstall on \(target.name)…") { install() },
+                              menu: [settings, keepRunning, RowAction(title: "Reinstall on \(target.name)…") { install() },
                                      RowAction(title: "Remove from \(target.name)…") { remove() }, turnOff])
         case nil:
             return RowContent(detail: "Checking…")

@@ -68,12 +68,14 @@ public enum ApprovalAddress {
         return c.string
     }
 
-    /// A relay URL the user typed: http(s) with a host, without a trailing
-    /// slash; nil for anything else.
+    /// A relay URL the user typed: https with a host, without a trailing
+    /// slash (http only on this Mac, for a relay in development); nil for
+    /// anything else.
     public static func relay(_ text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let c = URLComponents(string: trimmed), c.scheme == "https" || c.scheme == "http",
-              let host = c.host, !host.isEmpty, c.query == nil else { return nil }
+        guard let c = URLComponents(string: trimmed), let host = c.host, !host.isEmpty, c.query == nil,
+              c.scheme == "https" || (c.scheme == "http" && ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host))
+        else { return nil }
         return trimmed.hasSuffix("/") ? String(trimmed.dropLast()) : trimmed
     }
 }
@@ -126,8 +128,13 @@ public struct ApprovalSummary: Equatable {
     public let canGrant: Bool
     public let password: Password?
     public let expires: Int64
+    /// Unlock asks: the approver that asked for it ("this Mac"), and whether
+    /// that was another device.
+    public let requestedBy: String?
+    public let requestedElsewhere: Bool
 
-    public init(ask: Ask, code: String, roster: Roster?, brokerName: String, passwordStored: Bool) {
+    /// `me` is this Mac's approver id.
+    public init(ask: Ask, code: String, roster: Roster?, brokerName: String, passwordStored: Bool, me: String? = nil) {
         title = ask.title
         detail = ask.detail.flatMap { $0.isEmpty ? nil : $0 }
         kind = ask.kind
@@ -143,6 +150,13 @@ public struct ApprovalSummary: Equatable {
         password = ask.secret == SecretKind.none ? nil
             : Password(kind: ask.secret, name: Self.passwordName(ask.secret), stored: passwordStored)
         expires = ask.expires
+        if let id = ask.requestedBy {
+            requestedBy = id == me ? "this Mac" : roster?.approver(id)?.name ?? "an approver no longer listed"
+            requestedElsewhere = id != me
+        } else {
+            requestedBy = nil
+            requestedElsewhere = false
+        }
 
         if let r = ask.requester {
             var who = "\(r.user) (uid \(r.uid))"
@@ -165,27 +179,35 @@ public struct ApprovalSummary: Equatable {
                 facts.append(Fact(label: "Secure input", value: s.team.map { "\(s.bundle) (\($0))" } ?? s.bundle))
             }
             if let w = e.window {
-                var place = "\(Int(w.w)) × \(Int(w.h)) at \(Int(w.x)), \(Int(w.y))"
-                if let d = e.display { place += " of \(Int(d.w)) × \(Int(d.h))" }
+                let n = Self.number
+                var place = "\(n(w.w)) × \(n(w.h)) at \(n(w.x)), \(n(w.y))"
+                if let d = e.display { place += " of \(n(d.w)) × \(n(d.h))" }
                 facts.append(Fact(label: "Dialog", value: place))
             }
         }
         evidence = facts
     }
 
-    public init(_ request: OpenRequest, broker: PairedBroker?, passwordStored: Bool) {
+    public init(_ request: OpenRequest, broker: PairedBroker?, passwordStored: Bool, me: String? = nil) {
         self.init(ask: request.ask, code: request.verified.code, roster: broker?.decodedRoster,
-                  brokerName: broker?.name ?? "JetKVM", passwordStored: passwordStored)
+                  brokerName: broker?.name ?? "JetKVM", passwordStored: passwordStored, me: me)
+    }
+
+    /// A screen coordinate from the ask, whole; "?" for one no screen has
+    /// (Int(_:) would trap on it).
+    static func number(_ value: Double) -> String {
+        value.isFinite && abs(value) < 1_000_000 ? String(Int(value)) : "?"
     }
 
     /// The notification: "Mac mini: sudo shutdown -r now", "Code 47".
     public var notificationTitle: String { "\(targetName): \(title)" }
     public var notificationBody: String { "Code \(code)" }
 
-    /// The reason in the Touch ID dialog ("BlitzKVM is trying to …").
+    /// The reason in the Touch ID dialog ("BlitzKVM is trying to …"), with
+    /// the code to compare where there is one (a cut title ends in "…").
     public var authenticationReason: String {
         let short = title.count > 60 ? title.prefix(59) + "…" : Substring(title)
-        return "approve “\(short)” on \(targetName)"
+        return Kind.isTyping(kind) ? "approve “\(short)” on \(targetName)" : "approve “\(short)” (code \(code)) on \(targetName)"
     }
 
     /// Arguments on one line, at most `limit` characters.
@@ -325,6 +347,14 @@ public struct ApproverLine: Equatable, Identifiable {
     }
 
     public var symbol: String { platform == "ios" ? "iphone" : "laptopcomputer" }
+
+    /// A key id in groups of four ("1a2b 3c4d …"), as the iPhone shows its own.
+    public static func grouped(_ id: String) -> String {
+        stride(from: 0, to: id.count, by: 4).map { i in
+            let start = id.index(id.startIndex, offsetBy: i)
+            return String(id[start..<(id.index(start, offsetBy: 4, limitedBy: id.endIndex) ?? id.endIndex)])
+        }.joined(separator: " ")
+    }
 
     public static func lines(_ roster: Roster, me: String) -> [ApproverLine] {
         roster.approvers.map {

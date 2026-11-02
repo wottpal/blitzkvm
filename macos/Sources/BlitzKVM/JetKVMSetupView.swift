@@ -330,6 +330,8 @@ struct JetKVMSetupView: View {
 
 struct RowAction {
     var title: String
+    /// A switch in the menu (with a checkmark when on); nil for a command.
+    var checked: Bool?
     var perform: () -> Void
 }
 
@@ -400,7 +402,12 @@ struct SetupRow<Value: Equatable>: View {
 
     @ViewBuilder private var menuItems: some View {
         ForEach(content.menu.indices, id: \.self) { index in
-            Button(content.menu[index].title, action: content.menu[index].perform)
+            let item = content.menu[index]
+            if let checked = item.checked {
+                Toggle(item.title, isOn: Binding { checked } set: { _ in item.perform() })
+            } else {
+                Button(item.title, action: item.perform)
+            }
         }
     }
 }

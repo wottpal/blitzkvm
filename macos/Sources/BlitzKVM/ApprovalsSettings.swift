@@ -42,7 +42,6 @@ private struct BrokerSection: View {
     @ObservedObject var service: ApprovalService
     @ObservedObject var center: ApprovalCenter
     let broker: PairedBroker
-    @AppStorage(ApprovalService.relayKey) private var relayText = ""
     @State private var invite: PairingInvite?
     @State private var revoking: ApproverLine?
     @State private var editing: PasswordEdit?
@@ -68,7 +67,13 @@ private struct BrokerSection: View {
                     EnrollmentRow(service: service, center: center, enrollment: $0)
                 }
             }
-            actions(roster)
+            actions
+            if center.isUndelivered(broker.id) {
+                Label("A change hasn't reached \(broker.name) yet: it goes once BlitzKVM reaches it.", systemImage: "clock.arrow.circlepath")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let error {
                 Text(error).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
@@ -83,13 +88,7 @@ private struct BrokerSection: View {
             PairingSheet(service: service, center: center, brokerID: broker.id, invite: item.invite) { invite = $0 }
         }
         .sheet(item: $editing) { edit in
-            StoredPasswordSheet(edit: edit) { password in
-                do {
-                    try service.storePassword(password, target: edit.target.id, kind: edit.kind)
-                } catch {
-                    self.error = error.localizedDescription
-                }
-            }
+            StoredPasswordSheet(edit: edit) { password in change(password, edit.target, edit.kind) }
         }
         .alert("Revoke \(revoking?.name ?? "")?", isPresented: Binding { revoking != nil } set: { if !$0 { revoking = nil } },
                presenting: revoking) { approver in
@@ -154,7 +153,7 @@ private struct BrokerSection: View {
                 if stored {
                     HStack(spacing: 8) {
                         Button("Replace…") { editing = PasswordEdit(target: target, kind: kind) }
-                        Button("Remove") { service.removePassword(target: target.id, kind: kind) }
+                        Button("Remove") { change(nil, target, kind) }
                     }
                 } else {
                     Button("Set…") { editing = PasswordEdit(target: target, kind: kind) }
@@ -166,19 +165,26 @@ private struct BrokerSection: View {
         }
     }
 
-    /// Owners pair and change the relay; anyone can forget a JetKVM here.
-    private func actions(_ roster: Roster?) -> some View {
-        let relay = ApprovalAddress.relay(relayText)
-        return HStack {
+    /// Owners pair; anyone can forget a JetKVM here. The relay is set below.
+    private var actions: some View {
+        HStack {
             if isOwner {
                 Button("Pair iPhone…") { pair() }
-                if let roster, relay != roster.relay, relay != nil || roster.relay != nil {
-                    Button(relay == nil ? "Stop Using the Relay" : "Use Relay") { useRelay(relay) }
-                        .help(relay.map { "Requests from \(broker.name) also go through \($0)." } ?? "")
-                }
             }
             Spacer()
             Button("Forget…") { forgetting = true }
+        }
+    }
+
+    private func change(_ password: String?, _ target: Target, _ kind: String) {
+        error = nil
+        Task {
+            do {
+                try await service.changePassword(password, target: target.id, kind: kind, computer: target.name)
+            } catch where ApprovalService.isCancellation(error) {
+            } catch {
+                self.error = error.localizedDescription
+            }
         }
     }
 
@@ -210,19 +216,6 @@ private struct BrokerSection: View {
         }
     }
 
-    private func useRelay(_ relay: String?) {
-        error = nil
-        Task {
-            do {
-                try await service.signAsOwner(reason: "change the relay of \(broker.name)") { presence in
-                    try center.update(broker.id, presence: presence) { $0.relay = relay }
-                }
-            } catch where ApprovalService.isCancellation(error) {
-            } catch {
-                self.error = error.localizedDescription
-            }
-        }
-    }
 }
 
 private struct InviteItem: Identifiable {
@@ -249,20 +242,123 @@ private struct Tag: View {
 /// network, and push notifications to iPhones.
 private struct RelaySection: View {
     @ObservedObject var service: ApprovalService
-    @AppStorage(ApprovalService.relayKey) private var relayText = ""
+
+    var body: some View {
+        if let center = service.center {
+            RelayEditor(service: service, center: center)
+        } else {
+            RelayEditor(service: service, center: nil)
+        }
+    }
+}
+
+/// The relay URL and Save, which also signs it into the roster of every
+/// JetKVM this Mac owns (Touch ID); JetKVMs turned on later start with it.
+/// Below, which relay each JetKVM uses.
+private struct RelayEditor: View {
+    @ObservedObject var service: ApprovalService
+    let center: ApprovalCenter?
+    @AppStorage(ApprovalService.relayKey) private var saved = ""
+    @State private var draft: String?
+    @State private var saving = false
+    @State private var error: String?
+
+    private var text: String { draft ?? saved }
+    private var isValid: Bool { text.trimmingCharacters(in: .whitespaces).isEmpty || ApprovalAddress.relay(text) != nil }
+    private var value: String? { ApprovalAddress.relay(text) }
+    /// JetKVMs this Mac can move to `value`.
+    private var stale: [PairedBroker] {
+        (center?.brokers ?? []).filter { center?.isOwner($0.id) == true && $0.decodedRoster?.relay != value }
+    }
+    private var canSave: Bool { isValid && !saving && (draft.map { $0 != saved } ?? false || !stale.isEmpty) }
 
     var body: some View {
         Section {
-            TextField("Relay URL", text: $relayText, prompt: Text("https://relay.example.workers.dev"))
-                .autocorrectionDisabled()
+            HStack(spacing: 8) {
+                TextField("URL", text: Binding { text } set: { draft = $0 }, prompt: Text("https://relay.example.workers.dev"))
+                    .autocorrectionDisabled()
+                    .onSubmit { if canSave { save() } }
+                Button("Save") { save() }
+                    .disabled(!canSave)
+            }
+            if let center {
+                RelayStatusRows(center: center, value: value)
+            }
+            if let error {
+                Text(error).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+            }
         } header: {
             Text("Relay")
         } footer: {
-            SettingsFooter(!relayText.isEmpty && ApprovalAddress.relay(relayText) == nil
-                ? "Not a URL: it starts with https://."
-                : "Reaches your iPhone, and this Mac away from the JetKVM's network. It only ever sees sealed messages. "
-                    + "JetKVMs turned on from now use it; Use Relay applies it to one already on.")
+            SettingsFooter(footer)
         }
+    }
+
+    private var footer: String {
+        if !isValid { return "Not a relay URL: it starts with https://." }
+        if canSave, !stale.isEmpty {
+            let names = stale.map(\.name).joined(separator: ", ")
+            return value == nil
+                ? "Save takes the relay off \(names) (Touch ID). Your iPhone then gets no requests."
+                : "Save sends this relay to \(names) (Touch ID). JetKVMs you turn on later use it too."
+        }
+        return "Your iPhone gets requests through the relay, and so does this Mac away from the JetKVM's network. "
+            + "The relay only passes sealed messages: it never sees a request or a password."
+    }
+
+    private func save() {
+        guard isValid else { return }
+        let value = value, targets = stale
+        saved = value ?? ""
+        draft = nil
+        error = nil
+        guard let center, !targets.isEmpty else { return }
+        saving = true
+        Task {
+            defer { saving = false }
+            do {
+                let names = targets.map(\.name).joined(separator: ", ")
+                try await service.signAsOwner(reason: value == nil ? "stop using the relay for \(names)" : "use the relay for \(names)") { presence in
+                    for b in targets {
+                        _ = try center.update(b.id, presence: presence) { $0.relay = value }
+                    }
+                }
+            } catch where ApprovalService.isCancellation(error) {
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+}
+
+/// One line per JetKVM: whether it uses the relay in the field.
+private struct RelayStatusRows: View {
+    @ObservedObject var center: ApprovalCenter
+    let value: String?
+
+    var body: some View {
+        ForEach(center.brokers) { b in
+            let relay = b.decodedRoster?.relay
+            let current = relay == value && relay != nil
+            HStack(spacing: 10) {
+                Image(systemName: current ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(current ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
+                    .frame(width: 20)
+                    .accessibilityHidden(true)
+                Text(b.name)
+                Spacer()
+                Text(status(relay, owner: center.isOwner(b.id)))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+    }
+
+    private func status(_ relay: String?, owner: Bool) -> String {
+        guard let relay else { return owner ? "No relay yet" : "No relay: an owner sets it" }
+        if relay == value { return "Uses this relay" }
+        return "Uses " + (URL(string: relay)?.host() ?? relay)
     }
 }
 
@@ -353,9 +449,10 @@ private struct PairingSheet: View {
                     .foregroundStyle(.orange)
                     .padding(.top, 8)
             } else if invite.relay == nil {
-                Text("Without a relay, the iPhone reaches the JetKVM on its network or tailnet only.")
+                Text("Your iPhone reaches the JetKVM only through a relay, and this one has none yet. "
+                    + "Save a relay URL under Relay first, then show a new code.")
                     .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.orange)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 8)
@@ -382,6 +479,8 @@ private struct PairingSheet: View {
         }
         .frame(width: 420)
         .fixedSize(horizontal: false, vertical: true)
+        // A code that's closed can't pair anyone later.
+        .onDisappear { center.withdraw(invite) }
     }
 
     private func renew() {
@@ -412,22 +511,34 @@ private struct EnrollmentRow: View {
 
     var body: some View {
         let e = enrollment
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: e.approver.platform == "ios" ? "iphone" : "laptopcomputer")
                     .frame(width: 20)
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
-                Text(e.approver.name)
-                Tag("Asks to join")
-                Spacer()
-                Toggle("Also owner", isOn: $asOwner)
-                    .toggleStyle(.checkbox)
-                    .help("Owners can pair and revoke approvers, and change the relay.")
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(e.approver.name)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    // The iPhone shows its own ID while it waits: whoever
+                    // scanned the code first is the device asking.
+                    Text("ID \(ApproverLine.grouped(e.approver.id).prefix(19))…")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .help("Compare with the ID your iPhone shows: \(ApproverLine.grouped(e.approver.id))")
+                }
+                Spacer(minLength: 8)
                 Button("Decline") { center.decline(e) }
                 Button("Add") { admit() }
                     .buttonStyle(.borderedProminent)
             }
+            // Under the name, past the icon column.
+            Toggle("Also an owner: can add and remove devices", isOn: $asOwner)
+                .toggleStyle(.checkbox)
+                .font(.callout)
+                .help("Owners add and remove approvers and set the relay.")
+                .padding(.leading, 30)
             if let error {
                 Text(error).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }

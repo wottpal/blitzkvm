@@ -3,6 +3,7 @@ import ApprovalKit
 import Combine
 import JetKVMCore
 import LocalAuthentication
+import Network
 import SystemConfiguration
 
 /// Remote approvals on this Mac (approval/PROTOCOL.md): this Mac is an
@@ -48,6 +49,10 @@ final class ApprovalService: ObservableObject, CenterTransport {
     private var timer: Timer?
     private var started = false
     private var subscriptions = Set<AnyCancellable>()
+    /// The targets the rosters listed last: a target no roster lists any
+    /// more takes its stored passwords with it.
+    private var knownTargets = Set<String>()
+    private var pathMonitor: NWPathMonitor?
 
     private final class BrokerChannels {
         var direct: (channel: BoxChannel, generation: Int)?
@@ -90,6 +95,7 @@ final class ApprovalService: ObservableObject, CenterTransport {
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
+        watchNetwork()
         AppLog.log("approvals: approver \(keys.id) (\(keys.hardwareBacked ? "Secure Enclave" : "software keys")), "
             + "\(center.brokers.count) JetKVM\(center.brokers.count == 1 ? "" : "s")")
         return center
@@ -130,6 +136,44 @@ final class ApprovalService: ObservableObject, CenterTransport {
             channels[id] = nil
             routes[id] = nil
             _ = outbox.take(for: id, at: Self.now)
+        }
+        // Forgotten, turned off, or the computer removed: as on the iPhone,
+        // its passwords don't stay behind.
+        let targets = Set(brokers.flatMap { $0.decodedRoster?.targets.map(\.id) ?? [] })
+        for gone in knownTargets.subtracting(targets) {
+            for kind in ApprovalSummary.passwordKinds where vault.has(target: gone, kind: kind) {
+                AppLog.log("approvals: forgetting the stored \(ApprovalSummary.passwordName(kind)) of a removed computer")
+                removePassword(target: gone, kind: kind)
+            }
+        }
+        knownTargets = targets
+    }
+
+    /// After sleep or a network change a socket can look open while nothing
+    /// arrives any more: every channel connects again.
+    private func watchNetwork() {
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restartChannels("woke") }
+        }
+        let monitor = NWPathMonitor()
+        var first = true
+        monitor.pathUpdateHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if first { first = false } else { self?.restartChannels("network changed") }
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "approvals.path"))
+        pathMonitor = monitor
+    }
+
+    private func restartChannels(_ why: String) {
+        guard !channels.isEmpty else { return }
+        AppLog.log("approvals: \(why); reconnecting")
+        for c in channels.values {
+            c.direct?.channel.restart()
+            c.relay?.channel.restart()
         }
     }
 
@@ -206,7 +250,9 @@ final class ApprovalService: ObservableObject, CenterTransport {
     /// longer has goes (approvals turned off, this Mac revoked), so no
     /// channel keeps knocking.
     func deviceState(_ state: DeviceApprovals, address: String) {
-        guard let center, let b = center.broker(state.broker.id) else { return }
+        // Only the JetKVM whose broker this is (its keys, not just its id)
+        // can end its pairing or move its channel.
+        guard let center, let b = center.broker(state.broker.id), b.broker == state.broker else { return }
         if !state.enabled || !(state.approvers ?? []).contains(where: { $0.id == center.keys.id }) {
             AppLog.log("approvals: \(b.name) \(state.enabled ? "no longer lists this Mac" : "has approvals off"); forgetting it")
             center.remove(brokerID: b.id)
@@ -241,7 +287,8 @@ final class ApprovalService: ObservableObject, CenterTransport {
 
     func summary(_ r: OpenRequest) -> ApprovalSummary {
         ApprovalSummary(r, broker: center?.broker(r.brokerID),
-                        passwordStored: r.ask.secret != SecretKind.none && vault.has(target: r.ask.target, kind: r.ask.secret))
+                        passwordStored: r.ask.secret != SecretKind.none && vault.has(target: r.ask.target, kind: r.ask.secret),
+                        me: keys?.id)
     }
 
     /// The name of an approver of a request's broker.
@@ -259,6 +306,7 @@ final class ApprovalService: ObservableObject, CenterTransport {
         guard let center, let keys else { return }
         let summary = summary(r)
         let context = LAContext()
+        defer { context.invalidate() }
         try await Self.authenticate(context, reason: summary.authenticationReason)
         guard r.ask.expires > Int64(Date().timeIntervalSince1970) else { throw ApprovalError("The request expired.") }
         var secret: String?
@@ -303,6 +351,7 @@ final class ApprovalService: ObservableObject, CenterTransport {
     func signAsOwner<T>(reason: String, _ change: (EnvelopeSigner) throws -> T) async throws -> T {
         guard let keys else { throw ApprovalError("Approvals aren't set up on this Mac.") }
         let context = LAContext()
+        defer { context.invalidate() }
         try await Self.authenticate(context, reason: reason)
         return try change(keys.presence(with: context))
     }
@@ -319,6 +368,19 @@ final class ApprovalService: ObservableObject, CenterTransport {
     func removePassword(target: String, kind: String) {
         vault.remove(target: target, kind: kind)
         vaultRevision += 1
+    }
+
+    /// Settings: a stored password is replaced or removed only after Touch
+    /// ID, as reading it needs (setting the first one doesn't).
+    func changePassword(_ password: String?, target: String, kind: String, computer: String) async throws {
+        if vault.has(target: target, kind: kind) {
+            let context = LAContext()
+            defer { context.invalidate() }
+            let name = ApprovalSummary.passwordName(kind)
+            try await Self.authenticate(context, reason: password == nil ? "remove the \(name) stored for \(computer)"
+                : "replace the \(name) stored for \(computer)")
+        }
+        if let password { try storePassword(password, target: target, kind: kind) } else { removePassword(target: target, kind: kind) }
     }
 
     // MARK: Touch ID

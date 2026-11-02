@@ -63,12 +63,19 @@ public enum RemoteInstall {
               files.values.allSatisfy({ $0.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil }) else { return nil }
         let names = files.keys.sorted()
         var lines = [
+            // What's left of stdin is the password line, when sudo didn't read
+            // it (an approval let it through): none of the steps gets it.
+            "exec </dev/null",
             "set -eu",
             "umask 077",
             "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
             "r=$(mktemp -d /private/var/tmp/blitzkvm-install.XXXXXX)",
             #"trap 'rm -rf "$r"' EXIT"#,
-            "for f in \(names.joined(separator: " ")); do cp \(quote(staging))/\"$f\" \"$r/$f\"; done",
+            // Plain files only: a symlink or a FIFO in the user's staging
+            // directory would make root read something else, or hang.
+            "for f in \(names.joined(separator: " ")); do s=\(quote(staging))/\"$f\"; "
+                + #"[ -f "$s" ] && [ ! -L "$s" ] || { echo "install: $f isn't a plain file" >&2; exit 1; }; "#
+                + #"cp -P "$s" "$r/$f"; done"#,
             #"cd "$r""#,
             "printf '%s\\n' \(names.map { quote("\(files[$0]!)  \($0)") }.joined(separator: " ")) | shasum -a 256 -c -s - "
                 + "|| { echo 'install: the uploaded files changed on the remote Mac' >&2; exit 1; }",
@@ -103,10 +110,20 @@ public enum RemoteInstall {
         isStagingDirectory(staging) ? "rm -rf \(quote(staging))" : nil
     }
 
+    /// Turns the agent's keeping 1Password running on or off: a user default
+    /// it reads (RemoteCore's `OnePassword.keepRunningDomain`), as the user.
+    public static func keepOnePasswordCommand(_ keep: Bool) -> String {
+        keep ? "defaults write xyz.scio.blitzkvm.remote KeepOnePasswordRunning -bool true"
+            : "defaults delete xyz.scio.blitzkvm.remote KeepOnePasswordRunning 2>/dev/null; true"
+    }
+
     /// `sudo -S` with the password on standard input, asking every time
-    /// (-k: a cached sudo would hand the password line to the script).
+    /// (-k: a cached sudo would hand the password line to the script). By
+    /// its path, not a name the user's shell could resolve elsewhere. The
+    /// user's shell (its rc files) still runs the command: setup must run
+    /// while nothing untrusted runs as that user (README, SECURITY).
     public static func sudo(_ script: String) -> String {
-        "sudo -k -S -p '' /bin/sh -c \(quote(script))"
+        "/usr/bin/sudo -k -S -p '' /bin/sh -c \(quote(script))"
     }
 
     /// The standard input of a sudo step.
