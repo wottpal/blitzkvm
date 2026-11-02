@@ -1348,6 +1348,10 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
                          detail: wake == nil ? "Connected to \(name)." : "Connected, but no picture yet. The computer may be asleep.",
                          symbol: "play.display", action: wake)
         }
+        // A picture that pauses briefly (a slow link, a paced keyframe)
+        // catches up by itself: say so only once it has been gone for 2 s
+        // (1.4 s here, plus the 0.6 s every stall waits before it shows).
+        guard now - lastPicture >= 1_400_000_000 else { return nil }
         return .init(title: "Waiting for video…",
                      detail: seconds < 2 ? "Connected, but the picture has paused." : "Connected, but no new picture for \(seconds) s.",
                      symbol: "hourglass", action: wake)
