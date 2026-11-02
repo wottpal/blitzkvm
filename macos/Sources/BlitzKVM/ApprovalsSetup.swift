@@ -410,10 +410,10 @@ struct ApprovalsSetupRow: View {
         case .on(let on)?:
             let approvers = ApproverLine.names(on.approvers)
             guard let target = on.target else {
-                let install = on.canInstall ? RowAction(title: "Install on \(computer)…") { install() }
+                let first = on.canInstall ? RowAction(title: "Install on \(computer)…") { install() }
                     : RowAction(title: "Set Up Clipboard Sync…", perform: setUpClipboard)
                 return RowContent(detail: "On · \(approvers)", note: "Install on \(computer) to approve its prompts.",
-                                  action: install, menu: [settings, turnOff])
+                                  action: first, menu: [settings, turnOff])
             }
             let keep = model.keepsOnePasswordRunning
             let note = (model.withoutSudo ? "Installed without sudo: /usr/local isn't root's there."
