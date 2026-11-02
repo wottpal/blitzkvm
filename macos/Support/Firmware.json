@@ -2,9 +2,9 @@
   "builds": [
     {
       "kind": "blitzkvm",
-      "tag": "release/0.5.9-fork.9",
-      "sha256": "7ac763ebd33f67b0c37fcc7dd28888916a88680c4db7b8be48a3a1dbc9706660",
-      "size": 35257208,
+      "tag": "release/0.5.9-fork.10",
+      "sha256": "5043c605948e7ae3ab3767febb360b3d264c0089acc80eed35feca869216cecb",
+      "size": 35762392,
       "features": [
         "hidrpcWheel",
         "refreshRegions",
@@ -12,7 +12,8 @@
         "browserAccess",
         "hostLink",
         "framePacing",
-        "stunServers"
+        "stunServers",
+        "approvals"
       ]
     },
     {
