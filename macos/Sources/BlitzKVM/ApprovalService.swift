@@ -156,11 +156,16 @@ final class ApprovalService: ObservableObject, CenterTransport {
             MainActor.assumeIsolated { self?.restartChannels("woke") }
         }
         let monitor = NWPathMonitor()
-        var first = true
-        monitor.pathUpdateHandler = { [weak self] _ in
+        // Updates also come for nothing that matters here (several at
+        // start, a cost flag): only another set of interfaces or gateways
+        // is a new network.
+        var last: String?
+        monitor.pathUpdateHandler = { [weak self] path in
+            let key = "\(path.status) \(path.availableInterfaces.map(\.name).sorted()) \(path.gateways.map { "\($0)" }.sorted())"
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if first { first = false } else { self?.restartChannels("network changed") }
+                    defer { last = key }
+                    if let last, last != key { self?.restartChannels("network changed") }
                 }
             }
         }
