@@ -42,7 +42,6 @@ final class ApproverSession {
     private(set) var passwordsVersion = 0
 
     @ObservationIgnored private let transport: RelayTransport
-    @ObservationIgnored private let file: URL?
     @ObservationIgnored private var lastRefresh = Date.distantPast
     @ObservationIgnored private var registered = Set<String>()
     /// Per broker, the last outbox box taken: the next fetch acknowledges it.
@@ -54,7 +53,6 @@ final class ApproverSession {
 
     init(keys: ApproverKeys, store: BlobStore, name: String, file: URL?) {
         self.keys = keys
-        self.file = file
         vault = Vaults.make(store: store)
         transport = RelayTransport(keys: keys)
         center = ApprovalCenter(keys: keys, name: name, platform: "ios", file: file)
@@ -78,16 +76,12 @@ final class ApproverSession {
     var name: String { center.name }
 
     /// Renames this approver for later pairings (a roster keeps the name the
-    /// device enrolled with). ApprovalCenter's name is fixed, so this makes a
-    /// new center from the same file.
+    /// device enrolled with). The center stays, with its requests and history.
     func rename(_ newName: String) {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != center.name else { return }
         UserDefaults.standard.set(trimmed, forKey: Self.nameKey)
-        center.transport = nil
-        center = ApprovalCenter(keys: keys, name: trimmed, platform: "ios", file: file)
-        attach(center)
-        Task { await refresh(sync: true) }
+        center.name = trimmed
     }
 
     /// Whether the roster lists this iPhone (an owner admitted it).

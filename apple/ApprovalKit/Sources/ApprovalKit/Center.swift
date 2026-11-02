@@ -98,7 +98,9 @@ public final class ApprovalCenter: ObservableObject {
     @Published public private(set) var enrollments: [Enrollment] = []
 
     public let keys: ApproverKeys
-    public let name: String
+    /// This approver's name for later pairings (a roster keeps the name a
+    /// device enrolled with).
+    public var name: String
     public let platform: String
     public weak var transport: CenterTransport?
     /// Called for each new request (post a notification).
