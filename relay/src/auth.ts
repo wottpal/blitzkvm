@@ -44,7 +44,9 @@ export async function verifyRelayAuth(
   if (want.approver !== undefined && approver !== want.approver) throw new WireError("relay approver");
   if (!isB64(nonce, 32) || (want.nonce !== undefined && nonce !== want.nonce)) throw new WireError("relay nonce");
   if (typeof issued !== "number" || !Number.isInteger(issued)) throw new WireError("relay payload");
-  if (Math.abs(now - issued) > MAX_SKEW) throw new WireError("stale");
+  // A socket's auth answers its hello's nonce, fresh by itself: a JetKVM
+  // whose clock isn't set yet can still connect. Phone requests need issued.
+  if (want.nonce === undefined && Math.abs(now - issued) > MAX_SKEW) throw new WireError("stale");
   const auth: RelayAuth = { v, role: want.role, endpoint: want.endpoint, broker: want.broker, nonce, issued };
   if (typeof payload.key === "string") auth.key = payload.key;
   if (typeof approver === "string") auth.approver = approver;

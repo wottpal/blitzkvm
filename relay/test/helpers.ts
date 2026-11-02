@@ -211,9 +211,18 @@ export function post(broker: string, kind: string, body: unknown, headers: Recor
   });
 }
 
-// enrollFrom posts an enrollment as the client at ip.
-export function enrollFrom(broker: string, ip: string, body: unknown = { box: box() }): Promise<Response> {
-  return post(broker, "enroll", body, { "cf-connecting-ip": ip });
+// enrollFrom posts an enrollment for a pairing as the client at ip.
+export function enrollFrom(broker: string, ip: string, pairing: string): Promise<Response> {
+  return post(broker, "enroll", { box: box(), pairing }, { "cf-connecting-ip": ip });
+}
+
+// announce has the broker announce a pairing (the hash of an owner's QR code
+// token) and returns its hash.
+export async function announce(f: Fixture, broker: Client, hash = b64encode(random(32))): Promise<string> {
+  const before = await count(f.broker.id, "pairings");
+  broker.send({ op: "pairing", hash, expires: now() + 300 });
+  await vi.waitFor(async () => expect(await count(f.broker.id, "pairings")).toBe(before + 1));
+  return hash;
 }
 
 // tables lists the object's own tables: none for an id no broker has proved.

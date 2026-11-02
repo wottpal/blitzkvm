@@ -1,8 +1,8 @@
 // APNs over HTTP/2 with token (JWT) authentication, written against
 // Apple's "Sending notification requests to APNs".
-import { MAX_COLLAPSE_ID, MAX_PUSH_PAYLOAD } from "./limits";
+import { APNS_TIMEOUT, MAX_COLLAPSE_ID, MAX_PUSH_PAYLOAD } from "./limits";
 import type { Device } from "./store";
-import { b64encode, isObject, utf8 } from "./wire";
+import { b64encode, hex, isObject, sha256, utf8 } from "./wire";
 
 export const DEFAULT_TOPIC = "com.fmdlabs.blitzkvm";
 const HOSTS = { sandbox: "https://api.sandbox.push.apple.com", production: "https://api.push.apple.com" };
@@ -29,13 +29,33 @@ const APS = {
   sound: "default",
 };
 
+// A quiet push replaces a request's notification once it ended (approved
+// elsewhere, denied, expired): no sound, no Focus breakthrough, no actions,
+// also when the extension can't open the box.
+const QUIET_APS = {
+  alert: { title: "Approval request ended" },
+  "mutable-content": 1,
+  "interruption-level": "passive",
+};
+
 // pushPayload carries the box when it fits, so the notification service
 // extension can show the request without a round trip; else the app fetches
 // its outbox.
-export function pushPayload(broker: string, box: string): string {
-  const full = JSON.stringify({ aps: APS, bka: { b: broker, x: box } });
+export function pushPayload(broker: string, box: string, quiet = false): string {
+  const aps = quiet ? QUIET_APS : APS;
+  const full = JSON.stringify({ aps, bka: { b: broker, x: box } });
   if (utf8(full).length <= MAX_PUSH_PAYLOAD) return full;
-  return JSON.stringify({ aps: APS, bka: { b: broker } });
+  return JSON.stringify({ aps, bka: { b: broker } });
+}
+
+// isQuiet is the broker's ask for a quiet push.
+export function isQuiet(push: unknown): boolean {
+  return isObject(push) && push.quiet === true;
+}
+
+// isRepeat marks the broker's repeat of an unanswered request.
+export function isRepeat(push: unknown): boolean {
+  return isObject(push) && push.repeat === true;
 }
 
 // collapseId is the broker's collapse id when APNs takes it.
@@ -51,25 +71,44 @@ export interface PushResult {
   drop: boolean; // the token is gone for good
 }
 
-export async function push(cfg: ApnsConfig, device: Device, payload: string, collapse: string | undefined, now: number): Promise<PushResult> {
-  const headers: Record<string, string> = {
-    authorization: `bearer ${await providerToken(cfg, now)}`,
-    "apns-topic": cfg.topic,
-    "apns-push-type": "alert",
-    "apns-priority": "10",
-    "apns-expiration": String(now + EXPIRATION),
-    "content-type": "application/json",
-  };
-  if (collapse) headers["apns-collapse-id"] = collapse;
-  const res = await fetch(`${HOSTS[device.env]}/3/device/${device.token}`, { method: "POST", headers, body: payload });
-  if (res.ok) {
-    await res.body?.cancel();
-    return { status: res.status, drop: false };
+const GONE = new Set(["BadDeviceToken", "Unregistered", "DeviceTokenNotForTopic"]);
+
+export async function push(
+  cfg: ApnsConfig,
+  device: Device,
+  payload: string,
+  collapse: string | undefined,
+  now: number,
+  tokens?: TokenStore,
+): Promise<PushResult> {
+  // A provider token Apple turned down is minted again, once.
+  for (let attempt = 0; ; attempt++) {
+    const headers: Record<string, string> = {
+      authorization: `bearer ${await providerToken(cfg, now, tokens)}`,
+      "apns-topic": cfg.topic,
+      "apns-push-type": "alert",
+      "apns-priority": "10",
+      "apns-expiration": String(now + EXPIRATION),
+      "content-type": "application/json",
+    };
+    if (collapse) headers["apns-collapse-id"] = collapse;
+    const res = await fetch(`${HOSTS[device.env]}/3/device/${device.token}`, {
+      method: "POST",
+      headers,
+      body: payload,
+      signal: AbortSignal.timeout(APNS_TIMEOUT * 1000),
+    });
+    if (res.ok) {
+      await res.body?.cancel();
+      return { status: res.status, drop: false };
+    }
+    const reason = await errorReason(res);
+    if (reason === "ExpiredProviderToken" || reason === "InvalidProviderToken") {
+      forgetToken(tokens);
+      if (attempt === 0) continue;
+    }
+    return { status: res.status, reason, drop: res.status === 410 || (reason !== undefined && GONE.has(reason)) };
   }
-  const reason = await errorReason(res);
-  if (reason === "ExpiredProviderToken" || reason === "InvalidProviderToken") cached = undefined;
-  const drop = res.status === 410 || reason === "BadDeviceToken" || reason === "Unregistered";
-  return { status: res.status, reason, drop };
 }
 
 async function errorReason(res: Response): Promise<string | undefined> {
@@ -82,19 +121,52 @@ async function errorReason(res: Response): Promise<string | undefined> {
   }
 }
 
-// The provider token is shared by every object in the isolate.
-let cached: { material: string; token: string; until: number } | undefined;
+// A provider token is minted at most every 50 minutes: Apple refuses new
+// ones more often than every 20 (TooManyProviderTokenUpdates). Durable
+// Objects come and go between isolates, so the object's storage keeps it
+// too; the isolate's copy and a mint in flight are shared by its objects.
+export interface CachedToken {
+  material: string; // a hash of team, key id and key: which key minted it
+  token: string;
+  until: number;
+}
 
-async function providerToken(cfg: ApnsConfig, now: number): Promise<string> {
-  const material = `${cfg.teamId}\n${cfg.keyId}\n${cfg.key}`;
+export interface TokenStore {
+  load(): CachedToken | undefined;
+  save(token: CachedToken | undefined): void;
+}
+
+let cached: CachedToken | undefined;
+let minting: Promise<CachedToken> | undefined;
+
+async function providerToken(cfg: ApnsConfig, now: number, tokens?: TokenStore): Promise<string> {
+  const material = hex(await sha256(utf8(`${cfg.teamId}\n${cfg.keyId}\n${cfg.key}`)));
   if (cached && cached.material === material && now < cached.until) return cached.token;
+  const stored = tokens?.load();
+  if (stored && stored.material === material && now < stored.until) {
+    cached = stored;
+    return stored.token;
+  }
+  minting ??= mint(cfg, material, now).finally(() => {
+    minting = undefined;
+  });
+  const fresh = await minting;
+  cached = fresh;
+  tokens?.save(fresh);
+  return fresh.token;
+}
+
+async function mint(cfg: ApnsConfig, material: string, now: number): Promise<CachedToken> {
   const key = await crypto.subtle.importKey("pkcs8", pemBytes(cfg.key), { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
   const signingInput = `${b64json({ alg: "ES256", kid: cfg.keyId })}.${b64json({ iss: cfg.teamId, iat: now })}`;
   // WebCrypto's raw r || s is JOSE's ES256 signature format.
   const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, utf8(signingInput));
-  const token = `${signingInput}.${b64encode(new Uint8Array(sig))}`;
-  cached = { material, token, until: now + TOKEN_LIFETIME };
-  return token;
+  return { material, token: `${signingInput}.${b64encode(new Uint8Array(sig))}`, until: now + TOKEN_LIFETIME };
+}
+
+function forgetToken(tokens?: TokenStore): void {
+  cached = undefined;
+  tokens?.save(undefined);
 }
 
 function b64json(v: unknown): string {

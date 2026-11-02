@@ -10,6 +10,9 @@ declare global {
       APNS_KEY_ID?: string;
       APNS_TEAM_ID?: string;
       APNS_TOPIC?: string;
+      // Optional: the broker ids this relay serves (space- or comma-
+      // separated). Unset, any broker that proves its key may use it.
+      BROKERS?: string;
     }
   }
 }

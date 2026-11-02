@@ -28,10 +28,11 @@ export function isId(v: unknown): v is string {
 }
 
 // clientKey names the client's network for rate limits: its IPv4 address or
-// its IPv6 /64 (one host gets a whole /64), hashed so no address is stored.
-export async function clientKey(request: Request): Promise<string> {
+// its IPv6 /64 (one host gets a whole /64), hashed with the object's salt so
+// no address is stored or recoverable.
+export async function clientKey(request: Request, salt: string): Promise<string> {
   const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
-  return hex((await sha256(utf8(ipv6Prefix(ip) ?? ip))).subarray(0, 16));
+  return hex((await sha256(utf8(`${salt}\n${ipv6Prefix(ip) ?? ip}`))).subarray(0, 16));
 }
 
 function ipv6Prefix(ip: string): string | undefined {

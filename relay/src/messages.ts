@@ -56,7 +56,24 @@ export async function parseAllowList(v: unknown): Promise<Approver[] | undefined
 export function parseDevice(v: unknown): Device | undefined {
   if (!isObject(v)) return undefined;
   const { token, env } = v;
-  if (typeof token !== "string" || !/^(?:[0-9a-fA-F]{2}){8,100}$/.test(token)) return undefined;
+  if (!isToken(token)) return undefined;
   if (env !== "sandbox" && env !== "production") return undefined;
   return { token: token.toLowerCase(), env };
+}
+
+// DeviceChange is what a phone's devices request asks for: register a token,
+// or remove one (or, without a token, all of its own).
+export type DeviceChange = { add: Device } | { remove: string | undefined };
+
+export function parseDeviceChange(v: unknown): DeviceChange | undefined {
+  if (isObject(v) && v.remove === true) {
+    if (v.token === undefined) return { remove: undefined };
+    return isToken(v.token) ? { remove: v.token.toLowerCase() } : undefined;
+  }
+  const device = parseDevice(v);
+  return device ? { add: device } : undefined;
+}
+
+function isToken(v: unknown): v is string {
+  return typeof v === "string" && /^(?:[0-9a-fA-F]{2}){8,100}$/.test(v);
 }

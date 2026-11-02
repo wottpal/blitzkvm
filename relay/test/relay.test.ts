@@ -1,8 +1,13 @@
 import { runDurableObjectAlarm } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { b64decode, b64encode, utf8 } from "../src/wire";
+import { ALERTS_PER_HOUR, IDLE_LIFETIME, PUSHES_PER_DAY, PUSHES_PER_HOUR, REPEATS_PER_HOUR } from "../src/limits";
 import {
   allowList,
+  announce,
+  random,
+  ready,
+  type Client,
   apnsCalls,
   apnsKey,
   apnsToken,
@@ -80,11 +85,11 @@ describe("broker socket", () => {
     expect((await c.closed).code).toBe(1008);
   });
 
-  it("refuses a stale auth", async () => {
+  it("takes a socket auth from a client whose clock is off: the hello's nonce makes it fresh", async () => {
     const f = await fixture();
     const c = await connect(`/v1/b/${f.broker.id}/ws`);
-    c.send(await brokerAuth(f.broker, await hello(c), { issued: now() - 300 }));
-    expect((await c.closed).code).toBe(1008);
+    c.send(await brokerAuth(f.broker, await hello(c), { issued: now() - 3600 }));
+    await ready(c);
   });
 
   it("refuses another hello's nonce", async () => {
@@ -266,6 +271,22 @@ describe("send and push", () => {
     expect(apnsCalls(spy)[0]!.body.bka).toEqual({ b: f.broker.id });
   });
 
+  it("sends a quiet push when the broker asks for one", async () => {
+    const { f, broker } = await setup();
+    await setEnv(f.broker.id, (await apnsKey()).env);
+    await registerDevice(f, apnsToken());
+    const spy = mockApns();
+    const b = box();
+    broker.send({ op: "send", to: f.phone.presence.id, box: b, push: { collapse: "request-1.end", quiet: true } });
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    const [call] = apnsCalls(spy);
+    expect(call!.headers["apns-collapse-id"]).toBe("request-1.end");
+    expect(call!.body).toEqual({
+      aps: { alert: { title: "Approval request ended" }, "mutable-content": 1, "interruption-level": "passive" },
+      bka: { b: f.broker.id, x: b },
+    });
+  });
+
   it("pushes only when send asks for it", async () => {
     const { f, broker } = await setup();
     await setEnv(f.broker.id, (await apnsKey()).env);
@@ -328,21 +349,22 @@ describe("send and push", () => {
 });
 
 describe("limits", () => {
-  it("pushes at most 60 times an hour per broker", async () => {
+  it(`pushes at most ${PUSHES_PER_HOUR} times an hour per broker`, async () => {
     const { f, broker } = await setup();
     await setEnv(f.broker.id, (await apnsKey()).env);
     await registerDevice(f, apnsToken());
+    await inObject(f.broker.id, (_, state) => {
+      state.storage.sql.exec(`INSERT INTO counters (key, count, reset) VALUES (?, ?, ?)`, "push", PUSHES_PER_HOUR - 1, now() + 3600);
+    });
     const spy = mockApns();
-    for (let i = 0; i < 61; i++) broker.send({ op: "send", to: f.phone.presence.id, box: box(), push: { collapse: `n${i}` } });
-    await vi.waitFor(async () => expect(await count(f.broker.id, "queue")).toBe(61), { timeout: 5000 });
-    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(60));
+    for (let i = 0; i < 2; i++) broker.send({ op: "send", to: f.phone.presence.id, box: box(), push: { collapse: `n${i}` } });
+    await vi.waitFor(async () => expect(await count(f.broker.id, "queue")).toBe(2), { timeout: 5000 });
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     await sleep(50);
-    const collapsed = apnsCalls(spy).map((c) => c.headers["apns-collapse-id"]);
-    expect(collapsed).toHaveLength(60);
-    expect(collapsed).not.toContain("n60");
+    expect(apnsCalls(spy).map((c) => c.headers["apns-collapse-id"])).toEqual(["n0"]);
   });
 
-  it("pushes at most 500 times a day per device token", async () => {
+  it(`pushes at most ${PUSHES_PER_DAY} times a day per device token`, async () => {
     const { f, broker } = await setup();
     await setEnv(f.broker.id, (await apnsKey()).env);
     const spent = apnsToken();
@@ -350,7 +372,7 @@ describe("limits", () => {
     await registerDevice(f, spent);
     await registerDevice(f, fresh);
     await inObject(f.broker.id, (_, state) => {
-      state.storage.sql.exec(`INSERT INTO counters (key, count, reset) VALUES (?, 500, ?)`, `device:${spent}`, now() + 3600);
+      state.storage.sql.exec(`INSERT INTO counters (key, count, reset) VALUES (?, ?, ?)`, `device:${spent}`, PUSHES_PER_DAY, now() + 3600);
     });
     const spy = mockApns();
     broker.send({ op: "send", to: f.phone.presence.id, box: box(), push: {} });
@@ -358,6 +380,36 @@ describe("limits", () => {
     await sleep(50);
     expect(spy).toHaveBeenCalledTimes(1);
     expect(apnsCalls(spy)[0]!.url).toContain(fresh);
+  });
+
+  it(`alerts a device at most ${ALERTS_PER_HOUR} times an hour, then pushes quietly`, async () => {
+    const { f, broker } = await setup();
+    await setEnv(f.broker.id, (await apnsKey()).env);
+    const token = apnsToken();
+    await registerDevice(f, token);
+    await inObject(f.broker.id, (_, state) => {
+      state.storage.sql.exec(`INSERT INTO counters (key, count, reset) VALUES (?, ?, ?)`, `alert:${token}`, ALERTS_PER_HOUR, now() + 3600);
+    });
+    const spy = mockApns();
+    broker.send({ op: "send", to: f.phone.presence.id, box: box(), push: { collapse: "r" } });
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    expect(apnsCalls(spy)[0]!.body.aps["interruption-level"]).toBe("passive");
+    expect(apnsCalls(spy)[0]!.body.aps.sound).toBeUndefined();
+  });
+
+  it(`stops repeats at ${REPEATS_PER_HOUR} pushes an hour, leaving the rest for new requests`, async () => {
+    const { f, broker } = await setup();
+    await setEnv(f.broker.id, (await apnsKey()).env);
+    await registerDevice(f, apnsToken());
+    await inObject(f.broker.id, (_, state) => {
+      state.storage.sql.exec(`INSERT INTO counters (key, count, reset) VALUES (?, ?, ?)`, "push", REPEATS_PER_HOUR, now() + 3600);
+    });
+    const spy = mockApns();
+    broker.send({ op: "send", to: f.phone.presence.id, box: box(), push: { collapse: "r.1", repeat: true } });
+    broker.send({ op: "send", to: f.phone.presence.id, box: box(), push: { collapse: "s" } });
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    await sleep(50);
+    expect(apnsCalls(spy).map((c) => c.headers["apns-collapse-id"])).toEqual(["s"]);
   });
 
   it("queues at most 64 boxes per approver, the newest", async () => {
@@ -392,6 +444,16 @@ describe("phone endpoints", () => {
     ]);
     const bad = await phonePost(f, "devices", { apns: { token, env: "staging" } });
     expect(bad.status).toBe(400);
+  });
+
+  it("devices removes a token, or all of the approver's", async () => {
+    const { f } = await setup();
+    const [a, b] = [apnsToken(), apnsToken()];
+    for (const token of [a, b]) expect((await phonePost(f, "devices", { apns: { token, env: "sandbox" } })).status).toBe(200);
+    expect((await phonePost(f, "devices", { apns: { token: a, remove: true } })).status).toBe(200);
+    expect(await query(f.broker.id, `SELECT token FROM devices`)).toEqual([{ token: b }]);
+    expect((await phonePost(f, "devices", { apns: { remove: true } })).status).toBe(200);
+    expect(await count(f.broker.id, "devices")).toBe(0);
   });
 
   it("inbox forwards to the broker's socket", async () => {
@@ -430,6 +492,25 @@ describe("phone endpoints", () => {
     expect(await count(f.broker.id, "queue")).toBe(1);
   });
 
+  it("outbox with ack keeps boxes until a later request acknowledges them", async () => {
+    const { f, broker } = await setup();
+    const boxes = [box(), box()];
+    for (const b of boxes) broker.send({ op: "send", to: f.phone.presence.id, box: b });
+    await vi.waitFor(async () => expect(await count(f.broker.id, "queue")).toBe(2));
+    const take = async (ack: number) => (await (await phonePost(f, "outbox", { ack })).json()) as { boxes: string[]; last: number };
+    const first = await take(0);
+    expect(first.boxes).toEqual(boxes);
+    // The response got lost: the same boxes come again.
+    expect((await take(0)).boxes).toEqual(boxes);
+    const later = box();
+    broker.send({ op: "send", to: f.phone.presence.id, box: later });
+    await vi.waitFor(async () => expect(await count(f.broker.id, "queue")).toBe(3));
+    const next = await take(first.last);
+    expect(next.boxes).toEqual([later]);
+    expect((await take(next.last)).boxes).toEqual([]);
+    expect((await take(next.last)).last).toBe(next.last);
+  });
+
   it("forgets boxes after two minutes", async () => {
     const { f, broker } = await setup();
     broker.send({ op: "send", to: f.phone.presence.id, box: box() });
@@ -450,7 +531,7 @@ describe("phone endpoints", () => {
     expect((await post(f.broker.id, "outbox", env)).status).toBe(200);
     const again = await post(f.broker.id, "outbox", env);
     expect(again.status).toBe(401);
-    expect(await again.json()).toEqual({ error: "replay" });
+    expect(await again.json()).toEqual({ error: "unauthorized" }); // the reason goes to the log only
   });
 
   it("refuses a request issued too long ago or ahead", async () => {
@@ -458,7 +539,7 @@ describe("phone endpoints", () => {
     for (const issued of [now() - 121, now() + 121]) {
       const res = await post(f.broker.id, "outbox", await phoneEnvelope(f, "outbox", { issued }));
       expect(res.status).toBe(401);
-      expect(await res.json()).toEqual({ error: "stale" });
+      expect(await res.json()).toEqual({ error: "unauthorized" });
     }
   });
 
@@ -480,17 +561,32 @@ describe("phone endpoints", () => {
 });
 
 describe("enroll", () => {
-  it("forwards a new device's box to the broker unauthenticated", async () => {
+  it("forwards a new device's box for a pairing the broker announced", async () => {
     const { f, broker } = await setup();
+    const pairing = await announce(f, broker);
     const b = box();
-    const res = await post(f.broker.id, "enroll", { box: b });
+    const res = await post(f.broker.id, "enroll", { box: b, pairing });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
     expect(await broker.next()).toEqual({ op: "from", from: "", box: b });
   });
 
+  it("refuses an enrollment without a live pairing, and spends a pairing after 3", async () => {
+    const { f, broker } = await setup();
+    expect((await post(f.broker.id, "enroll", { box: box() })).status).toBe(400);
+    expect((await post(f.broker.id, "enroll", { box: box(), pairing: b64encode(random(32)) })).status).toBe(403);
+    const pairing = await announce(f, broker);
+    for (let i = 0; i < 3; i++) expect((await enrollFrom(f.broker.id, `192.0.2.${i + 1}`, pairing)).status).toBe(200);
+    expect((await enrollFrom(f.broker.id, "192.0.2.9", pairing)).status).toBe(403);
+    // An expired one is gone too.
+    const old = await announce(f, broker);
+    await inObject(f.broker.id, (_, state) => state.storage.sql.exec(`UPDATE pairings SET expires = ? WHERE hash = ?`, now(), old));
+    expect((await enrollFrom(f.broker.id, "192.0.2.10", old)).status).toBe(403);
+  });
+
   it("queues for an offline broker", async () => {
     const { f, broker } = await setup();
+    const pairing = await announce(f, broker);
     broker.close();
     await broker.closed;
     await vi.waitFor(async () => {
@@ -498,7 +594,7 @@ describe("enroll", () => {
       expect(open).toBe(0);
     });
     const b = box();
-    expect((await post(f.broker.id, "enroll", { box: b })).status).toBe(200);
+    expect((await post(f.broker.id, "enroll", { box: b, pairing })).status).toBe(200);
     const again = await connectBroker(f);
     expect(await again.next()).toEqual({ op: "from", from: "", box: b });
   });
@@ -511,30 +607,44 @@ describe("enroll", () => {
     expect((await post(unknown.id, "enroll", { box: box() })).status).toBe(404);
   });
 
-  it("allows 5 an hour per client and 10 per broker, spending neither when one says no", async () => {
-    const { f } = await setup();
-    for (let i = 0; i < 5; i++) expect((await enrollFrom(f.broker.id, "192.0.2.1")).status).toBe(200);
-    const limited = await enrollFrom(f.broker.id, "192.0.2.1");
+  it("allows 5 an hour per client, spending nothing when it says no", async () => {
+    const { f, broker } = await setup();
+    const pairings = [await announce(f, broker), await announce(f, broker)];
+    for (let i = 0; i < 5; i++) expect((await enrollFrom(f.broker.id, "192.0.2.1", pairings[Math.floor(i / 3)]!)).status).toBe(200);
+    const limited = await enrollFrom(f.broker.id, "192.0.2.1", pairings[1]!);
     expect(limited.status).toBe(429);
     expect(await limited.json()).toEqual({ error: "too many enrollments" });
-    // The refused one didn't count against the broker: another client gets all 5.
-    for (let i = 0; i < 5; i++) expect((await enrollFrom(f.broker.id, "192.0.2.2")).status).toBe(200);
-    // Now the broker's 10 are spent.
-    expect((await enrollFrom(f.broker.id, "192.0.2.3")).status).toBe(429);
+    // The refused one didn't spend the pairing's last use.
+    expect((await enrollFrom(f.broker.id, "192.0.2.2", pairings[1]!)).status).toBe(200);
   });
 
   it("counts an IPv6 client per /64", async () => {
-    const { f } = await setup();
+    const { f, broker } = await setup();
+    const pairings = [await announce(f, broker), await announce(f, broker), await announce(f, broker)];
     for (let i = 0; i < 5; i++) {
       const ip = i % 2 ? "2001:db8:1:2::1" : `2001:0db8:0001:0002:${i}::5`;
-      expect((await enrollFrom(f.broker.id, ip)).status).toBe(200);
+      expect((await enrollFrom(f.broker.id, ip, pairings[Math.floor(i / 3)]!)).status).toBe(200);
     }
-    expect((await enrollFrom(f.broker.id, "2001:db8:1:2:ffff:ffff:ffff:ffff")).status).toBe(429);
-    expect((await enrollFrom(f.broker.id, "2001:db8:1:3::1")).status).toBe(200);
+    expect((await enrollFrom(f.broker.id, "2001:db8:1:2:ffff:ffff:ffff:ffff", pairings[2]!)).status).toBe(429);
+    expect((await enrollFrom(f.broker.id, "2001:db8:1:3::1", pairings[2]!)).status).toBe(200);
   });
 });
 
 describe("abuse", () => {
+  it("forgets a broker that hasn't connected for 90 days", async () => {
+    const { f, broker } = await setup();
+    broker.close();
+    await broker.closed;
+    await vi.waitFor(async () => {
+      const open = await inObject(f.broker.id, (_, state) => state.getWebSockets("broker").filter((ws) => ws.readyState === 1).length);
+      expect(open).toBe(0);
+    });
+    await inObject(f.broker.id, (_, state) => state.storage.sql.exec(`UPDATE meta SET value = ? WHERE key = 'seen'`, String(now() - IDLE_LIFETIME)));
+    await runDurableObjectAlarm(stub(f.broker.id));
+    expect(await tables(f.broker.id)).toEqual([]);
+    expect((await phonePost(f, "outbox")).status).toBe(404);
+  });
+
   it("keeps no state for an id no broker has proved", async () => {
     const f = await fixture();
     const id = f.broker.id;
@@ -544,7 +654,7 @@ describe("abuse", () => {
     for (const kind of ["inbox", "devices", "outbox"]) {
       expect((await post(id, kind, await phoneEnvelope(f, kind, { box: box() }))).status).toBe(404);
     }
-    expect((await enrollFrom(id, "192.0.2.1")).status).toBe(404);
+    expect((await enrollFrom(id, "192.0.2.1", b64encode(random(32)))).status).toBe(404);
     // A broker socket that never proves the key leaves nothing either.
     const c = await connect(`/v1/b/${id}/ws`);
     c.send(await brokerAuth(await newKey(), await hello(c), { broker: id }));
@@ -554,13 +664,21 @@ describe("abuse", () => {
     expect(await tables(id)).toContain("queue");
   });
 
-  it("refuses more than 16 sockets waiting to authenticate", async () => {
-    const { f } = await setup();
-    for (let i = 0; i < 16; i++) await hello(await connect(`/v1/b/${f.broker.id}/ws`));
-    const { exports } = await import("cloudflare:workers");
-    const res = await exports.default.fetch(`https://relay.test/v1/b/${f.broker.id}/ws`, { headers: { Upgrade: "websocket" } });
-    expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ error: "too many connections" });
+  it("makes room for a new socket by closing the oldest of 16 that wait to authenticate", async () => {
+    const { f, broker } = await setup();
+    broker.close();
+    await broker.closed;
+    const idle: Client[] = [];
+    for (let i = 0; i < 16; i++) {
+      const c = await connect(`/v1/b/${f.broker.id}/ws`);
+      await hello(c);
+      idle.push(c);
+    }
+    // The real broker still gets in, and the longest idle socket goes.
+    const again = await connect(`/v1/b/${f.broker.id}/ws`);
+    again.send(await brokerAuth(f.broker, await hello(again)));
+    await ready(again);
+    expect((await idle[0]!.closed).code).toBe(1008);
   });
 
   it("closes a socket whose first message isn't auth", async () => {
@@ -619,7 +737,6 @@ describe("abuse", () => {
     const forOutbox = await phoneEnvelope(f, "outbox", { box: box() });
     const res = await post(f.broker.id, "inbox", forOutbox);
     expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: "relay endpoint" });
     const unbound = await phoneEnvelope(f, "outbox", { endpoint: undefined });
     expect((await post(f.broker.id, "outbox", unbound)).status).toBe(401);
     // A phone request's auth doesn't open a socket.

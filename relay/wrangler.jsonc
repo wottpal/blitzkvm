@@ -4,7 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-23",
   "workers_dev": true,
-  "observability": { "enabled": true },
+  // Invocation logs would keep request URLs (broker and approver ids) and metadata.
+  "observability": { "enabled": true, "logs": { "invocation_logs": false } },
   "durable_objects": {
     "bindings": [{ "name": "RELAY", "class_name": "Relay" }]
   },

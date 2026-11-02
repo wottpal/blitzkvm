@@ -1,5 +1,6 @@
 // The relay's state for one broker, in its Durable Object's SQLite.
-import { MAX_DEVICES, MAX_OBJECT_BYTES, MAX_QUEUED, MAX_QUEUED_BYTES } from "./limits";
+import { ENROLLS_PER_PAIRING, MAX_DEVICES, MAX_OBJECT_BYTES, MAX_PAIRINGS, MAX_QUEUED, MAX_QUEUED_BYTES } from "./limits";
+import { hex } from "./wire";
 
 // BROKER is the queue's recipient for boxes to the broker (approver ids are
 // hex, so it can't collide with one).
@@ -25,6 +26,8 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS nonces (nonce TEXT PRIMARY KEY, expires INTEGER NOT NULL)`,
   // Fixed-window rate limits: count events until reset.
   `CREATE TABLE IF NOT EXISTS counters (key TEXT PRIMARY KEY, count INTEGER NOT NULL, reset INTEGER NOT NULL)`,
+  // Pairings the broker announced (hash of the QR code's token): only these take enrollments.
+  `CREATE TABLE IF NOT EXISTS pairings (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL, uses INTEGER NOT NULL)`,
 ];
 
 export class Store {
@@ -44,6 +47,35 @@ export class Store {
     const store = new Store(sql);
     store.sql.exec(`INSERT INTO meta (key, value) VALUES ('broker', ?) ON CONFLICT (key) DO NOTHING`, broker);
     return store;
+  }
+
+  meta(key: string): string | undefined {
+    return this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, key).toArray()[0]?.value;
+  }
+
+  setMeta(key: string, value: string | undefined): void {
+    if (value === undefined) this.sql.exec(`DELETE FROM meta WHERE key = ?`, key);
+    else this.sql.exec(`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value);
+  }
+
+  // salt keys the hash of client addresses: an unsalted IPv4 hash reverses
+  // in seconds.
+  salt(): string {
+    let salt = this.meta("salt");
+    if (!salt) {
+      salt = hex(crypto.getRandomValues(new Uint8Array(16)));
+      this.setMeta("salt", salt);
+    }
+    return salt;
+  }
+
+  // seen is when the broker was last connected (Unix seconds).
+  seen(): number {
+    return Number(this.meta("seen") ?? 0);
+  }
+
+  setSeen(now: number): void {
+    this.setMeta("seen", String(now));
   }
 
   approver(id: string): Approver | undefined {
@@ -72,7 +104,7 @@ export class Store {
     }
     for (const id of removed) {
       this.sql.exec(`DELETE FROM devices WHERE approver = ?`, id);
-      this.sql.exec(`DELETE FROM queue WHERE recipient = ?`, id);
+      this.sql.exec(`DELETE FROM queue WHERE recipient = ? OR sender = ?`, id, id);
     }
     return { removed, rekeyed };
   }
@@ -102,6 +134,28 @@ export class Store {
 
   dropDevice(approver: string, token: string): void {
     this.sql.exec(`DELETE FROM devices WHERE approver = ? AND token = ?`, approver, token);
+  }
+
+  dropDevices(approver: string): void {
+    this.sql.exec(`DELETE FROM devices WHERE approver = ?`, approver);
+  }
+
+  // addPairing records a pairing the broker announced, keeping the newest.
+  addPairing(hash: string, expires: number): void {
+    this.sql.exec(`INSERT INTO pairings (hash, expires, uses) VALUES (?, ?, 0) ON CONFLICT (hash) DO NOTHING`, hash, expires);
+    this.sql.exec(
+      `DELETE FROM pairings WHERE hash NOT IN (SELECT hash FROM pairings ORDER BY expires DESC, rowid DESC LIMIT ?)`,
+      MAX_PAIRINGS,
+    );
+  }
+
+  // usePairing counts an enrollment against a live pairing; false when there
+  // is none, or it took its share.
+  usePairing(hash: string, now: number): boolean {
+    return (
+      this.sql.exec(`UPDATE pairings SET uses = uses + 1 WHERE hash = ? AND expires > ? AND uses < ?`, hash, now, ENROLLS_PER_PAIRING)
+        .rowsWritten > 0
+    );
   }
 
   // enqueue keeps the newest boxes within every cap: MAX_QUEUED per
@@ -172,6 +226,7 @@ export class Store {
     this.sql.exec(`DELETE FROM queue WHERE expires <= ?`, now);
     this.sql.exec(`DELETE FROM nonces WHERE expires <= ?`, now);
     this.sql.exec(`DELETE FROM counters WHERE reset <= ?`, now);
+    this.sql.exec(`DELETE FROM pairings WHERE expires <= ?`, now);
   }
 
   // nextExpiry is when purge next has something to do.
@@ -179,7 +234,8 @@ export class Store {
     const row = this.sql
       .exec<{ at: number | null }>(
         `SELECT MIN(at) AS at FROM (SELECT MIN(expires) AS at FROM queue UNION ALL
-           SELECT MIN(expires) FROM nonces UNION ALL SELECT MIN(reset) FROM counters)`,
+           SELECT MIN(expires) FROM nonces UNION ALL SELECT MIN(reset) FROM counters UNION ALL
+           SELECT MIN(expires) FROM pairings)`,
       )
       .one();
     return row.at ?? undefined;

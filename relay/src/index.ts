@@ -17,6 +17,7 @@ export default {
     } else if (request.method !== "POST") {
       return error(405, "POST only");
     }
+    if (env.BROKERS && !env.BROKERS.split(/[\s,]+/).includes(route.broker)) return error(404, "not found");
     return env.RELAY.getByName(route.broker).fetch(request);
   },
 } satisfies ExportedHandler<Env>;
