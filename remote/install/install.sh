@@ -108,6 +108,8 @@ put "$stage/link.json" "$STATE/link.json" 0644
 
 if [ "$pam" -eq 1 ]; then
 	rootdir /usr/local/lib/pam
+	# An unloadable module in sudo's stack would break sudo for everyone.
+	file -b "$stage/pam_blitzkvm.so" | grep -q 'Mach-O 64-bit bundle' || die "pam_blitzkvm.so isn't a loadable module"
 	put "$stage/pam_blitzkvm.so" "$PAM_MODULE" 0444
 	if [ ! -f "$SUDO_LOCAL" ]; then
 		if [ -f "$SUDO_LOCAL.template" ]; then
@@ -119,7 +121,7 @@ if [ "$pam" -eq 1 ]; then
 		chmod 0444 "$SUDO_LOCAL.new.$$"
 		mv -f "$SUDO_LOCAL.new.$$" "$SUDO_LOCAL"
 	fi
-	if ! grep -q 'pam_blitzkvm\.so' "$SUDO_LOCAL"; then
+	if ! grep -q '^[[:space:]]*auth.*pam_blitzkvm\.so' "$SUDO_LOCAL"; then
 		# First, so an approval comes before Touch ID or the password.
 		{
 			echo "$PAM_LINE"
@@ -133,6 +135,8 @@ if [ "$pam" -eq 1 ]; then
 fi
 
 rootdir "$LOGS"
+# The daemon's log names who asked for what: root's alone.
+touch "$LOGS/remote.log" && chmod 0600 "$LOGS/remote.log"
 put "$stage/$DAEMON_LABEL.plist" "$DAEMON_PLIST" 0644
 put "$stage/$AGENT_LABEL.plist" "$AGENT_PLIST" 0644
 launchctl bootout "system/$DAEMON_LABEL" 2>/dev/null || true

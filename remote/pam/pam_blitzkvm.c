@@ -30,10 +30,14 @@
 #include <security/pam_modules.h>
 
 #define DEFAULT_PATH "/Library/Application Support/BlitzKVM/Remote/blitzkvm-remote"
-#define DEFAULT_TIMEOUT 70 // the daemon's ask lives 60 s
+#define DEFAULT_TIMEOUT 130 // the daemon's ask lives 120 s
 #define MAX_LINE 512
 
+// PAM_SILENT from the caller: no info lines (set per authentication).
+static int silent;
+
 static void say(pam_handle_t *pamh, const char *text) {
+    if (silent) return;
     const struct pam_conv *conv = NULL;
     if (pam_get_item(pamh, PAM_CONV, (const void **)&conv) != PAM_SUCCESS || conv == NULL || conv->conv == NULL) {
         return;
@@ -195,7 +199,7 @@ static int ask(pam_handle_t *pamh, const char *configured, int timeout) {
 }
 
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
-    (void)flags;
+    silent = (flags & PAM_SILENT) != 0;
     const char *path = DEFAULT_PATH;
     int timeout = DEFAULT_TIMEOUT;
     for (int i = 0; i < argc; i++) {

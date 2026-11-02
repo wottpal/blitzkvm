@@ -33,8 +33,19 @@ public enum Display {
         case 0x09: return "\\t"
         case 0x0D: return "\\r"
         case 0x00..<0x20, 0x7F, 0x80..<0xA0: return String(format: "\\x%02x", c.value)
-        case _ where bidi.contains(c.value): return String(format: "\\u{%04X}", c.value)
+        case _ where bidi.contains(c.value) || hidden(c): return String(format: "\\u{%04X}", c.value)
         default: return String(c)
+        }
+    }
+
+    /// What renders as a line break or not at all: line and paragraph
+    /// separators, format characters (zero-width ones, tags) and other
+    /// default-ignorable code points; a request could fake a line with them,
+    /// or hide a letter.
+    static func hidden(_ c: Unicode.Scalar) -> Bool {
+        switch c.properties.generalCategory {
+        case .lineSeparator, .paragraphSeparator, .format, .control: return true
+        default: return c.properties.isDefaultIgnorableCodePoint
         }
     }
 

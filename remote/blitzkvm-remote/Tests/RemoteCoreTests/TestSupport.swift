@@ -240,7 +240,7 @@ final class PendingResult {
 
     init(socket: String, _ message: LocalMessage, timeout: TimeInterval = 30) {
         DispatchQueue.global().async { [self] in
-            let r = RequesterClient.request(socket: socket, message, timeout: timeout) { text in
+            let r = RequesterClient.request(socket: socket, message, timeout: timeout, requireRoot: false) { text in
                 self.lock.lock(); self._infos.append(text); self.lock.unlock()
             }
             result = r

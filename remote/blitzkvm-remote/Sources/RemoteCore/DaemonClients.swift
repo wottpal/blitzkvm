@@ -85,8 +85,9 @@ extension Daemon {
             }
             return
         }
-        // A requester says one thing.
-        guard !c.said else { return }
+        // A requester says one thing; a second line ends it (lines would
+        // otherwise queue up work ahead of the screen drivers' aborts).
+        guard !c.said else { return c.conn.close() }
         c.said = true
         switch m.op {
         case "confirm": confirm(c, m)
@@ -102,11 +103,15 @@ extension Daemon {
         guard let title = m.title, !title.isEmpty else {
             return c.reply(text: "BlitzKVM: confirm needs a question", outcome: .refused)
         }
+        // Cheap checks first: the chain and its signatures cost the queue.
+        guard mayAsk(uid: c.peer.uid) else {
+            return c.reply(text: "BlitzKVM: too many requests", outcome: .unavailable)
+        }
         let chain = Chain.build(from: c.peer.pid, inspector: config.processes)
         let tty = chain.first?.tty
         let requester = Requester(uid: Int(c.peer.uid), user: Processes.userName(c.peer.uid), tty: tty,
                                   chain: chain.map(\.process))
-        let lifetime = Int64(min(max(m.timeout ?? 60, 10), Int(Limits.maxAskLifetime)))
+        let lifetime = Int64(min(max(m.timeout ?? Int(Daemon.askLifetime), 10), Int(Limits.maxAskLifetime)))
         ask(for: c, kind: Kind.confirm, title: Display.safe(title, maxBytes: Limits.maxText),
             detail: m.detail.map { Display.safe($0, maxBytes: Limits.maxText) }, requester: requester, chain: chain,
             uid: c.peer.uid, tty: tty, grantable: m.grant == true, lifetime: lifetime)
@@ -121,16 +126,34 @@ extension Daemon {
         guard let pid = m.pid, pid > 1, let sudo = config.processes.info(pid) else {
             return c.reply(text: "BlitzKVM: no such process", outcome: .refused)
         }
+        // sudo's real uid may be root's while PAM runs: the user is PAM's.
+        let uid = m.user.flatMap { getpwnam($0)?.pointee.pw_uid } ?? sudo.uid
+        guard mayAsk(uid: uid) else {
+            return c.reply(text: "BlitzKVM: too many requests", outcome: .unavailable)
+        }
         let chain = Chain.build(from: pid, inspector: config.processes)
         let args = config.processes.args(pid) ?? []
         let command = Display.command(["sudo"] + args.dropFirst(), maxBytes: Limits.maxText)
         var detail = "Run by \(Chain.summary(chain))"
         if let cwd = config.processes.cwd(chain.dropFirst().first?.pid ?? pid) { detail += "\nin \(Display.safe(cwd, maxBytes: 1024))" }
-        let user = Display.safe(m.user ?? Processes.userName(sudo.uid), maxBytes: 256)
-        let tty = (m.tty?.replacingOccurrences(of: "/dev/", with: "")).map { Display.safe($0, maxBytes: 64) } ?? sudo.tty
-        let requester = Requester(uid: Int(sudo.uid), user: user, tty: tty, chain: chain.map(\.process))
-        ask(for: c, kind: Kind.sudo, title: command, detail: detail, requester: requester, chain: chain, uid: sudo.uid,
-            tty: tty, grantable: true, lifetime: 60)
+        let user = Display.safe(m.user ?? Processes.userName(uid), maxBytes: 256)
+        let given = m.tty?.replacingOccurrences(of: "/dev/", with: "")
+        let tty = (given?.isEmpty == false ? given : nil).map { Display.safe($0, maxBytes: 64) } ?? sudo.tty
+        let requester = Requester(uid: Int(uid), user: user, tty: tty, chain: chain.map(\.process))
+        ask(for: c, kind: Kind.sudo, title: command, detail: detail, requester: requester, chain: chain, uid: uid,
+            tty: tty, grantable: true, lifetime: Daemon.askLifetime)
+    }
+
+    /// A user may ask fewer than asksPerMinute times a minute (open asks
+    /// are capped in ask()).
+    func mayAsk(uid: uid_t) -> Bool {
+        let t = now()
+        let recent = (askTimes[uid] ?? []).filter { t - $0 < 60 }
+        askTimes[uid] = recent
+        if askTimes.count > 64 { askTimes = askTimes.filter { !$0.value.isEmpty } }
+        guard recent.count < Daemon.asksPerMinute else { return false }
+        askTimes[uid, default: []].append(t)
+        return true
     }
 
     /// `title` and `detail` are display-safe already.
@@ -176,8 +199,13 @@ extension Daemon {
             Log.info("refused an agent (pid \(c.peer.pid)): this daemon has no Developer ID to check it against, so screen asks are unavailable")
             return c.conn.close()
         }
-        if !config.userMode, let consoleUID = config.console().uid, consoleUID != c.peer.uid {
-            Log.info("refused an agent of uid \(c.peer.uid): uid \(consoleUID) has the console")
+        // The console user's agent only; at the login window, nobody's.
+        if !config.userMode, config.console().uid != c.peer.uid {
+            let t = now()
+            if t - lastAgentRefusal >= 60 {
+                lastAgentRefusal = t
+                Log.info("refused an agent of uid \(c.peer.uid): \(config.console().uid.map { "uid \($0)" } ?? "nobody") has the console")
+            }
             return c.conn.close()
         }
         if let old = agent, old !== c { old.conn.close() }

@@ -7,7 +7,8 @@ import Foundation
 /// keyboard. The daemon checks what it acts on (window owners by signature).
 public struct AgentFacts: Codable, Equatable {
     public var frontmost: AppRef?
-    /// Windows at OnePassword.layer, in global top-left points.
+    /// Windows at OnePassword.layer, and the SecurityAgent's (any layer), in
+    /// global top-left points.
     public var windows: [WindowFact]
     /// The main display in points: the JetKVM's absolute pointer spans it.
     public var display: ApprovalKit.Size?
@@ -53,8 +54,16 @@ public struct WindowFact: Codable, Equatable {
 public enum OnePassword {
     public static let bundle = "com.1password.1password"
     public static let team = "2BUA8C4S2C"
+    /// The user's switch (JetKVM Setup › Approvals) that has the agent keep
+    /// 1Password running, as `defaults write` sets it (RemoteInstall in the
+    /// app writes the same).
+    public static let keepRunningDomain = "xyz.scio.blitzkvm.remote"
+    public static let keepRunningKey = "KeepOnePasswordRunning"
     public static let layer = 101
     public static let size = (w: 400.0, h: 346.0)
+    /// With 1Password locked, the prompt shows its password field too, in a
+    /// taller window (measured on macOS 27).
+    public static let lockedSize = (w: 400.0, h: 402.0)
     /// Localizations change the size a little.
     public static let sizeTolerance = 0.15
     /// The default button ("Authorize") from the window's bottom right. The
@@ -65,7 +74,20 @@ public enum OnePassword {
     public static var buttonInset: (x: Double, y: Double) { buttonInsets[0] }
 
     public static func isPromptShaped(_ w: WindowFact) -> Bool {
-        w.layer == layer && abs(w.w - size.w) <= size.w * sizeTolerance && abs(w.h - size.h) <= size.h * sizeTolerance
+        w.layer == layer && [size, lockedSize].contains { s in
+            abs(w.w - s.w) <= s.w * sizeTolerance && abs(w.h - s.h) <= s.h * sizeTolerance
+        }
+    }
+
+    /// The prompt with 1Password's password field (1Password is locked).
+    public static func isLocked(_ w: WindowFact) -> Bool { abs(w.h - lockedSize.h) < abs(w.h - size.h) }
+
+    /// Where a click gives the locked prompt's password field the keyboard
+    /// (the prompt doesn't take it by itself), from the window's top left:
+    /// the title, which does nothing else, then the field, 100 pt from the
+    /// bottom with a one- or two-line requester.
+    public static func focusSpots(_ r: ApprovalKit.Rect) -> [(x: Double, y: Double)] {
+        [(r.w / 2, 44), (r.w / 2, r.h - 100)]
     }
 
     /// The prompts in `facts` whose owner's signature `isOnePassword`
@@ -78,9 +100,27 @@ public enum OnePassword {
     /// JetKVM's absolute pointer spans; nil unless the whole window is on it.
     public static func buttonPoint(window r: ApprovalKit.Rect, display d: ApprovalKit.Size,
                                    inset: (x: Double, y: Double) = buttonInsets[0]) -> ApprovalKit.Point? {
+        point(window: r, display: d, at: (r.w - inset.x, r.h - inset.y))
+    }
+
+    /// A spot in the window (from its top left) as fractions of the main
+    /// display; nil unless the whole window is on it.
+    public static func point(window r: ApprovalKit.Rect, display d: ApprovalKit.Size,
+                             at p: (x: Double, y: Double)) -> ApprovalKit.Point? {
         guard d.w > 0, d.h > 0, r.x >= 0, r.y >= 0, r.x + r.w <= d.w, r.y + r.h <= d.h,
-              r.w > inset.x, r.h > inset.y else { return nil }
-        return ApprovalKit.Point(x: (r.x + r.w - inset.x) / d.w, y: (r.y + r.h - inset.y) / d.h)
+              p.x > 0, p.x < r.w, p.y > 0, p.y < r.h else { return nil }
+        return ApprovalKit.Point(x: (r.x + p.x) / d.w, y: (r.y + p.y) / d.h)
+    }
+}
+
+/// macOS's password dialogs as the agent sees them.
+public enum PasswordDialog {
+    /// Owner names of the SecurityAgent's processes (CGWindowList's owner).
+    public static let owners: Set<String> = ["SecurityAgent", "SecurityAgentHelper", "authorizationhost"]
+
+    /// The dialog windows of the process holding secure input.
+    public static func windows(in facts: AgentFacts, pid: Int32) -> [WindowFact] {
+        facts.windows.filter { $0.pid == pid && $0.layer != OnePassword.layer }
     }
 }
 

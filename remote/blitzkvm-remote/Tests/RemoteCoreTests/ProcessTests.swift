@@ -57,8 +57,28 @@ final class ProcessTests: XCTestCase {
         XCTAssertEqual(Chain.clipArgs(["echo", "a\nb", "\u{1b}[2J"]), ["echo", "a\\nb", "\\x1b[2J"])
     }
 
+    /// Wrappers live where the system keeps them; anything else in /x.
     func entry(_ pid: Int32, _ name: String, start: Double = 100, path: String? = nil) -> ChainEntry {
-        ChainEntry(process: ApprovalKit.Process(pid: Int(pid), name: name, path: path ?? "/x/\(name)"), uid: 501, start: start)
+        let bare = name.hasPrefix("-") ? String(name.dropFirst()) : name
+        let place = Chain.wrappers.contains(bare.lowercased()) ? "/bin/\(bare)" : "/x/\(name)"
+        return ChainEntry(process: ApprovalKit.Process(pid: Int(pid), name: name, path: path ?? place), uid: 501, start: start)
+    }
+
+    /// A process names itself: a binary called zsh outside the system's
+    /// directories is no wrapper, and an editor's extension host never anchors.
+    func testRenamedWrappersAndMultiTenantHosts() {
+        let fake = entry(899, "zsh", path: "/Users/alex/.cache/zsh")
+        XCTAssertEqual(Chain.anchor([entry(900, "sudo"), fake, entry(700, "node")])?.pid, 899)
+        XCTAssertNil(Chain.anchor([entry(900, "sudo"), entry(899, "zsh"),
+                                   entry(700, "Code Helper (Plugin)", path: "/Applications/Visual Studio Code.app/x/Code Helper (Plugin)")]))
+    }
+
+    /// A parent that started after its child is a reused pid: the chain stops.
+    func testChainStopsAtAYoungerParent() {
+        let procs = FakeProcesses()
+        procs.add(ProcInfo(pid: 900, ppid: 899, uid: 501, comm: "sudo", start: 200))
+        procs.add(ProcInfo(pid: 899, ppid: 1, uid: 501, comm: "node", start: 300))
+        XCTAssertEqual(Chain.build(from: 900, inspector: procs).map(\.pid), [900])
     }
 
     func testAnchorSkipsShellsAndWrappers() {
@@ -136,6 +156,8 @@ final class DisplayTests: XCTestCase {
     func testControlsBecomeVisible() {
         XCTAssertEqual(Display.safe("a\nb\tc\rd"), "a\\nb\\tc\\rd")
         XCTAssertEqual(Display.safe("\u{1b}[31mred\u{7}"), "\\x1b[31mred\\x07")
+        // Separators would fake a line, invisible characters hide letters.
+        XCTAssertEqual(Display.safe("a\u{2028}b\u{200B}c\u{E0041}"), "a\\u{2028}b\\u{200B}c\\u{E0041}")
         XCTAssertEqual(Display.safe("\u{7f}\u{85}\u{9b}"), "\\x7f\\x85\\x9b") // DEL and C1
         XCTAssertEqual(Display.safe("plain ünïcödé ✓"), "plain ünïcödé ✓")
     }

@@ -10,6 +10,15 @@ public enum Log {
     /// Tests turn stderr off.
     public static var toStderr = true
 
+    /// launchd's log file (stderr): root's alone, and emptied at start once
+    /// it grew past 5 MB.
+    public static func boundStderr() {
+        var st = stat()
+        guard fstat(2, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return }
+        _ = fchmod(2, 0o600)
+        if st.st_size > 5 << 20 { _ = ftruncate(2, 0) }
+    }
+
     public static func info(_ message: String) {
         logger.info("\(message, privacy: .public)")
         guard toStderr else { return }

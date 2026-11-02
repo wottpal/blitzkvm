@@ -7,6 +7,9 @@ import XCTest
 let display = ApprovalKit.Size(w: 1504, h: 948)
 let prompt = WindowFact(number: 81, pid: 7000, owner: "1Password", bundle: OnePassword.bundle, layer: 101,
                         x: 552, y: 301, w: 400, h: 346)
+/// The prompt while 1Password is locked: with its password field, taller.
+let lockedPrompt = WindowFact(number: 86, pid: 7000, owner: "1Password", bundle: OnePassword.bundle, layer: 101,
+                              x: 552, y: 273, w: 400, h: 402)
 
 final class OnePasswordTests: XCTestCase {
     func testDetection() {
@@ -17,9 +20,25 @@ final class OnePasswordTests: XCTestCase {
             WindowFact(number: 84, pid: 6000, owner: "1Password", bundle: OnePassword.bundle, layer: 101,
                        x: 552, y: 301, w: 400, h: 346), // claims to be 1Password, isn't
             WindowFact(number: 85, pid: 7000, layer: 101, x: 552, y: 290, w: 420, h: 370), // localized: a bit larger
+            lockedPrompt,
         ], display: display)
         let found = OnePassword.prompts(in: facts) { $0 == 7000 }
-        XCTAssertEqual(found.map(\.number), [81, 85])
+        XCTAssertEqual(found.map(\.number), [81, 85, 86])
+        XCTAssertEqual(found.map(OnePassword.isLocked), [false, false, true])
+    }
+
+    /// The locked prompt's spots, measured on the target: the title, then
+    /// the password field (293–333 pt from the top with a two-line requester,
+    /// 21 pt higher with one).
+    func testFocusSpots() throws {
+        let spots = OnePassword.focusSpots(lockedPrompt.rect)
+        XCTAssertEqual(spots.count, 2)
+        XCTAssertEqual(spots[0].y, 44)
+        XCTAssertTrue((272...333).contains(spots[1].y), "inside the field with a one- or two-line requester")
+        let p = try XCTUnwrap(OnePassword.point(window: lockedPrompt.rect, display: display, at: spots[0]))
+        XCTAssertEqual(p.x, (552 + 200) / 1504, accuracy: 1e-9)
+        XCTAssertEqual(p.y, (273 + 44) / 948, accuracy: 1e-9)
+        XCTAssertNil(OnePassword.point(window: lockedPrompt.rect, display: display, at: (500, 44)), "outside the window")
     }
 
     func testButtonPoint() throws {
@@ -207,6 +226,81 @@ final class ScreenDriverTests: XCTestCase {
         XCTAssertEqual(s.activated, [terminal])
     }
 
+    func lockedPlan(secret: Bool = true) -> ScreenPlan {
+        ScreenPlan(kind: Kind.onePassword, window: lockedPrompt, display: display, hasSecret: secret, previousApp: terminal)
+    }
+
+    func lockedScreen() -> FakeScreen {
+        let s = FakeScreen()
+        s.facts?.windows = [lockedPrompt]
+        return s
+    }
+
+    /// 1Password is locked: a click on the title gives the password field
+    /// the keyboard; the password and Return unlock and authorize at once.
+    func testLockedPromptTypesThePasswordAfterAClick() {
+        let s = lockedScreen()
+        s.onStep = { step in
+            if step.click != nil { s.console.secureInputPID = 7000 }
+            if step.keys == [[0x28, 0]] { s.console.secureInputPID = nil; s.facts?.windows = [] }
+            return .ok
+        }
+        let r = run(s, lockedPlan())
+        XCTAssertTrue(r.ok, r.note)
+        XCTAssertEqual(s.kinds, [String(format: "click %.3f,%.3f", (552 + 200) / 1504.0, (273 + 44) / 948.0), "secret", "keys [[40, 0]]"])
+        XCTAssertEqual(s.activated, [terminal])
+    }
+
+    /// The title click leaves the keyboard where it was: the field itself
+    /// is clicked next.
+    func testLockedPromptClicksTheFieldNext() {
+        let s = lockedScreen()
+        var clicks = 0
+        s.onStep = { step in
+            if step.click != nil {
+                clicks += 1
+                if clicks == 2 { s.console.secureInputPID = 7000 }
+            }
+            if step.keys == [[0x28, 0]] { s.console.secureInputPID = nil; s.facts?.windows = [] }
+            return .ok
+        }
+        let r = run(s, lockedPlan())
+        XCTAssertTrue(r.ok, r.note)
+        XCTAssertEqual(Array(s.kinds.dropFirst(2)), ["secret", "keys [[40, 0]]"])
+        XCTAssertEqual(s.kinds[1], String(format: "click %.3f,%.3f", (552 + 200) / 1504.0, (273 + 402 - 100) / 948.0))
+    }
+
+    /// The front app keeps secure input (or nobody has it): nothing is typed,
+    /// the password would go to that app.
+    func testLockedPromptNeverTypesWithoutTheKeyboard() {
+        for holder: Int32? in [nil, 4000] {
+            let s = lockedScreen()
+            s.console.secureInputPID = holder
+            let r = run(s, lockedPlan())
+            XCTAssertFalse(r.ok)
+            XCTAssertEqual(s.kinds.count, 2, "two clicks, no keys: \(s.kinds)")
+            XCTAssertTrue(s.kinds.allSatisfy { $0.hasPrefix("click") })
+            XCTAssertEqual(s.activated, [terminal])
+        }
+    }
+
+    /// 1Password held secure input before the click (stuck): that says
+    /// nothing about the prompt, so nothing is typed.
+    func testLockedPromptNeverTypesIntoAKeyboardHeldBeforeTheClick() {
+        let s = lockedScreen()
+        s.console.secureInputPID = 7000
+        let r = run(s, lockedPlan())
+        XCTAssertFalse(r.ok)
+        XCTAssertTrue(s.steps.isEmpty, r.note)
+    }
+
+    func testLockedPromptWithoutASecretIsntTouched() {
+        let s = lockedScreen()
+        let r = run(s, lockedPlan(secret: false))
+        XCTAssertFalse(r.ok)
+        XCTAssertTrue(s.steps.isEmpty, r.note)
+    }
+
     /// Secure input moves to another app while the broker types: the step
     /// is aborted at once, and nothing is erased, since Backspaces would go
     /// to the app that has the keyboard now.
@@ -221,7 +315,7 @@ final class ScreenDriverTests: XCTestCase {
         XCTAssertFalse(r.ok)
         XCTAssertEqual(s.aborts, 1)
         XCTAssertEqual(Array(s.kinds.dropFirst()), ["secret"], "no erase into another app")
-        XCTAssertTrue(r.note.contains("3 characters were typed and not erased"), r.note)
+        XCTAssertTrue(r.note.contains("some characters were typed and not erased"), r.note)
         XCTAssertEqual(s.activated, [terminal])
     }
 
@@ -272,6 +366,27 @@ final class ScreenDriverTests: XCTestCase {
         let r = run(s, ScreenPlan(kind: Kind.securityAgent, holderPID: 6100, hasSecret: true))
         XCTAssertTrue(r.ok, r.note)
         XCTAssertEqual(s.kinds, ["secret", "keys [[40, 0]]"])
+    }
+
+    /// A second dialog of the same SecurityAgent (or the approved one gone
+    /// and another in its place), or another user's console: nothing typed.
+    func testSecurityAgentTypesOnlyIntoTheApprovedDialog() {
+        let dialog = WindowFact(number: 900, pid: 6100, owner: "SecurityAgent", layer: 1000, x: 500, y: 300, w: 420, h: 260)
+        for change in [
+            { (s: FakeScreen) in s.facts?.windows = [dialog, WindowFact(number: 901, pid: 6100, owner: "SecurityAgent", layer: 1000,
+                                                                       x: 0, y: 0, w: 420, h: 260)] },
+            { (s: FakeScreen) in s.facts?.windows = [WindowFact(number: 901, pid: 6100, owner: "SecurityAgent", layer: 1000,
+                                                                x: 500, y: 300, w: 420, h: 260)] },
+            { (s: FakeScreen) in s.console.uid = 502 },
+        ] {
+            let s = FakeScreen()
+            s.console.secureInputPID = 6100
+            s.facts?.windows = [dialog]
+            change(s)
+            let r = run(s, ScreenPlan(kind: Kind.securityAgent, window: dialog, holderPID: 6100, hasSecret: true, consoleUID: 501))
+            XCTAssertFalse(r.ok)
+            XCTAssertTrue(s.steps.isEmpty, r.note)
+        }
     }
 
     func testSecurityAgentRefusesAnImpostor() {

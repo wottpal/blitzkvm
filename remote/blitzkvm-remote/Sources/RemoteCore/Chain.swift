@@ -59,6 +59,26 @@ public enum Chain {
 
     public static let shells: Set<String> = ["sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu"]
 
+    /// Where a wrapper has to live to be looked past: a process names
+    /// itself, so a binary renamed "zsh" elsewhere is no wrapper.
+    static let wrapperDirectories = ["/bin/", "/usr/bin/", "/usr/sbin/", "/sbin/", "/usr/libexec/", "/opt/homebrew/bin/",
+                                     "/opt/homebrew/Cellar/", "/usr/local/bin/", "/usr/local/Cellar/",
+                                     "/Library/Application Support/BlitzKVM/Remote/"]
+
+    /// Hosts that run many tenants' code (every extension of an editor, every
+    /// plugin of an app): a grant to one would cover them all.
+    static let multiTenant = ["Helper (Plugin)", "extensionHost", "Code Helper", "Cursor Helper", "Electron Helper"]
+
+    public static func isWrapper(_ e: ChainEntry) -> Bool {
+        guard wrappers.contains(e.key) else { return false }
+        guard let path = e.process.path else { return false }
+        return wrapperDirectories.contains { path.hasPrefix($0) }
+    }
+
+    static func isMultiTenant(_ e: ChainEntry) -> Bool {
+        multiTenant.contains { e.name.contains($0) || (e.process.path?.contains($0) == true) }
+    }
+
     public static func isTerminal(_ e: ChainEntry) -> Bool {
         terminals.contains(e.key) || terminalApps.contains { e.process.path?.contains($0) == true }
     }
@@ -74,6 +94,9 @@ public enum Chain {
             let process = ApprovalKit.Process(pid: Int(info.pid), name: name, path: path.map { Display.safe($0, maxBytes: 1024) },
                                               args: inspector.args(next).map(clipArgs),
                                               signer: inspector.identity(next)?.signer ?? "unsigned")
+            // A parent started after its child is a reused pid: the chain
+            // ends rather than run through someone else's processes.
+            if let child = out.last, info.start > child.start { break }
             out.append(ChainEntry(process: process, uid: info.uid, start: info.start, tty: info.tty))
             if info.ppid == next { break }
             next = info.ppid
@@ -87,8 +110,8 @@ public enum Chain {
     /// launchd or the chain's end comes first.
     public static func anchor(_ chain: [ChainEntry]) -> Anchor? {
         for entry in chain.dropFirst() {
-            if entry.pid <= 1 || isTerminal(entry) { return nil }
-            if wrappers.contains(entry.key) { continue }
+            if entry.pid <= 1 || isTerminal(entry) || isMultiTenant(entry) { return nil }
+            if isWrapper(entry) { continue }
             return Anchor(pid: entry.pid, start: entry.start, name: entry.name)
         }
         return nil

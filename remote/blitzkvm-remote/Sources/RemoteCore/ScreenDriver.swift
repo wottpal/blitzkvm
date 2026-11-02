@@ -61,11 +61,13 @@ public struct ScreenPlan {
     public var hasSecret: Bool
     /// The app to bring back once 1Password took the front.
     public var previousApp: AppRef?
+    /// The console user when it was raised: a user switch ends the plan.
+    public var consoleUID: uid_t?
 
     public init(kind: String, window: WindowFact? = nil, display: ApprovalKit.Size? = nil, holderPID: Int32? = nil,
-                hasSecret: Bool = false, previousApp: AppRef? = nil) {
+                hasSecret: Bool = false, previousApp: AppRef? = nil, consoleUID: uid_t? = nil) {
         self.kind = kind; self.window = window; self.display = display; self.holderPID = holderPID
-        self.hasSecret = hasSecret; self.previousApp = previousApp
+        self.hasSecret = hasSecret; self.previousApp = previousApp; self.consoleUID = consoleUID
     }
 }
 
@@ -120,49 +122,75 @@ public final class ScreenDriver {
 
     // MARK: Plans
 
+    /// The console belongs to the user it did when the ask was raised.
+    func sameUser(_ ev: ScreenEvidence) -> Bool {
+        plan.consoleUID == nil || ev.console.uid == plan.consoleUID
+    }
+
     func onePassword() throws -> String {
         guard let window = plan.window, let display = plan.display else { throw Failure("no prompt to act on") }
         func prompt(_ ev: ScreenEvidence) -> WindowFact? { ev.facts?.windows.first { $0.number == window.number } }
         func holdsKeyboard(_ ev: ScreenEvidence) -> Bool {
-            ev.console.secureInputPID == window.pid && ev.holder?.isDeveloper(team: OnePassword.team, identifier: OnePassword.bundle) == true
+            sameUser(ev) && ev.console.secureInputPID == window.pid
+                && ev.holder?.isDeveloper(team: OnePassword.team, identifier: OnePassword.bundle) == true
         }
         var clicked = false
-        func click(_ inset: (x: Double, y: Double)) throws {
+        func click(_ point: ApprovalKit.Point?) throws {
             let ev = io.evidence()
             guard !ev.console.locked else { throw Failure("the screen locked") }
             guard ev.fresh else { throw Failure("the agent didn't answer in time; nothing was clicked") }
             guard let now = prompt(ev), now.pid == window.pid, Self.same(now.rect, window.rect), ev.facts?.display == display else {
                 throw Failure("the 1Password prompt changed or went away")
             }
-            guard let point = OnePassword.buttonPoint(window: window.rect, display: display, inset: inset) else {
-                throw Failure("the 1Password prompt isn't on the main display")
-            }
+            guard let point else { throw Failure("the 1Password prompt isn't on the main display") }
             try step(Step(click: point))
             clicked = true
         }
-        /// Tries the button's places in turn until the prompt goes or asks
-        /// for the password; each click first checks the prompt is still
-        /// there, unchanged.
-        func clickButton() throws -> ScreenEvidence {
+        /// Clicks the spots in turn until the prompt goes or its password
+        /// field has the keyboard; each click first checks the prompt is
+        /// still there, unchanged.
+        func clickUntilAnswered(_ points: [ApprovalKit.Point?]) throws -> ScreenEvidence {
             var ev = io.evidence()
-            for inset in OnePassword.buttonInsets {
-                try click(inset)
+            for point in points {
+                try click(point)
                 ev = waitUntil(tuning.promptGone) { prompt($0) == nil || holdsKeyboard($0) }
                 if prompt(ev) == nil || holdsKeyboard(ev) { break }
             }
             return ev
         }
+        func clickButton() throws -> ScreenEvidence {
+            try clickUntilAnswered(OnePassword.buttonInsets.map { OnePassword.buttonPoint(window: window.rect, display: display, inset: $0) })
+        }
 
         // 1Password gets the front with the first click: whatever happens
         // after one, give it back.
         defer { if clicked, let app = plan.previousApp, app.bundle != OnePassword.bundle { io.activate(app) } }
-        var ev = try clickButton()
-        if prompt(ev) == nil { return "authorized" }
-        guard holdsKeyboard(ev) else { throw Failure("the 1Password prompt is still there") }
+        var ev: ScreenEvidence
+        if OnePassword.isLocked(window) {
+            // 1Password is locked and the prompt shows its password field,
+            // which gets the keyboard only once the prompt is clicked.
+            guard plan.hasSecret else {
+                throw Failure("1Password is locked; approve again with its password attached")
+            }
+            // The click has to be what gives 1Password the keyboard: secure
+            // input it held before (stuck) says nothing about the prompt.
+            guard !holdsKeyboard(io.evidence()) else {
+                throw Failure("1Password had the keyboard before the click; nothing was typed")
+            }
+            ev = try clickUntilAnswered(OnePassword.focusSpots(window.rect).map {
+                OnePassword.point(window: window.rect, display: display, at: $0)
+            })
+            guard prompt(ev) != nil else { throw Failure("the 1Password prompt went away") }
+            guard holdsKeyboard(ev) else { throw Failure("1Password's password field didn't take the keyboard; nothing was typed") }
+        } else {
+            ev = try clickButton()
+            if prompt(ev) == nil { return "authorized" }
+            guard holdsKeyboard(ev) else { throw Failure("the 1Password prompt is still there") }
 
-        // 1Password is locked: its password field has the keyboard.
-        guard plan.hasSecret else {
-            throw Failure("1Password is locked; approve again with its password attached")
+            // 1Password is locked: its password field has the keyboard.
+            guard plan.hasSecret else {
+                throw Failure("1Password is locked; approve again with its password attached")
+            }
         }
         try typeSecret { holdsKeyboard($0) && !$0.console.locked }
         try press(Self.returnKey) { holdsKeyboard($0) }
@@ -177,8 +205,18 @@ public final class ScreenDriver {
 
     func securityAgent() throws -> String {
         guard let pid = plan.holderPID else { throw Failure("no dialog to act on") }
+        // The approved dialog: the one window the SecurityAgent showed then,
+        // still alone (another dialog of the same process would take the
+        // password), in the same user's session.
+        func sameDialog(_ ev: ScreenEvidence) -> Bool {
+            guard let window = plan.window else { return true }
+            guard let facts = ev.facts, ev.fresh else { return false }
+            let now = PasswordDialog.windows(in: facts, pid: pid)
+            return now.count == 1 && now[0].number == window.number
+        }
         func holdsKeyboard(_ ev: ScreenEvidence) -> Bool {
-            !ev.console.locked && ev.console.secureInputPID == pid && ev.holder?.isApple(Holders.securityAgent) == true
+            sameUser(ev) && !ev.console.locked && ev.console.secureInputPID == pid && ev.holder?.isApple(Holders.securityAgent) == true
+                && sameDialog(ev)
         }
         guard holdsKeyboard(io.evidence()) else { throw Failure("the password dialog went away") }
         guard plan.hasSecret else { throw Failure("no password came with the approval") }
@@ -191,7 +229,7 @@ public final class ScreenDriver {
 
     func unlock() throws -> String {
         func loginWindowHolds(_ ev: ScreenEvidence) -> Bool {
-            ev.console.locked && ev.console.secureInputPID != nil && ev.holder?.isApple(Holders.loginWindow) == true
+            sameUser(ev) && ev.console.locked && ev.console.secureInputPID != nil && ev.holder?.isApple(Holders.loginWindow) == true
         }
         let ev = io.evidence()
         guard ev.console.locked else { return "the screen was already unlocked" }
@@ -240,7 +278,8 @@ public final class ScreenDriver {
             guard ev.facts?.capsLock == false, expect(ev) else { throw Failure("Caps Lock is on") }
         }
         guard let map = ev.facts?.keyMap, !map.isEmpty else { throw Failure("no key map from the agent") }
-        let before = io.liveConsole()
+        // The baseline is what was checked, not a later read.
+        let before = ev.console
         func changed() -> Bool {
             let now = io.liveConsole()
             return now.secureInputPID != before.secureInputPID || now.locked != before.locked
@@ -270,7 +309,8 @@ public final class ScreenDriver {
                 _ = io.wait(io.start(Step(erase: n)), timeout: tuning.stepTimeout)
                 note += "; erased the \(n) characters typed"
             } else {
-                note += "; \(typed) characters were typed and not erased (the field doesn't have the keyboard)"
+                // How many would tell approvers the password's length.
+                note += "; some characters were typed and not erased (the field doesn't have the keyboard)"
             }
         }
         throw Failure(note)

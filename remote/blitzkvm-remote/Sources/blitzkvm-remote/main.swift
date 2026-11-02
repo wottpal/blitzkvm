@@ -117,11 +117,13 @@ var keep: [Any] = []
 
 func runConfirm(_ o: Options) -> Never {
     guard let question = o.positionals.first, !question.isEmpty else { fail(usage) }
-    let timeout = Int(o.values["--timeout"] ?? "60") ?? 60
+    let timeout = Int(o.values["--timeout"] ?? "\(Daemon.askLifetime)") ?? Int(Daemon.askLifetime)
     // The protocol caps both at 2048 bytes; the daemon clips them too.
     let message = LocalMessage(op: "confirm", title: question.clipped(bytes: 2048), detail: o.values["--detail"]?.clipped(bytes: 2048),
                                grant: o.flags.contains("--grant"), timeout: timeout)
-    let (outcome, text) = RequesterClient.request(socket: o.paths.socket, message, timeout: TimeInterval(min(max(timeout, 10), 120) + 15)) {
+    let (outcome, text) = RequesterClient.request(socket: o.paths.socket, message,
+                                                  timeout: TimeInterval(min(max(timeout, 10), Int(Limits.maxAskLifetime)) + 15),
+                                                  requireRoot: !o.userMode) {
         FileHandle.standardError.write(Data((Display.safe($0, maxBytes: 1024) + "\n").utf8))
     }
     if let text, !text.isEmpty { FileHandle.standardError.write(Data((Display.safe(text, maxBytes: 1024) + "\n").utf8)) }
@@ -136,7 +138,10 @@ func runPam(_ o: Options) -> Never {
     guard let pidString = o.values["--pid"], let pid = Int32(pidString) else { fail(usage) }
     setvbuf(stdout, nil, _IOLBF, 0)
     let message = LocalMessage(op: "pam", user: o.values["--user"], service: o.values["--service"], tty: o.values["--tty"], pid: pid)
-    let (outcome, text) = RequesterClient.request(socket: paths.socket, message, timeout: 65) { print(Display.safe($0, maxBytes: 1024)) }
+    let (outcome, text) = RequesterClient.request(socket: paths.socket, message, timeout: TimeInterval(Daemon.askLifetime) + 5,
+                                                  requireRoot: !o.userMode) {
+        print(Display.safe($0, maxBytes: 1024))
+    }
     if outcome == .unavailable && text == "BlitzKVM: the approval daemon isn't running" { exit(2) }
     if let text, !text.isEmpty { print(Display.safe(text, maxBytes: 1024)) }
     exit(outcome == .approved ? 0 : outcome == .denied ? 1 : 2)

@@ -49,17 +49,24 @@ extension Daemon {
             // Which process asked, 1Password doesn't tell: the newest op
             // run from a shell is a guess, and the ask says so (no
             // requester field, which would read as fact).
-            var detail = "A 1Password access prompt is on the screen."
+            // Which prompt it is (the CLI's, the SSH agent's, another app's)
+            // the window doesn't say without screen recording.
+            var detail = "A 1Password prompt is on the screen (for the CLI, the SSH agent or another app)."
             if let chain = requestingOp() {
                 let args = chain.first?.process.args ?? []
                 let command = args.isEmpty ? chain.first?.name ?? "op" : Display.command(args, maxBytes: 512)
-                detail += "\nProbably requested by: \(command) (\(Chain.summary(chain)))"
+                detail += "\nProbably requested by: \(command), as it says itself (\(Chain.summary(chain)))"
             }
             let previous = facts.frontmost?.bundle == OnePassword.bundle ? nil : facts.frontmost
+            // The master password only for the locked prompt: an unlocked one
+            // takes a click, and the password never leaves the approver.
+            let locked = OnePassword.isLocked(prompt)
             guard let p = send(kind: Kind.onePassword, title: "1Password access requested", detail: detail, requester: nil,
                                evidence: Evidence(locked: false, window: prompt.rect, display: display),
-                               secret: SecretKind.onePassword) else { return }
-            p.plan = ScreenPlan(kind: Kind.onePassword, window: prompt, display: display, previousApp: previous)
+                               secret: locked ? SecretKind.onePassword : SecretKind.none,
+                               lifetime: Daemon.onePasswordLifetime) else { return }
+            p.plan = ScreenPlan(kind: Kind.onePassword, window: prompt, display: display, previousApp: previous,
+                                consoleUID: console.uid)
             seenPrompts.insert(prompt.number)
         }
     }
@@ -67,7 +74,9 @@ extension Daemon {
     /// The `op` process probably behind a 1Password prompt: the newest one
     /// run from a shell. A guess, for the approver's information only.
     func requestingOp() -> [ChainEntry]? {
-        let ops = config.processes.all().filter { $0.comm == "op" }.sorted { $0.start > $1.start }
+        // 1Password's own op only: any process can call itself op.
+        let ops = config.processes.all().filter { $0.comm == "op" && identity($0.pid)?.team == OnePassword.team }
+            .sorted { $0.start > $1.start }
         for op in ops {
             let chain = Chain.build(from: op.pid, inspector: config.processes)
             if Chain.reachesShell(chain) { return chain }
@@ -82,13 +91,25 @@ extension Daemon {
         }
         guard raisedHolder != pid, let holder = identity(pid), holder.isApple(Holders.securityAgent),
               !pending.values.contains(where: { $0.ask.kind == Kind.securityAgent && $0.plan?.holderPID == pid }) else { return }
-        // Only what root verified: which app opened the dialog isn't known.
-        let detail = "A macOS password dialog (\(Display.safe(holder.identifier ?? "SecurityAgent", maxBytes: 128))) has the keyboard."
+        // The dialog it is: with two dialogs of the same process, a
+        // password approved for one could go into the other.
+        let dialogs = facts.map { PasswordDialog.windows(in: $0, pid: pid) } ?? []
+        guard dialogs.count <= 1 else {
+            if raisedHolder != pid { Log.info("securityagent: \(dialogs.count) dialogs at once; asking for none") }
+            raisedHolder = pid
+            return
+        }
+        // Only what root verified: which app opened the dialog isn't known;
+        // the app in front is a hint, and the ask says so.
+        var detail = "A macOS password dialog (\(Display.safe(holder.identifier ?? "SecurityAgent", maxBytes: 128))) has the keyboard."
+        if let front = facts?.frontmost?.name {
+            detail += "\nIn front when it came up: \(Display.safe(front, maxBytes: 128)). Approve only if you started what asks."
+        }
         guard let p = send(kind: Kind.securityAgent, title: "macOS asks for your password", detail: detail, requester: nil,
                            evidence: Evidence(locked: false, secureInput: SecureInput(pid: Int(pid), bundle: holder.identifier ?? "",
                                                                                       team: nil), display: facts?.display),
                            secret: SecretKind.mac) else { return }
-        p.plan = ScreenPlan(kind: Kind.securityAgent, holderPID: pid)
+        p.plan = ScreenPlan(kind: Kind.securityAgent, window: dialogs.first, holderPID: pid, consoleUID: console.uid)
         raisedHolder = pid
     }
 
@@ -139,7 +160,7 @@ extension Daemon {
             Log.info("unlock asked, but the ask can't go out")
             return false
         }
-        p.plan = ScreenPlan(kind: Kind.unlock)
+        p.plan = ScreenPlan(kind: Kind.unlock, consoleUID: console.uid)
         return true
     }
 
@@ -151,7 +172,9 @@ extension Daemon {
             switch p.ask.kind {
             case Kind.onePassword:
                 gone = facts.map { f in !f.windows.contains { $0.number == p.plan?.window?.number } } ?? false
-            case Kind.securityAgent: gone = console.secureInputPID != p.plan?.holderPID
+            case Kind.securityAgent:
+                let dialogGone = p.plan?.window.map { w in facts.map { !$0.windows.contains { $0.number == w.number } } ?? false } ?? false
+                gone = console.secureInputPID != p.plan?.holderPID || dialogGone
             case Kind.unlock: gone = !console.locked
             default: gone = false
             }
@@ -172,7 +195,8 @@ extension Daemon {
         p.expiry?.cancel()
         let io = DaemonScreenIO(daemon: self, id: p.ask.id)
         let tuning = config.driverTuning
-        DispatchQueue.global().async { [weak self] in
+        // One driver at a time.
+        drivers.async { [weak self] in
             let (ok, note) = ScreenDriver(io: io, plan: plan, tuning: tuning).run()
             self?.queue.async {
                 guard let self else { return }
@@ -197,9 +221,11 @@ final class DaemonScreenIO: ScreenIO {
 
     func liveConsole() -> ConsoleState { daemon?.config.console() ?? ConsoleState() }
 
+    /// Straight onto the link, not through the daemon's queue: whatever
+    /// waits there mustn't delay an abort while a password is typed.
     func abort() {
         guard let daemon else { return }
-        daemon.queue.sync { _ = daemon.link.send(LinkMessage(op: "abort", id: id)) }
+        _ = daemon.link.sendNow(LinkMessage(op: "abort", id: id))
     }
 
     func evidence() -> ScreenEvidence {

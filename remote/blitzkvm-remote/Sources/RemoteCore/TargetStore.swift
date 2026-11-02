@@ -103,7 +103,7 @@ public struct TargetStore {
 
     public func saveRoster(_ env: Envelope) throws {
         try makeStateDir()
-        try Self.writeAtomically(try JSONEncoder.wire.encode(env), to: paths.roster, mode: 0o644)
+        try Self.writeAtomically(try JSONEncoder.wire.encode(env), to: paths.roster, mode: 0o600)
     }
 
     /// The installer's genesis roster: signed by one of its own owners and

@@ -130,7 +130,7 @@ final class DaemonLinkTests: XCTestCase {
         waitLinked()
         let r = RequesterClient.request(socket: paths.socket,
                                         LocalMessage(op: "pam", user: "user", service: "sudo", tty: "ttys001", pid: getpid()),
-                                        timeout: 5) { _ in }
+                                        timeout: 5, requireRoot: false) { _ in }
         XCTAssertEqual(r.outcome, .refused)
         XCTAssertTrue(broker.messages("ask").isEmpty)
     }

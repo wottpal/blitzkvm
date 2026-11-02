@@ -30,7 +30,11 @@ final class DaemonScreenTests: XCTestCase {
         processes.add(ProcInfo(pid: 6100, ppid: 1, uid: 0, comm: "SecurityAgent", start: 10), identity: .securityAgent)
         // An op run from a shell run by an agent.
         processes.add(ProcInfo(pid: 5002, ppid: 5001, uid: getuid(), comm: "op", start: 30, tty: "ttys004"),
-                      path: "/opt/homebrew/bin/op", args: ["op", "item", "get", "Example"], identity: .other)
+                      path: "/opt/homebrew/bin/op", args: ["op", "item", "get", "Example"],
+                      identity: CodeIdentity(identifier: "com.1password.op", team: OnePassword.team))
+        // Another process calling itself op is never named.
+        processes.add(ProcInfo(pid: 5003, ppid: 5001, uid: getuid(), comm: "op", start: 40, tty: "ttys004"),
+                      path: "/tmp/op", args: ["op", "item", "get", "Decoy"], identity: .other)
         processes.add(ProcInfo(pid: 5001, ppid: 5000, uid: getuid(), comm: "zsh", start: 20), path: "/bin/zsh", args: ["zsh"],
                       identity: CodeIdentity(identifier: "com.apple.zsh", apple: true))
         processes.add(ProcInfo(pid: 5000, ppid: 1, uid: getuid(), comm: "node", start: 15), path: "/usr/local/bin/node",
@@ -87,14 +91,15 @@ final class DaemonScreenTests: XCTestCase {
 
         let req = try XCTUnwrap(broker.waitRequest(kind: Kind.onePassword))
         XCTAssertEqual(req.ask.title, "1Password access requested")
-        XCTAssertEqual(req.ask.secret, SecretKind.onePassword)
+        // An unlocked prompt takes a click: no password goes with it.
+        XCTAssertEqual(req.ask.secret, SecretKind.none)
         XCTAssertEqual(req.ask.evidence?.window, prompt.rect)
         XCTAssertEqual(req.ask.evidence?.display, display)
         XCTAssertEqual(req.ask.evidence?.locked, false)
         // Which process asked is a guess: in the detail, said as one, and
         // not in the requester field.
         XCTAssertNil(req.ask.requester)
-        XCTAssertTrue(req.ask.detail?.contains("\nProbably requested by: op item get Example (op ← zsh ← node") == true,
+        XCTAssertTrue(req.ask.detail?.contains("\nProbably requested by: op item get Example, as it says itself (op ← zsh ← node") == true,
                       req.ask.detail ?? "")
         // One ask per appearance.
         Thread.sleep(forTimeInterval: 0.3)
@@ -277,7 +282,7 @@ final class DaemonScreenTests: XCTestCase {
         XCTAssertNotNil(broker.waitMessage("abort") { $0.id == req.id })
         let done = try XCTUnwrap(broker.waitMessage("done") { $0.id == req.id })
         XCTAssertEqual(done.ok, false)
-        XCTAssertTrue(done.note?.contains("4 characters were typed and not erased") == true, done.note ?? "")
+        XCTAssertTrue(done.note?.contains("some characters were typed and not erased") == true, done.note ?? "")
         XCTAssertFalse(broker.messages("step").contains { $0.step?.erase != nil })
     }
 

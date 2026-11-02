@@ -30,6 +30,9 @@ public final class LinkClient {
 
     private var conn: LineConn?
     public private(set) var state: State = .idle
+    /// The ready connection, for sendNow from any thread.
+    private let readyLock = NSLock()
+    private var readyConn: LineConn?
     private var backoff: TimeInterval
     private var lastHeard = Date()
     private var pingTimer: DispatchSourceTimer?
@@ -68,6 +71,22 @@ public final class LinkClient {
     public func send(_ m: LinkMessage) -> Bool {
         guard state == .ready, let conn else { return false }
         return conn.send(m)
+    }
+
+    /// Sends from any thread without waiting for `queue` (an abort mustn't
+    /// queue up behind other work); false without a ready link.
+    @discardableResult
+    public func sendNow(_ m: LinkMessage) -> Bool {
+        readyLock.lock()
+        let c = readyConn
+        readyLock.unlock()
+        return c?.send(m) ?? false
+    }
+
+    private func setReady(_ c: LineConn?) {
+        readyLock.lock()
+        readyConn = c
+        readyLock.unlock()
     }
 
     private func problem(_ s: String) {
@@ -122,6 +141,7 @@ public final class LinkClient {
         let wasReady = state == .ready
         let closedBeforeAuth = (state == .hello || state == .auth) && !refused
         conn = nil
+        setReady(nil)
         state = .idle
         pingTimer?.cancel()
         pingTimer = nil
@@ -162,6 +182,7 @@ public final class LinkClient {
             }
         case (.auth, "ready"):
             state = .ready
+            setReady(conn)
             backoff = tuning.minBackoff
             problem("connected")
             onReady?(m.roster)

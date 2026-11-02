@@ -2,6 +2,7 @@ import AppKit
 import ApprovalKit
 import CoreGraphics
 import Foundation
+import Security
 import RemoteCore
 
 /// The per-user agent (gui LaunchAgent): reports what the user's session
@@ -9,7 +10,8 @@ import RemoteCore
 /// It uses only what needs no permission: NSWorkspace, window owners and
 /// bounds (never their names or pixels), display bounds, the input source.
 /// It never posts events, reads the screen, or scripts other apps: the
-/// JetKVM's keyboard and pointer are the only input.
+/// JetKVM's keyboard and pointer are the only input. With the user's switch
+/// on, it also keeps 1Password running.
 final class Agent {
     let socket: String
     let checkServerIsRoot: Bool
@@ -17,6 +19,8 @@ final class Agent {
     private var last: AgentFacts?
     private var keyMap: (id: String, keyboardType: UInt32, map: [String: [Stroke]])?
     private var nextConnect = Date.distantPast
+    private var nextKeepCheck = Date.distantPast
+    private var lastOnePasswordStart = Date.distantPast
 
     init(socket: String, checkServerIsRoot: Bool) {
         self.socket = socket
@@ -32,6 +36,7 @@ final class Agent {
     }
 
     private func tick() {
+        keepOnePasswordRunning()
         if conn == nil { connect() }
         guard let conn else { return }
         let facts = collect()
@@ -99,7 +104,9 @@ final class Agent {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]] else { return [] }
         return list.compactMap { w in
-            guard let layer = w[kCGWindowLayer as String] as? Int, layer == OnePassword.layer,
+            let owner = w[kCGWindowOwnerName as String] as? String
+            guard let layer = w[kCGWindowLayer as String] as? Int,
+                  layer == OnePassword.layer || owner.map(PasswordDialog.owners.contains) == true,
                   let number = w[kCGWindowNumber as String] as? Int,
                   let pid = w[kCGWindowOwnerPID as String] as? Int32,
                   let boundsDict = w[kCGWindowBounds as String] as? NSDictionary,
@@ -108,6 +115,41 @@ final class Agent {
                               bundle: NSRunningApplication(processIdentifier: pid)?.bundleIdentifier, layer: layer,
                               x: Double(b.minX), y: Double(b.minY), w: Double(b.width), h: Double(b.height))
         }
+    }
+
+    // MARK: 1Password
+
+    /// `op` run without 1Password fails without a prompt, and a 1Password
+    /// that `op` started quits once its prompt is gone: with the switch on,
+    /// 1Password is started again (in the background) a few seconds after it
+    /// quit, at most every 30 s. It starts locked; its prompt then asks for
+    /// the password, which an approval types.
+    private func keepOnePasswordRunning() {
+        guard Date() >= nextKeepCheck else { return }
+        nextKeepCheck = Date().addingTimeInterval(5)
+        let domain = OnePassword.keepRunningDomain as CFString
+        CFPreferencesAppSynchronize(domain) // `defaults write` from the app's SSH session
+        guard CFPreferencesGetAppBooleanValue(OnePassword.keepRunningKey as CFString, domain, nil),
+              NSRunningApplication.runningApplications(withBundleIdentifier: OnePassword.bundle).isEmpty,
+              Date().timeIntervalSince(lastOnePasswordStart) >= 30,
+              let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: OnePassword.bundle),
+              Agent.isOnePassword(url) else { return }
+        lastOnePasswordStart = Date()
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = false
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, error in
+            Log.info(error.map { "agent: starting 1Password failed: \($0.localizedDescription)" } ?? "agent: started 1Password")
+        }
+    }
+
+    /// 1Password's app by its signature: another app can claim its bundle id.
+    static func isOnePassword(_ url: URL) -> Bool {
+        var code: SecStaticCode?
+        var requirement: SecRequirement?
+        let text = "anchor apple generic and identifier \"\(OnePassword.bundle)\" and certificate leaf[subject.OU] = \"\(OnePassword.team)\""
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code,
+              SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess else { return false }
+        return SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess
     }
 
     // MARK: Activation

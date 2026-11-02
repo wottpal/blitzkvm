@@ -1,12 +1,19 @@
 import ApprovalKit
 import Darwin
 import Foundation
+import SystemConfiguration
 
 /// The target daemon (root): holds the target key and the roster, keeps the
 /// link to the broker, serves requesters and the agent on the local socket,
 /// signs asks, checks every decision itself, and drives the screen for
 /// approved screen asks. All state lives on `queue`.
 public final class Daemon {
+    /// How long an ask waits for an approver: the protocol's most, so a
+    /// phone that rings a while later can still answer. A 1Password prompt
+    /// closes by itself after about a minute; its ask lives as long.
+    public static let askLifetime = Limits.maxAskLifetime
+    public static let onePasswordLifetime: Int64 = 60
+
     public struct Config {
         public var paths: Paths
         /// nil: the JetKVM's link-local address from link.json.
@@ -28,14 +35,17 @@ public final class Daemon {
         /// stay without saying what it wants.
         public var maxClients = 32
         public var requestTimeout: TimeInterval = 5
-        public var computerName = Host.current().localizedName ?? "this Mac"
+        // SCDynamicStore, not Host: Host's name can wait seconds on reverse DNS.
+        public var computerName = (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? "this Mac"
         public var driverTuning = ScreenDriver.Tuning()
 
         public init(paths: Paths) { self.paths = paths }
     }
 
-    /// Open requester asks per user.
+    /// Open requester asks per user, and asks per user a minute: each costs
+    /// approvers a notification (and the relay's push budget).
     static let openPerUser = 3
+    static let asksPerMinute = 8
 
     public let queue = DispatchQueue(label: "xyz.scio.blitzkvm.remote.daemon")
     let config: Config
@@ -61,6 +71,12 @@ public final class Daemon {
     var identities: [Int32: (start: Double, identity: CodeIdentity?)] = [:]
     var pollTimer: DispatchSourceTimer?
     var refusedClients = false
+    /// Recent asks per user (Unix seconds), for asksPerMinute.
+    var askTimes: [uid_t: [Int64]] = [:]
+    var lastAgentRefusal: Int64 = 0
+    /// Screen drivers run one at a time: two approvals never drive the
+    /// keyboard at once.
+    let drivers = DispatchQueue(label: "xyz.scio.blitzkvm.remote.drivers")
 
     public init(config: Config) throws {
         self.config = config
@@ -94,6 +110,7 @@ public final class Daemon {
         timer.setEventHandler { [weak self] in self?.poll() }
         timer.resume()
         pollTimer = timer
+        if !config.userMode { Log.boundStderr() }
         Log.info("daemon: target \(signer.id), socket \(config.paths.socket)" + (roster == nil ? ", no roster yet" : ""))
     }
 
@@ -130,6 +147,8 @@ public final class Daemon {
             let next = try Roster.accept(env, current: roster?.roster)
             try store.saveRoster(env)
             roster = (next, env)
+            // A revoked approver's grants end with it.
+            grants.keep(approvers: Set(next.approvers.map(\.id)))
             Log.info("roster \(next.seq): \(next.approvers.count) approvers")
             if next.target(signer.id) == nil { Log.info("the new roster doesn't name this target") }
         } catch WireError.roster("stale") {
@@ -207,7 +226,7 @@ public final class Daemon {
         }
         var note = "BlitzKVM: approved on \(by)"
         if d.grant == Limits.grantMinutes, let key = p.grantKey {
-            grants.add(key, minutes: Limits.grantMinutes, now: Double(now()))
+            grants.add(key, minutes: Limits.grantMinutes, now: Double(now()), by: d.approver)
             note += " (and for \(Limits.grantMinutes) minutes from \(key.anchor.name))"
         }
         finish(p, .approved, note)
@@ -218,7 +237,7 @@ public final class Daemon {
     /// Signs an ask and offers it; nil when it can't go out.
     func send(kind: String, title: String, detail: String?, requester: Requester?, evidence: Evidence? = nil,
               secret: String = SecretKind.none, grantable: Bool = false, requestedBy: String? = nil,
-              lifetime: Int64 = 60) -> PendingAsk? {
+              lifetime: Int64 = Daemon.askLifetime) -> PendingAsk? {
         guard roster != nil, link.isReady else { return nil }
         let ask = Ask(target: signer.id, kind: kind, title: title.clipped(bytes: Limits.maxText),
                       detail: detail?.clipped(bytes: Limits.maxText),
@@ -237,7 +256,8 @@ public final class Daemon {
         }
         p.expiry = expiry
         queue.asyncAfter(deadline: .now() + .seconds(Int(lifetime) + 2), execute: expiry)
-        Log.info("asked \(kind) \(ask.id): \(ask.title)")
+        // The title stays out of the log: a command line may carry a secret.
+        Log.info("asked \(kind) \(ask.id)")
         return p
     }
 

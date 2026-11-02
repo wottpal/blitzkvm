@@ -5,12 +5,16 @@ import Foundation
 /// request, then info lines until the result. Blocking; no daemon, no
 /// result in time, or a dropped connection is `unavailable`/`timeout`.
 public enum RequesterClient {
-    public static func request(socket: String, _ message: LocalMessage, timeout: TimeInterval,
+    public static func request(socket: String, _ message: LocalMessage, timeout: TimeInterval, requireRoot: Bool = true,
                                info: (String) -> Void) -> (outcome: Outcome, text: String?) {
         guard let fd = try? Sockets.connectUnix(path: socket) else {
             return (.unavailable, "BlitzKVM: the approval daemon isn't running")
         }
         defer { close(fd) }
+        // Whoever answers on the socket decides sudo: it must be root's daemon.
+        if requireRoot, PeerCredentials.of(fd)?.uid != 0 {
+            return (.unavailable, "BlitzKVM: the approval socket isn't root's")
+        }
         guard var data = try? JSONEncoder.wire.encode(message) else { return (.refused, nil) }
         data.append(0x0A)
         let sent = data.withUnsafeBytes { raw -> Bool in
