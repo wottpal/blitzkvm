@@ -201,7 +201,7 @@ Requirements, as used on the development Mac:
 
 - macOS 14 or later on Apple silicon.
 - Xcode with the macOS 26 SDK or later in `/Applications/Xcode.app` (developed with 27.0). The macOS Makefile points `DEVELOPER_DIR` at it; the Command Line Tools alone cannot build the app's SwiftUI macros or its Icon Composer icon.
-- Go: `go.mod` pins `toolchain go1.27.2`. Any recent `go` downloads it automatically.
+- Go: `go.mod` pins `toolchain go1.27.3`. Any recent `go` downloads it automatically.
 - A C/C++ compiler for cgo (from Xcode), needed by the OpenH264 bindings the emulator uses.
 - Optional: `ffmpeg` (H.265 and High-profile replay tests skip without it), `actionlint`, and a "Developer ID Application" certificate in the login keychain for stable signing.
 
