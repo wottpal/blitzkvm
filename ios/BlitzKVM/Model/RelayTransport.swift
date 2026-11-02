@@ -17,8 +17,10 @@ final class RelayTransport: CenterTransport {
 
     /// The broker's relay endpoints; nil without a usable relay URL.
     static func relay(for broker: PairedBroker) -> RelayHTTP? {
-        guard let string = broker.relay, let url = URL(string: string),
-              let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http", url.host() != nil else { return nil }
+        // https; http only to this device (a relay in development).
+        guard let string = broker.relay, let url = URL(string: string), let host = url.host(),
+              let scheme = url.scheme?.lowercased(), scheme == "https" || (scheme == "http" && ["localhost", "127.0.0.1"].contains(host))
+        else { return nil }
         return RelayHTTP(base: url, brokerID: broker.id)
     }
 
@@ -47,6 +49,10 @@ final class RelayTransport: CenterTransport {
             return delivered
         }
     }
+
+    /// Before a send: `lastSend` then names only that send's box (nil when
+    /// the center sent nothing).
+    func forgetLastSend() { lastSend = nil }
 
     /// Waits for a box to reach the relay; false if it didn't.
     func result(of id: UUID?) async -> Bool {

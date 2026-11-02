@@ -57,6 +57,15 @@ final class AppModel {
         }
     }
 
+    /// New keys after Face ID changed (the old ones stopped working): every
+    /// JetKVM is forgotten here, and the iPhone pairs again.
+    func resetKeys() {
+        session?.forgetEverything()
+        ApproverKeys.reset(in: AppConfig.keychain())
+        openRequest = nil
+        loadKeys()
+    }
+
     // MARK: Lifecycle
 
     func launched() {
@@ -103,7 +112,7 @@ final class AppModel {
         case AppConfig.denyAction:
             // The app may have been launched in the background for this.
             let task = UIApplication.shared.beginBackgroundTask(withName: "Deny")
-            await session.deny(notification: userInfo)
+            await session.deny(notification: userInfo, identifier: response.notification.request.identifier)
             UIApplication.shared.endBackgroundTask(task)
         case UNNotificationDefaultActionIdentifier:
             screen = .requests

@@ -45,6 +45,8 @@ final class ApproverSession {
     @ObservationIgnored private let file: URL?
     @ObservationIgnored private var lastRefresh = Date.distantPast
     @ObservationIgnored private var registered = Set<String>()
+    /// Per broker, the last outbox box taken: the next fetch acknowledges it.
+    @ObservationIgnored private var outboxAck: [String: Int64] = [:]
     @ObservationIgnored private var pairingTask: Task<Void, Never>?
     @ObservationIgnored private var badge: AnyCancellable?
 
@@ -117,13 +119,16 @@ final class ApproverSession {
             lastRefresh = Date()
         }
         if sync {
-            for b in center.brokers where isAdmitted(b.id) && RelayTransport.relay(for: b) != nil { center.sync(b.id) }
+            // Brokers still waiting for the owner too: a roster that got lost
+            // on its way comes on request (the relay refuses until admitted).
+            for b in center.brokers where RelayTransport.relay(for: b) != nil { center.sync(b.id) }
         }
         await fetchOutboxes()
         if sync {
             try? await Task.sleep(for: .seconds(1.5))
             await fetchOutboxes()
         }
+        await registerPush() // for a JetKVM that admitted this iPhone meanwhile
         center.expire()
         Notifications.prune(open: Set(center.requests.map(\.id)), ended: Set(center.history.map(\.id)))
     }
@@ -138,8 +143,9 @@ final class ApproverSession {
             return
         }
         do {
-            let boxes = try await relay.outbox(approver: keys.id, transport: keys.transport)
+            let (boxes, last) = try await relay.outbox(approver: keys.id, transport: keys.transport, ack: outboxAck[broker.id] ?? 0)
             for box in boxes { center.receive(box: box, from: broker.id) }
+            outboxAck[broker.id] = last
             relayStates[broker.id] = .ok(Date())
         } catch {
             relayStates[broker.id] = .failed(ErrorText.describe(error))
@@ -166,7 +172,7 @@ final class ApproverSession {
         if let box = push.box { center.receive(box: box, from: push.brokerID) }
         if let id = userInfo[AppConfig.requestKey] as? String { return id }
         if let message = PushedMessage(push, seal: keys.seal, brokers: center.brokers, now: now),
-           case let .request(verified, _, _) = message { return verified.id }
+           case let .request(verified, _, _, _) = message { return verified.id }
         return nil
     }
 
@@ -199,7 +205,8 @@ final class ApproverSession {
             do {
                 secret = try vault.secret(target: r.ask.target, kind: r.ask.secret, context: context)
             } catch {
-                throw UserError("The stored \(KindInfo.secretName(r.ask.secret)) can't be read (Face ID may have changed). Enter it again in Settings.")
+                throw UserError("The stored \(KindInfo.secretName(r.ask.secret)) can't be read: Face ID changed, which ends this iPhone's keys. "
+                    + "Reset them in Settings › This iPhone, then pair again.")
             }
             guard secret != nil else { throw UserError("No \(KindInfo.secretName(r.ask.secret)) is stored for \(target).") }
         }
@@ -229,6 +236,7 @@ final class ApproverSession {
 
     private func deliver(_ r: OpenRequest, as decision: SentDecision, _ make: () throws -> Void) async throws {
         sent[r.id] = .sending
+        transport.forgetLastSend() // an earlier send's result mustn't pass for this one's
         do {
             try make()
         } catch {
@@ -247,9 +255,14 @@ final class ApproverSession {
         }
     }
 
-    /// The notification's Deny action (the app may run in the background).
-    func deny(notification userInfo: [AnyHashable: Any]) async {
-        guard let r = await request(for: userInfo), r.state == "pending", sent[r.id] == nil else { return }
+    /// The notification's Deny action (the app may run in the background):
+    /// only the request the notification names, never a guess.
+    func deny(notification userInfo: [AnyHashable: Any], identifier: String) async {
+        let named = userInfo[AppConfig.requestKey] as? String ?? Notifications.requestID(identifier: identifier)
+        guard let id = named else { return }
+        receive(push: userInfo)
+        if !center.requests.contains(where: { $0.id == id }) { await refresh() }
+        guard let r = center.requests.first(where: { $0.id == id }), r.state == "pending", sent[r.id] == nil else { return }
         try? await deny(r)
     }
 
@@ -294,6 +307,13 @@ final class ApproverSession {
     /// revokes it.
     func remove(_ broker: PairedBroker) {
         let targets = broker.decodedRoster?.targets.map(\.id) ?? []
+        // No more pushes from it: the relay forgets this iPhone's tokens
+        // (the roster lists it until an owner revokes it).
+        if let relay = RelayTransport.relay(for: broker) {
+            let keys = keys
+            Task { try? await relay.unregister(approver: keys.id, transport: keys.transport) }
+        }
+        outboxAck[broker.id] = nil
         center.remove(brokerID: broker.id)
         relayStates[broker.id] = nil
         let remaining = Set(center.brokers.flatMap { $0.decodedRoster?.targets.map(\.id) ?? [] })
@@ -301,6 +321,11 @@ final class ApproverSession {
             for kind in KindInfo.secretKinds { vault.remove(target: t, kind: kind) }
         }
         passwordsVersion += 1
+    }
+
+    /// Forgets every JetKVM and stored password (before new keys).
+    func forgetEverything() {
+        for b in center.brokers { remove(b) }
     }
 
     // MARK: Pairing
@@ -347,7 +372,7 @@ final class ApproverSession {
         pairing = .enrolling
         do {
             let box = try center.join(invite)
-            try await RelayHTTP(base: relayURL, brokerID: id).enroll(box: box)
+            try await RelayHTTP(base: relayURL, brokerID: id).enroll(box: box, pairing: Pairing.hash(invite.token.data))
         } catch {
             if center.broker(id)?.roster == nil { center.remove(brokerID: id) }
             pairing = .failed(ErrorText.describe(error))
@@ -356,7 +381,14 @@ final class ApproverSession {
         await Notifications.requestAuthorization()
         pairing = .waiting(broker: invite.name, since: Date())
         let deadline = Date().addingTimeInterval(5 * 60) // the pairing token's lifetime
+        var synced = Date()
         while !Task.isCancelled, Date() < deadline {
+            // The broker sends the roster once when the owner admits this
+            // iPhone; asking again gets it if that one went missing.
+            if Date().timeIntervalSince(synced) >= 8 {
+                center.sync(id)
+                synced = Date()
+            }
             if let broker = center.broker(id) { await fetchOutbox(broker) }
             if isAdmitted(id) {
                 await registerPush()

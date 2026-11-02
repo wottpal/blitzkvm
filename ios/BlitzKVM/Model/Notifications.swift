@@ -30,8 +30,14 @@ enum Notifications {
     /// The request a delivered notification is about.
     private static func requestID(_ n: UNNotification) -> String? {
         if let id = n.request.content.userInfo[AppConfig.requestKey] as? String { return id }
-        // The relay collapses a request's pushes under its id.
-        let id = n.request.identifier
+        return requestID(identifier: n.request.identifier)
+    }
+
+    /// The request a notification identifier names: the relay collapses a
+    /// request's pushes under its id, "<id>", its repeats "<id>.<n>", the
+    /// push that ends it "<id>.end".
+    static func requestID(identifier: String) -> String? {
+        let id = String(identifier.prefix { $0 != "." })
         return id.count == 32 && Data(hex: id) != nil ? id : nil
     }
 

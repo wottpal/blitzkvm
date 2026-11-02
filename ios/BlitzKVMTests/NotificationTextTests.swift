@@ -56,10 +56,43 @@ final class NotificationTextTests: XCTestCase {
         XCTAssertNil(try text(f, f.userInfo(box: forgedTarget)))
         // Expired by the time it arrives.
         XCTAssertNil(try text(f, f.userInfo(box: try f.requestBox(ask)), now: ask.expires))
-        // Not a request (a status update).
-        XCTAssertNil(try text(f, f.userInfo(box: try f.box(["op": "status", "id": ask.id, "state": "done"]))))
+        // A status that isn't an end, or names no request.
+        XCTAssertNil(try text(f, f.userInfo(box: try f.box(["op": "status", "id": ask.id, "state": "pending"]))))
+        XCTAssertNil(try text(f, f.userInfo(box: try f.box(["op": "status", "id": "not a request id", "state": "done"]))))
         // The genuine one still works.
         XCTAssertNotNil(try text(f, f.userInfo(box: try f.requestBox(ask))))
+    }
+
+    /// The broker pushes an open request again: the same text, marked as a
+    /// repeat (which the extension silences when repeats are off).
+    func testRepeatsAreMarked() throws {
+        let f = try Fixture()
+        let ask = f.ask()
+        let env = try f.json(try f.requestEnvelope(try f.askEnvelope(ask)))
+        let first = try XCTUnwrap(try text(f, f.userInfo(box: try f.box(["op": "request", "request": env]))))
+        let again = try XCTUnwrap(try text(f, f.userInfo(box: try f.box(["op": "request", "request": env, "repeat": 3]))))
+        XCTAssertEqual(first.repeats, 0)
+        XCTAssertEqual(again.repeats, 3)
+        XCTAssertEqual(again.title, first.title)
+        XCTAssertEqual(again.requestID, ask.id)
+        XCTAssertFalse(again.ended)
+    }
+
+    /// The push that ends a request: a quiet note of how it went, naming the
+    /// approver from the roster.
+    func testEndedSaysHowItWent() throws {
+        let f = try Fixture()
+        let ask = f.ask()
+        let me = try XCTUnwrap(try f.pairedBroker().decodedRoster?.approvers.first)
+        let approved = try XCTUnwrap(try text(f, f.userInfo(box: try f.box(["op": "status", "id": ask.id, "state": "approved", "by": me.id]))))
+        XCTAssertTrue(approved.ended)
+        XCTAssertEqual(approved.requestID, ask.id)
+        XCTAssertEqual(approved.title, "Desk JetKVM")
+        XCTAssertEqual(approved.body, "Approved on \(me.name).")
+        let expired = try XCTUnwrap(try text(f, f.userInfo(box: try f.box(["op": "status", "id": ask.id, "state": "expired"]))))
+        XCTAssertEqual(expired.body, "Expired: nobody answered in time.")
+        let withdrawn = try XCTUnwrap(try text(f, f.userInfo(box: try f.box(["op": "status", "id": ask.id, "state": "cancelled"]))))
+        XCTAssertTrue(withdrawn.body.hasPrefix("Withdrawn"))
     }
 
     func testEnrollingNamesTheDevice() throws {

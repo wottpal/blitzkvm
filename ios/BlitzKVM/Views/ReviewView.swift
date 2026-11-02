@@ -43,7 +43,7 @@ struct ReviewView: View {
     private func review(_ r: OpenRequest) -> some View {
         let broker = center.broker(r.brokerID)
         let stored = r.ask.secret != SecretKind.none && session.hasPassword(target: r.ask.target, kind: r.ask.secret)
-        let c = ReviewContent(r, broker: broker, secretStored: stored)
+        let c = ReviewContent(r, broker: broker, secretStored: stored, me: session.keys.id)
         return List {
             Section {
                 HStack(alignment: .top, spacing: 14) {
@@ -61,6 +61,12 @@ struct ReviewView: View {
                     }
                 }
                 .padding(.vertical, 4)
+                if let by = c.requestedBy {
+                    Label(c.requestedElsewhere ? "Asked for on \(by), not on this iPhone." : "Asked for on this iPhone.",
+                          systemImage: c.requestedElsewhere ? "exclamationmark.triangle" : "person.crop.circle.badge.checkmark")
+                        .font(.subheadline)
+                        .foregroundStyle(c.requestedElsewhere ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                }
             }
 
             if r.isPending {
@@ -179,7 +185,13 @@ struct ReviewView: View {
 
     private func actionLabel(_ title: String, symbol: String, busy: Bool) -> some View {
         HStack(spacing: 8) {
-            if busy { ProgressView() } else { Image(systemName: symbol) }
+            // The spinner takes the symbol's place at its size: the button
+            // doesn't grow while it works.
+            Image(systemName: symbol)
+                .opacity(busy ? 0 : 1)
+                .overlay {
+                    if busy { ProgressView().controlSize(.small) }
+                }
             Text(title).lineLimit(1).minimumScaleFactor(0.8)
         }
         .frame(maxWidth: .infinity)

@@ -7,6 +7,8 @@ struct SettingsView: View {
     @Environment(ApproverSession.self) private var session
     @EnvironmentObject private var center: ApprovalCenter
     @State private var name = ""
+    @State private var repeats = AppConfig.repeatsNotifications
+    @State private var resetting = false
 
     var body: some View {
         NavigationStack {
@@ -83,6 +85,8 @@ struct SettingsView: View {
             if status.timeSensitive != .notSupported {
                 LabeledContent("Time Sensitive", value: status.timeSensitive == .enabled ? "On" : "Off")
             }
+            Toggle("Repeat Until Answered", isOn: $repeats)
+                .onChange(of: repeats) { _, on in AppConfig.repeatsNotifications = on }
             LabeledContent("Push", value: session.deviceToken == nil ? "Not registered" : "Registered")
         } header: {
             Text("Notifications")
@@ -92,7 +96,9 @@ struct SettingsView: View {
             } else if status.timeSensitive == .disabled {
                 Text("Time Sensitive notifications are off, so a Focus can hold requests back until they expire.")
             } else {
-                Text("Requests arrive as Time Sensitive notifications. Deny right from the notification; approving opens BlitzKVM.")
+                Text("Requests arrive as Time Sensitive notifications"
+                    + (repeats ? " and alert again until answered: every 10 s for 1Password, every 20 s for the rest." : ".")
+                    + " Deny right from the notification; approving opens BlitzKVM.")
             }
         }
     }
@@ -117,6 +123,12 @@ struct SettingsView: View {
                 NoticeRow(symbol: "exclamationmark.triangle.fill", tint: .orange, title: "Development Keys",
                           text: "This build signs with software keys, not the Secure Enclave. For development only.")
             }
+            Button("Reset Keys…", role: .destructive) { resetting = true }
+                .confirmationDialog("Reset this iPhone's keys?", isPresented: $resetting, titleVisibility: .visible) {
+                    Button("Reset Keys", role: .destructive) { model.resetKeys() }
+                } message: {
+                    Text("New keys replace these, which stop working when Face ID changes. Every JetKVM and stored password is forgotten here: pair again from your Mac.")
+                }
         } header: {
             Text("This iPhone")
         } footer: {

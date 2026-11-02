@@ -48,8 +48,13 @@ struct ReviewContent: Equatable {
     /// The password this ask can take, and whether one is stored.
     let secret: SecretNeed?
     let expires: Date
+    /// Unlock asks: the approver that asked for it, and whether that was
+    /// another device than this iPhone.
+    let requestedBy: String?
+    let requestedElsewhere: Bool
 
-    init(ask: Ask, code: String, roster: Roster?, brokerName: String, secretStored: Bool) {
+    /// `me` is this iPhone's approver id.
+    init(ask: Ask, code: String, roster: Roster?, brokerName: String, secretStored: Bool, me: String? = nil) {
         title = ask.title
         detail = ask.detail.flatMap { $0.isEmpty ? nil : $0 }
         kind = ask.kind
@@ -62,6 +67,13 @@ struct ReviewContent: Equatable {
         secret = ask.secret == SecretKind.none ? nil
             : SecretNeed(kind: ask.secret, name: KindInfo.secretName(ask.secret), stored: secretStored)
         expires = Date(timeIntervalSince1970: TimeInterval(ask.expires))
+        if let id = ask.requestedBy {
+            requestedBy = id == me ? "this iPhone" : roster?.approver(id)?.name ?? "an approver no longer listed"
+            requestedElsewhere = id != me
+        } else {
+            requestedBy = nil
+            requestedElsewhere = false
+        }
 
         if let r = ask.requester {
             var who = "\(r.user) (uid \(r.uid))"
@@ -83,17 +95,24 @@ struct ReviewContent: Equatable {
                 facts.append(Fact(label: "Secure input", value: s.team.map { "\(s.bundle) (\($0))" } ?? s.bundle))
             }
             if let w = e.window {
-                var where_ = "\(Int(w.w)) × \(Int(w.h)) at \(Int(w.x)), \(Int(w.y))"
-                if let d = e.display { where_ += " of \(Int(d.w)) × \(Int(d.h))" }
+                let n = Self.number
+                var where_ = "\(n(w.w)) × \(n(w.h)) at \(n(w.x)), \(n(w.y))"
+                if let d = e.display { where_ += " of \(n(d.w)) × \(n(d.h))" }
                 facts.append(Fact(label: "Dialog", value: where_))
             }
         }
         evidence = facts
     }
 
-    init(_ request: OpenRequest, broker: PairedBroker?, secretStored: Bool) {
+    init(_ request: OpenRequest, broker: PairedBroker?, secretStored: Bool, me: String? = nil) {
         self.init(ask: request.ask, code: request.verified.code, roster: broker?.decodedRoster,
-                  brokerName: broker?.name ?? "JetKVM", secretStored: secretStored)
+                  brokerName: broker?.name ?? "JetKVM", secretStored: secretStored, me: me)
+    }
+
+    /// A screen coordinate from the ask, whole; "?" for one no screen has
+    /// (Int(_:) would trap on it).
+    static func number(_ value: Double) -> String {
+        value.isFinite && abs(value) < 1_000_000 ? String(Int(value)) : "?"
     }
 
     static func signer(_ raw: String) -> Signer {

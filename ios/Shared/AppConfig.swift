@@ -14,6 +14,18 @@ enum AppConfig {
     /// The userInfo key the extension adds to a request's notification.
     static let requestKey = "request"
 
+    /// The App Group's defaults: settings the extension reads too.
+    static var defaults: UserDefaults { UserDefaults(suiteName: appGroup) ?? .standard }
+
+    /// Settings › Repeat Until Answered (on unless turned off): a request
+    /// alerts again each time the broker pushes it again; off, the repeats
+    /// arrive silently.
+    static let repeatKey = "repeatNotifications"
+    static var repeatsNotifications: Bool {
+        get { defaults.object(forKey: repeatKey) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: repeatKey) }
+    }
+
     /// The shared keychain access group ("<team>.com.fmdlabs.blitzkvm.shared",
     /// Info.plist's BKKeychainAccessGroup). Nil in builds without a team,
     /// whose AppIdentifierPrefix is empty: they use the default group.
