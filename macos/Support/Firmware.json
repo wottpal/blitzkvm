@@ -2,9 +2,9 @@
   "builds": [
     {
       "kind": "blitzkvm",
-      "tag": "release/0.5.9-fork.10",
-      "sha256": "5043c605948e7ae3ab3767febb360b3d264c0089acc80eed35feca869216cecb",
-      "size": 35762392,
+      "tag": "release/0.5.9-fork.11",
+      "sha256": "8f105e7c7d9b1fcccf9b5b7d2f406312aa0bfb64d3535ff1516f0785f0b1b2b1",
+      "size": 35807984,
       "features": [
         "hidrpcWheel",
         "refreshRegions",
