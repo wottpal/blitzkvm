@@ -1,6 +1,6 @@
 # Benchmarks
 
-What BlitzKVM and its firmware measure on real hardware: input latency, picture quality, bandwidth, slow links and audio. Every number below was measured, mostly on the setup described first, and every method is in the repository so it can be repeated. The engineering log behind them is [`plans/2026-10-10-engineering-plan.md`](plans/2026-10-10-engineering-plan.md) (§21–§31).
+What BlitzKVM and its firmware measure on real hardware: input latency, picture quality, bandwidth, slow links and audio. Every number below was measured, mostly on the setup described first, and every method is in the repository so it can be repeated.
 
 **Contents:** [Setup](#setup) · [At a glance](#at-a-glance) · [Input latency](#input-latency) · [Picture quality](#picture-quality) · [Bandwidth and frame rate](#bandwidth-and-frame-rate) · [Slow links](#slow-links) · [Audio](#audio) · [Long sessions](#long-sessions) · [Method](#method) · [Reproduce](#reproduce)
 

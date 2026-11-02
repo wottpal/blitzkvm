@@ -2,7 +2,7 @@
 
 This bench measures what the JetKVM stream does to a known image. A 1920×1080 test pattern runs full screen on the target, and each decoded frame is scored against the exact pattern, both static and while scrolling.
 
-It produced the numbers in the plan's §21 (stock vs. patched encoder, QP floor, bitrate, frame rate, H.264 vs. H.265, the BT.601 color finding) and §23 (still refresh, chroma reconstruction, luma correction, 2× text upscaling).
+It produced the numbers in [BENCHMARKS.md](../../BENCHMARKS.md#picture-quality) (stock vs. patched encoder, QP floor, bitrate, frame rate, H.264 vs. H.265, the BT.601 color finding, still refresh, chroma reconstruction, luma correction, 2× text upscaling).
 
 ## Files
 

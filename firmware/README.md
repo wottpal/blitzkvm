@@ -6,7 +6,7 @@
 > the source of the installed build (`release/0.5.9-fork.4`). This patch stays as the same changes against
 > `release/0.5.9`, without D08 and D09.
 
-`jetkvm-0.5.9-desktop-encoder.patch` applies to [`jetkvm/kvm`](https://github.com/jetkvm/kvm) at tag `release/0.5.9`. It changes how the device encodes desktop content and adds runtime encoder control for the app. Measurements and the reasoning behind each change are in the plan's §21.
+`jetkvm-0.5.9-desktop-encoder.patch` applies to [`jetkvm/kvm`](https://github.com/jetkvm/kvm) at tag `release/0.5.9`. It changes how the device encodes desktop content and adds runtime encoder control for the app. Measurements are in [BENCHMARKS.md](../BENCHMARKS.md#picture-quality).
 
 ## Why
 

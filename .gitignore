@@ -47,3 +47,6 @@ __pycache__/
 
 # Latency probe key log (keylog_server.py)
 /tools/latency-probe/keys.log
+
+# The owner's engineering plan stays local
+/plans/
