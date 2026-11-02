@@ -49,7 +49,8 @@ struct StatusRow<Accessory: View>: View {
                     Text(markdown)
                         .font(.callout)
                         .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+                        .lineLimit(2) // beside a wide button a note wraps rather than cut off
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, state == nil ? 0 : 4)
                 }
             }

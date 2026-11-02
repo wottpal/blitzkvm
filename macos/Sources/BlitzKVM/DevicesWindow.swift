@@ -647,33 +647,18 @@ struct DeviceEditor: View {
             .padding([.horizontal, .top], 20)
             Form {
                 Section {
-                    TextField("Name", text: $device.name, prompt: Text("Office Server"))
-                    TextField("Addresses", text: $addressText, prompt: Text("192.168.1.50, jetkvm.local"))
+                    DeviceNameFields(name: $device.name, addresses: $addressText)
                     SecureField("Password", text: $password, prompt: Text(isNew ? "None" : "Unchanged"))
                 } footer: {
-                    Footnote("Separate several addresses with commas; they’re tried in order. LAN IPs, .local names, and Tailscale or other VPN hostnames all work.")
+                    Footnote(DeviceNameFields.note)
                 }
                 Section {
-                    Picker("Operating system", selection: $device.modifierProfile) {
-                        Text("macOS").tag(ModifierProfile.mac.rawValue)
-                        Text("Windows or Linux").tag(ModifierProfile.pc.rawValue)
-                    }
-                    Picker("Display", selection: $device.scaling) {
-                        ForEach(ScalingMode.allCases, id: \.self) { Text($0.menuTitle).tag($0) }
-                    }
-                    Toggle("Invert scrolling", isOn: $device.invertScroll)
+                    RemoteComputerFields(profile: $device.modifierProfile, scaling: $device.scaling, invertScroll: $device.invertScroll)
                     Toggle("Adapt stream quality to the network", isOn: $device.adaptiveQuality)
                 } header: {
                     Text("Remote Computer")
                 } footer: {
-                    VStack(alignment: .leading, spacing: 6) {
-                        if device.profile == .pc {
-                            Footnote("⌘ and Control are swapped, so ⌘C sends Ctrl+C.")
-                        }
-                        if device.scaling == .matchWindow {
-                            Footnote("Match Window changes the remote computer’s resolution with every resize. A Mac with another monitor then stops using the JetKVM as its main display, so use it when the JetKVM is the only display.")
-                        }
-                    }
+                    RemoteComputerFields.Notes(profile: device.profile, scaling: device.scaling)
                 }
             }
             .formStyle(.grouped)
@@ -696,7 +681,58 @@ struct DeviceEditor: View {
     }
 }
 
-private struct Footnote: View {
+/// A device's name and addresses (the editor, Device Settings).
+struct DeviceNameFields: View {
+    @Binding var name: String
+    @Binding var addresses: String
+
+    static let note = "Separate several addresses with commas; they’re tried in order. LAN IPs, .local names, and Tailscale "
+        + "or other VPN hostnames all work."
+
+    var body: some View {
+        TextField("Name", text: $name, prompt: Text("Office Server"))
+        TextField("Addresses", text: $addresses, prompt: Text("192.168.1.50, jetkvm.local"))
+    }
+}
+
+/// How the remote computer takes input and shows its screen (the editor,
+/// Device Settings).
+struct RemoteComputerFields: View {
+    @Binding var profile: String
+    @Binding var scaling: ScalingMode
+    @Binding var invertScroll: Bool
+
+    var body: some View {
+        Picker("Operating system", selection: $profile) {
+            Text("macOS").tag(ModifierProfile.mac.rawValue)
+            Text("Windows or Linux").tag(ModifierProfile.pc.rawValue)
+        }
+        Picker("Display", selection: $scaling) {
+            ForEach(ScalingMode.allCases, id: \.self) { Text($0.menuTitle).tag($0) }
+        }
+        Toggle("Invert scrolling", isOn: $invertScroll)
+    }
+
+    /// What the choices mean, when it isn't obvious.
+    struct Notes: View {
+        let profile: ModifierProfile
+        let scaling: ScalingMode
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                if profile == .pc {
+                    Footnote("⌘ and Control are swapped, so ⌘C sends Ctrl+C.")
+                }
+                if scaling == .matchWindow {
+                    Footnote("Match Window changes the remote computer’s resolution with every resize. A Mac with another monitor "
+                        + "then stops using the JetKVM as its main display, so use it when the JetKVM is the only display.")
+                }
+            }
+        }
+    }
+}
+
+struct Footnote: View {
     let text: String
 
     init(_ text: String) { self.text = text }

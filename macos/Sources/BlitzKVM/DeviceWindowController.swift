@@ -65,6 +65,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     var onAddressesChanged: ((DeviceWindowController) -> Void)?
     /// JetKVM Setup checked the device: persist the summary.
     var onSetupChecked: ((DeviceWindowController, SetupSummary) -> Void)?
+    /// Device Settings changed the device: applied to the saved one.
+    var onEditDevice: ((DeviceWindowController, (inout Device) -> Void) -> Void)?
     /// Clipboard sync was set up, turned on or off, or removed: persist it.
     var onClipboardChanged: ((DeviceWindowController) -> Void)?
     /// Clipboard sync's state as the engine reports it ("off" until it runs).
@@ -72,7 +74,8 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// Opens the setup sheet once the session connects.
     var showsSetupOnConnect = false
     private var setupModel: JetKVMSetupModel?
-    private var setupSheet: NSWindow?
+    private var settingsSheet: NSWindow?
+    private let settingsSelection = DeviceSettingsSelection(.general)
     /// The Tailscale relay the video goes through, when it isn't direct.
     private var tailscaleRelay: String?
     private var relayCheckedAt: Date?
@@ -569,7 +572,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         return now - lastInputAt >= 2 && !input.keysHeld && NSEvent.pressedMouseButtons == 0
             && pendingPasteID == nil && appPasteID == nil && snapshot.PasteInProgress != true
             && (mediaWindow == nil || mediaModel.upload == nil)
-            && setupSheet == nil && setupModel?.isWorking != true && !resizing
+            && settingsSheet == nil && setupModel?.isWorking != true && !resizing
     }
 
     /// What identifies the network this Mac is on: its gateways and
@@ -623,33 +626,28 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         Task { await mediaModel.refresh() }
     }
 
-    /// Device Settings: the device library's editor for this device, as a
-    /// sheet; `save` stores what was saved (it comes back as libraryEdited).
-    func showDeviceSettings(_ saved: Device, save: @escaping (Device, String?) -> Void) {
+    /// Device Settings, as a sheet: at `tab`, or switched to it when it
+    /// shows already. Its edits go to the device library (onEditDevice) and
+    /// come back as libraryEdited.
+    func showSettings(_ tab: DeviceSettingsTab = .general) {
+        if settingsSheet != nil {
+            settingsSelection.tab = tab
+            return
+        }
         guard let window, window.attachedSheet == nil else { return }
-        let host = NSHostingController(rootView: AnyView(EmptyView()))
-        let sheet = NSWindow(contentViewController: host)
-        host.rootView = AnyView(DeviceEditor(device: saved, isNew: false) { [weak window, weak sheet] device, password in
-            save(device, password)
-            if let sheet { window?.endSheet(sheet) }
-        } cancel: { [weak window, weak sheet] in
-            if let sheet { window?.endSheet(sheet) }
-        })
-        window.beginSheet(sheet)
-    }
-
-    /// The JetKVM Setup sheet: firmware, Tailscale and password.
-    func showSetup() {
-        guard let window, setupSheet == nil else { return }
         let model = setupModel ?? JetKVMSetupModel(controller: self)
         setupModel = model
-        let view = JetKVMSetupView(model: model, deviceName: device.name, address: address) { [weak self] in
-            guard let self, let sheet = self.setupSheet else { return }
+        settingsSelection.tab = tab
+        let view = DeviceSettingsView(model: model, selection: settingsSelection, device: device, address: address) { [weak self] change in
+            guard let self else { return }
+            if let onEditDevice { onEditDevice(self, change) } else { updatePreferences(change) }
+        } done: { [weak self] in
+            guard let self, let sheet = self.settingsSheet else { return }
             self.window?.endSheet(sheet)
-            self.setupSheet = nil
+            self.settingsSheet = nil
         }
         let sheet = NSWindow(contentViewController: NSHostingController(rootView: view))
-        setupSheet = sheet
+        settingsSheet = sheet
         window.beginSheet(sheet)
         model.refresh()
     }
@@ -675,7 +673,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
 
     /// Checks JetKVM Setup's three states without showing the sheet.
     private func checkSetup() {
-        guard snapshot.Phase == "connected", setupSheet == nil else { return }
+        guard snapshot.Phase == "connected", settingsSheet == nil else { return }
         let model = setupModel ?? JetKVMSetupModel(controller: self)
         setupModel = model
         model.refresh()
@@ -735,7 +733,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// Renders the setup sheet (self-test).
     func writeSetupSnapshot(to url: URL) -> Bool {
         // The frame view, so the sheet's background is in the picture too.
-        guard let view = setupSheet?.contentView?.superview ?? setupSheet?.contentView,
+        guard let view = settingsSheet?.contentView?.superview ?? settingsSheet?.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
         view.cacheDisplay(in: view.bounds, to: rep)
         return (try? rep.representation(using: .png, properties: [:])?.write(to: url)) != nil
@@ -976,7 +974,7 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
             ApprovalService.shared.deviceConnected(engine: engine, address: address)
             if showsSetupOnConnect {
                 showsSetupOnConnect = false
-                showSetup()
+                showSettings(.jetKVM)
             } else {
                 // Keeps the Devices window's setup status current; after the
                 // picture has started.

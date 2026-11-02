@@ -14,7 +14,7 @@ In scope: the macOS app, its helper (`blitzkvm-engine`), the BlitzKVM firmware c
 
 - input reaching a device whose identity was not confirmed;
 - a password or session cookie sent to a host other than the pinned device, or over a changed certificate;
-- JetKVM Setup installing a firmware or Tailscale build that doesn't match its pinned SHA-256;
+- Device Settings installing a firmware or Tailscale build that doesn't match its pinned SHA-256;
 - the updater installing an update that isn't signed with BlitzKVM's update key, or that comes from somewhere other than the release feed;
 - the helper or app executing data received from a device;
 - an approval taking effect without a valid signature from a current approver's presence key (sudo, `blitzkvm-remote confirm`), or a password typed outside the approved request (another window, twice, or without daemon-checked evidence);

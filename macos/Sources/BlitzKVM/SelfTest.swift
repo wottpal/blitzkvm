@@ -518,6 +518,13 @@ final class SelfTest {
                     && controller?.device.clipboardSync == nil
             case "clipboard-roundtrip":
                 ok = await clipboardRoundtrip(until: until)
+            case let a where a.hasPrefix("tab="):
+                // Device Settings' tab for the snapshots that follow.
+                let name = a.dropFirst("tab=".count).lowercased()
+                guard let tab = DeviceSettingsTab.allCases.first(where: { $0.rawValue.lowercased().replacingOccurrences(of: " ", with: "") == name })
+                else { ok = false; break }
+                controller?.showSettings(tab)
+                try? await Task.sleep(for: .milliseconds(500))
             case let a where a.hasPrefix("snapshot="):
                 // The sheet as it is between two actions.
                 model.refresh()

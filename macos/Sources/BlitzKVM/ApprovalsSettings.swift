@@ -17,8 +17,8 @@ struct ApprovalsSettings: View {
             Section {
                 Text("No JetKVM uses approvals yet.")
             } footer: {
-                SettingsFooter("Turn them on in JetKVM Setup (Device › Set Up JetKVM): sudo, password dialogs and 1Password "
-                    + "on the remote computer then ask here and on your iPhone, and you approve with Touch ID.")
+                SettingsFooter("Turn them on in a device's settings (Device › Device Settings… › Remote Computer): sudo, password "
+                    + "dialogs and 1Password on the remote Mac then ask here and on your iPhone, and you approve with Touch ID.")
             }
         }
         RelaySection(service: service)
@@ -101,7 +101,7 @@ private struct BrokerSection: View {
             Button("Forget", role: .destructive) { center.remove(brokerID: broker.id) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This Mac stops getting its requests. The JetKVM keeps its approvals: turn them off in JetKVM Setup.")
+            Text("This Mac stops getting its requests. The JetKVM keeps its approvals: turn them off in its Device Settings.")
         }
     }
 

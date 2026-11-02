@@ -228,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setUp(_ device: Device) {
         if let existing = windows.first(where: { $0.device.id == device.id }) {
             existing.window?.makeKeyAndOrderFront(nil)
-            existing.showSetup()
+            existing.showSettings(.jetKVM)
             return
         }
         pendingSetup.insert(device.id)
@@ -363,6 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller.onPreferencesChanged = { [weak self] c in self?.recordPreferences(c.device) }
             controller.onAddressesChanged = { [weak self] c in self?.recordAddresses(c.device) }
             controller.onSetupChecked = { [weak self] c, summary in self?.recordSetup(summary, for: c.device) }
+            controller.onEditDevice = { [weak self] c, change in self?.editDevice(c.device.id, change) }
             controller.onClipboardChanged = { [weak self] c in self?.recordClipboard(c.device) }
         }
         let tabHost = (windows.first { $0.window?.isKeyWindow == true } ?? windows.last)?.window
@@ -532,8 +533,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let device = NSMenu(title: "Device")
         device.addItem(item("Devices", #selector(showDevices), key: "n"))
         device.addItem(item("Reconnect", #selector(reconnect), key: "r"))
-        device.addItem(item("Device Settings", #selector(showDeviceSettings)))
-        device.addItem(item("Set Up JetKVM", #selector(showSetup)))
+        device.addItem(item("Device Settings…", #selector(showDeviceSettings)))
         device.addItem(item("Open JetKVM Web Interface", #selector(openWebUI)))
         device.addItem(.separator())
         device.addItem(item("Paste Clipboard as Keystrokes", #selector(pasteClipboard), key: "v", mods: [.command, .option]))
@@ -755,15 +755,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let c = current, let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
         c.paste(text)
     }
-    @objc private func showSetup() { current?.showSetup() }
+    /// Device Settings for the current window's device, as a sheet of that
+    /// window.
+    @objc private func showDeviceSettings() { current?.showSettings() }
 
-    /// The device library's editor for the current window's device, as a
-    /// sheet of that window; saving updates the window at once (onSaved).
-    @objc private func showDeviceSettings() {
-        guard let c = current else { return }
-        c.showDeviceSettings(store.device(id: c.device.id) ?? c.device) { [weak self] device, password in
-            self?.devicesModel.save(device, password: password)
-        }
+    /// A change from Device Settings, applied to the saved device (so what
+    /// was recorded meanwhile stays); the window takes it back (onSaved).
+    private func editDevice(_ id: String, _ change: (inout Device) -> Void) {
+        guard var saved = store.device(id: id) else { return }
+        change(&saved)
+        devicesModel.save(saved, password: nil)
     }
 
     /// The welcome screen, to check or grant the app's permissions.
@@ -862,7 +863,7 @@ extension AppDelegate: NSMenuItemValidation {
         case #selector(setScaling(_:)):
             menuItem.state = c?.device.scaling.rawValue == menuItem.representedObject as? String ? .on : .off
             return c != nil
-        case #selector(showSetup), #selector(showDeviceSettings):
+        case #selector(showDeviceSettings):
             return c != nil
         case #selector(openWebUI):
             // Not while JetKVM Setup found browser access off (BlitzKVM firmware D16).

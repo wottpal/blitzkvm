@@ -1,41 +1,70 @@
 import JetKVMCore
 import SwiftUI
 
-/// Set Up JetKVM: the BlitzKVM firmware, a password and Tailscale,
-/// each with its state and the one action that moves it forward; below them,
-/// optional features the firmware offers (browser access, clipboard sync,
-/// approvals).
-struct JetKVMSetupView: View {
+/// The tab Device Settings shows; the window can switch it while it shows
+/// (the setup badge opens JetKVM).
+enum DeviceSettingsTab: String, CaseIterable, Identifiable {
+    case general = "General"
+    case remoteComputer = "Remote Computer"
+    case jetKVM = "JetKVM"
+
+    var id: Self { self }
+}
+
+final class DeviceSettingsSelection: ObservableObject {
+    @Published var tab: DeviceSettingsTab
+    init(_ tab: DeviceSettingsTab) { self.tab = tab }
+}
+
+/// Device Settings: everything about one device, in three tabs.
+/// - General: its name, addresses and stream quality.
+/// - Remote Computer: how it takes input and shows its screen, and, for a
+///   Mac, clipboard sync and approvals.
+/// - JetKVM: the BlitzKVM firmware, a password, Tailscale and browser
+///   access, each with its state and the one action that moves it forward.
+///
+/// Edits apply at once, a field at a time (addresses when you press Return
+/// or leave the field), to the saved device: what else changes meanwhile
+/// (a setup check, a learned ID) stays.
+struct DeviceSettingsView: View {
     @ObservedObject var model: JetKVMSetupModel
-    let deviceName: String
+    @ObservedObject var selection: DeviceSettingsSelection
     let address: String
+    /// Applies a change to the saved device.
+    let edit: ((inout Device) -> Void) -> Void
     let done: () -> Void
+    @State private var device: Device
+    @State private var addressText: String
+    @FocusState private var addressesFocused: Bool
     @State private var confirming: Confirmation?
     @State private var passwordSheet: PasswordSheet.Mode?
+
+    init(model: JetKVMSetupModel, selection: DeviceSettingsSelection, device: Device, address: String,
+         edit: @escaping ((inout Device) -> Void) -> Void, done: @escaping () -> Void) {
+        self.model = model
+        self.selection = selection
+        self.address = address
+        self.edit = edit
+        self.done = done
+        _device = State(initialValue: device)
+        _addressText = State(initialValue: device.addresses.joined(separator: ", "))
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
+            Picker("Section", selection: $selection.tab) {
+                ForEach(DeviceSettingsTab.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .padding(.top, 16)
             Form {
-                Section {
-                    firmwareRow
-                    passwordRow
-                    tailscaleRow
-                } footer: {
-                    Text("Installs turn on SSH (Developer Mode) with a key kept on this Mac.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if model.hasBrowserAccessSwitch == true || model.hasHostLink == true || model.hasApprovals == true {
-                    Section("Optional") {
-                        if model.hasBrowserAccessSwitch == true { browserAccessRow }
-                        if model.hasHostLink == true { clipboardRow }
-                        if model.hasApprovals == true {
-                            ApprovalsSetupRow(model: model.approvals) { confirming = .clipboardSetUp }
-                        }
-                    }
+                switch selection.tab {
+                case .general: generalTab
+                case .remoteComputer: remoteComputerTab
+                case .jetKVM: jetKVMTab
                 }
             }
             .formStyle(.grouped)
@@ -43,13 +72,18 @@ struct JetKVMSetupView: View {
             .scrollDisabled(true)
             HStack {
                 Spacer()
-                Button("Done", action: done)
-                    .keyboardShortcut(.defaultAction)
+                Button("Done") {
+                    commitAddresses()
+                    done()
+                }
+                .keyboardShortcut(.defaultAction)
             }
             .padding([.horizontal, .bottom], 20)
         }
         .frame(width: 540)
         .fixedSize(horizontal: false, vertical: true)
+        .onChange(of: selection.tab) { commitAddresses() }
+        .onChange(of: addressesFocused) { if !addressesFocused { commitAddresses() } }
         .alert(confirming?.title ?? "", isPresented: Binding { confirming != nil } set: { if !$0 { confirming = nil } },
                presenting: confirming) { confirmation in
             Button(confirmation.action) { perform(confirmation) }
@@ -76,15 +110,96 @@ struct JetKVMSetupView: View {
                 .frame(width: 48, height: 48)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Set Up JetKVM")
+                Text(device.name.isEmpty ? "JetKVM" : device.name)
                     .font(.title2.weight(.semibold))
-                Text(deviceName == address ? address : "\(deviceName) · \(address)")
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                    .lineLimit(1)
+                if address != device.name {
+                    Text(address)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
             }
             Spacer(minLength: 0)
         }
         .padding([.horizontal, .top], 20)
+    }
+
+    // MARK: Tabs
+
+    @ViewBuilder
+    private var generalTab: some View {
+        Section {
+            DeviceNameFields(name: Binding(get: { device.name }, set: { name in
+                device.name = name
+                // An empty name is a name being retyped, not one to keep.
+                if !name.trimmingCharacters(in: .whitespaces).isEmpty { edit { $0.name = name } }
+            }), addresses: $addressText)
+            .focused($addressesFocused)
+            .onSubmit(commitAddresses)
+        } footer: {
+            Footnote(DeviceNameFields.note)
+        }
+        Section {
+            Toggle("Adapt stream quality to the network", isOn: field(\.adaptiveQuality))
+        } footer: {
+            Footnote("When the link can't keep up, the picture loses sharpness, never frame rate.")
+        }
+    }
+
+    @ViewBuilder
+    private var remoteComputerTab: some View {
+        Section {
+            RemoteComputerFields(profile: field(\.modifierProfile), scaling: field(\.scaling), invertScroll: field(\.invertScroll))
+        } footer: {
+            RemoteComputerFields.Notes(profile: device.profile, scaling: device.scaling)
+        }
+        if device.profile == .mac, model.hasHostLink == true || model.hasApprovals == true {
+            Section("Remote Mac") {
+                if model.hasHostLink == true { clipboardRow }
+                if model.hasApprovals == true {
+                    ApprovalsSetupRow(model: model.approvals) { confirming = .clipboardSetUp }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var jetKVMTab: some View {
+        Section {
+            firmwareRow
+            passwordRow
+            tailscaleRow
+        } footer: {
+            Footnote("Installing turns on SSH (Developer Mode) with a key kept on this Mac.")
+        }
+        if model.hasBrowserAccessSwitch == true {
+            Section { browserAccessRow }
+        }
+    }
+
+    // MARK: Editing
+
+    /// A device field that saves as it changes.
+    private func field<T: Equatable>(_ key: WritableKeyPath<Device, T>) -> Binding<T> {
+        Binding(get: { device[keyPath: key] }, set: { value in
+            guard device[keyPath: key] != value else { return }
+            device[keyPath: key] = value
+            edit { $0[keyPath: key] = value }
+        })
+    }
+
+    /// Saves the addresses typed, once they parse; an empty list goes back
+    /// to the saved one.
+    private func commitAddresses() {
+        let parsed = Device.parseAddresses(addressText)
+        guard !parsed.isEmpty else {
+            addressText = device.addresses.joined(separator: ", ")
+            return
+        }
+        guard parsed != device.addresses else { return }
+        device.addresses = parsed
+        addressText = parsed.joined(separator: ", ")
+        edit { $0.addresses = parsed }
     }
 
     // MARK: Rows

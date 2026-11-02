@@ -6,9 +6,9 @@ import SwiftUI
 /// the app needs.
 enum SettingsTab: String, CaseIterable {
     case general = "General"
-    case shortcuts = "Shortcuts"
     case approvals = "Approvals"
     case permissions = "Permissions"
+    case shortcuts = "Shortcuts"
 
     var symbol: String {
         switch self {
