@@ -47,6 +47,23 @@ final class InputControllerTests: XCTestCase {
         XCTAssertEqual(input.route(.keyUp, keyCode: 2, flags: 0, fromApp: false), .remote)
     }
 
+    /// Logi Options+ posts a button's ⌃⌥⇧⌘F12 as F12 with fn alone and adds
+    /// the modifiers in its own tap: the tap ahead of it must leave the key
+    /// to the tap behind it, where it is the shortcut.
+    func testKeysAppsPostAreDecidedBehindTheOtherTaps() {
+        XCTAssertFalse(InputController.tapHandles(posted: false, fromApp: true, hasPostedTap: true))
+        XCTAssertTrue(InputController.tapHandles(posted: true, fromApp: true, hasPostedTap: true))
+        XCTAssertTrue(InputController.tapHandles(posted: false, fromApp: false, hasPostedTap: true))
+        XCTAssertFalse(InputController.tapHandles(posted: true, fromApp: false, hasPostedTap: true), "typed keys are decided once")
+        XCTAssertTrue(InputController.tapHandles(posted: false, fromApp: true, hasPostedTap: false), "without the second tap, as before")
+
+        let all = LocalShortcut.control | option | LocalShortcut.shift | LocalShortcut.command
+        let (input, _) = captured([LocalShortcut(keyCode: 111, modifiers: all | fn, keyLabel: "F12")])
+        XCTAssertEqual(input.route(.keyDown, keyCode: 111, flags: all | fn, fromApp: true), .local)
+        XCTAssertEqual(input.route(.keyUp, keyCode: 111, flags: all | fn, fromApp: true), .local)
+        XCTAssertEqual(input.route(.keyDown, keyCode: 111, flags: fn, fromApp: true), .remote, "as the tap ahead sees it")
+    }
+
     func testModifiersAloneStayHereUntilAllAreUp() {
         let (input, sent) = captured([LocalShortcut(keyCode: nil, modifiers: option | fn)])
         // ⌥ goes down on the remote first: nothing says yet it's the shortcut.

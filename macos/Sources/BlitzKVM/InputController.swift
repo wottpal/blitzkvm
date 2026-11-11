@@ -38,6 +38,12 @@ final class InputController {
     private var scroll = ScrollAccumulator()
     private var eventTap: CFMachPort?
     private var tapSource: CFRunLoopSource?
+    /// A second tap behind the other apps' taps, for the keys apps post: an
+    /// app may complete its own key in a tap of its own (Logi Options+ adds
+    /// the modifiers of a button's ⌃⌥⇧⌘F12 there), so only behind those
+    /// taps is the key the one macOS gets.
+    private var postedTap: CFMachPort?
+    private var postedTapSource: CFRunLoopSource?
     private var chordArmed = false
     private var doubleCommand = DoubleCommandPress()
     /// The shortcuts that stay on this Mac (read on every key).
@@ -136,11 +142,20 @@ final class InputController {
             return
         }
         logTapState("on")
+        eventTap = tap
+        tapSource = Self.start(tap)
+        if let posted = CGEvent.tapCreate(tap: .cghidEventTap, place: .tailAppendEventTap, options: .defaultTap,
+                                          eventsOfInterest: mask, callback: postedTapCallback, userInfo: userInfo) {
+            postedTap = posted
+            postedTapSource = Self.start(posted)
+        }
+    }
+
+    private static func start(_ tap: CFMachPort) -> CFRunLoopSource? {
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        eventTap = tap
-        tapSource = source
+        return source
     }
 
     private var lastTapState = ""
@@ -152,32 +167,41 @@ final class InputController {
     }
 
     private func removeEventTap() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            // Without invalidation the tap stays registered with the window
-            // server (holding an unretained pointer to self).
-            CFMachPortInvalidate(tap)
-        }
-        if let source = tapSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        for (tap, source) in [(eventTap, tapSource), (postedTap, postedTapSource)] {
+            if let tap {
+                CGEvent.tapEnable(tap: tap, enable: false)
+                // Without invalidation the tap stays registered with the window
+                // server (holding an unretained pointer to self).
+                CFMachPortInvalidate(tap)
+            }
+            if let source {
+                CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            }
         }
         eventTap = nil
         tapSource = nil
+        postedTap = nil
+        postedTapSource = nil
     }
 
-    fileprivate func handleTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    /// `posted`: the call comes from the tap behind the other apps' taps.
+    fileprivate func handleTap(type: CGEventType, event: CGEvent, posted: Bool) -> Unmanaged<CGEvent>? {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             // Keep the callback trivial and re-enable when macOS disables it.
-            if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+            if let tap = posted ? postedTap : eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         default:
             break
         }
         guard captured, NSApp.isActive else { return Unmanaged.passUnretained(event) }
+        let fromApp = Self.isFromOtherApp(event)
+        guard Self.tapHandles(posted: posted, fromApp: fromApp, hasPostedTap: postedTap != nil) else {
+            return Unmanaged.passUnretained(event)
+        }
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let keyboardType = event.getIntegerValueField(.keyboardEventKeyboardType)
-        switch route(type, keyCode: keyCode, flags: event.flags.rawValue, fromApp: Self.isFromOtherApp(event)) {
+        switch route(type, keyCode: keyCode, flags: event.flags.rawValue, fromApp: fromApp) {
         case .local:
             passedOn = Array((passedOn + [event.timestamp]).suffix(16))
             return Unmanaged.passUnretained(event)
@@ -245,6 +269,13 @@ final class InputController {
         default:
             return false
         }
+    }
+
+    /// Which of the two taps decides about a key: the first one for typed
+    /// keys, the one behind the other apps' taps for keys an app posted
+    /// (the first one for those too when the second couldn't be made).
+    static func tapHandles(posted: Bool, fromApp: Bool, hasPostedTap: Bool) -> Bool {
+        posted ? fromApp : !fromApp || !hasPostedTap
     }
 
     enum Route { case remote, local, drop }
@@ -469,5 +500,11 @@ final class InputController {
 private func inputTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, userInfo: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
     guard let userInfo else { return Unmanaged.passUnretained(event) }
     let controller = Unmanaged<InputController>.fromOpaque(userInfo).takeUnretainedValue()
-    return controller.handleTap(type: type, event: event)
+    return controller.handleTap(type: type, event: event, posted: false)
+}
+
+private func postedTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, userInfo: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
+    guard let userInfo else { return Unmanaged.passUnretained(event) }
+    let controller = Unmanaged<InputController>.fromOpaque(userInfo).takeUnretainedValue()
+    return controller.handleTap(type: type, event: event, posted: true)
 }
