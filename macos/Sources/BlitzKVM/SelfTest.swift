@@ -27,6 +27,11 @@ final class SelfTest {
     var qualityChanges: [(Double, String)] = []
     var toggleStatusBarAfter: Double?
     private var beforeToggle: [String: Any]?
+    /// Full screen: plays a closed MacBook whose monitor sleeps and wakes
+    /// (see runFullScreenShrink).
+    var shrinkFullScreenAfter: Double?
+    private var fullScreenReport: [String: Any] = [:]
+    private var fullScreenOK = false
     private var shownAt: Date?
     /// Stall overlay changes: seconds into the run, title (nil: hidden).
     private var overlayEvents: [(Double, String?)] = []
@@ -136,6 +141,9 @@ final class SelfTest {
                 AppLog.log("selftest: status bar \(c.isStatusBarVisible ? "hidden" : "shown")")
                 c.setStatusBarVisible(!c.isStatusBarVisible)
             }
+        }
+        if let shrinkFullScreenAfter {
+            DispatchQueue.main.asyncAfter(deadline: .now() + shrinkFullScreenAfter) { [weak self] in self?.runFullScreenShrink() }
         }
         for (after, level) in qualityChanges {
             DispatchQueue.main.asyncAfter(deadline: .now() + after) { [weak self] in
@@ -400,6 +408,47 @@ final class SelfTest {
         return gap > 0.25 ? gap * 1000 : nil
     }
 
+    /// What a closed MacBook does to a full-screen window when its monitor
+    /// sleeps and wakes: the screens go off, macOS shrinks the window onto
+    /// its 1920×1080 placeholder, and when the monitor is back the window
+    /// stays that small (it can't be resized in full screen). The window
+    /// must fill the screen again, and the remote display must not have
+    /// followed the detour.
+    private func runFullScreenShrink() {
+        guard let c = controller, let window = c.window, let screen = window.screen,
+              window.styleMask.contains(.fullScreen) else {
+            fullScreenReport["error"] = "the window is not in full screen"
+            return
+        }
+        func size(_ rect: NSRect) -> String { "\(Int(rect.width))x\(Int(rect.height))" }
+        let full = window.frame
+        let before = c.requestedRemoteMode
+        fullScreenReport["screen"] = size(screen.frame)
+        fullScreenReport["before"] = size(full)
+        fullScreenReport["requestedBefore"] = before?.description ?? "none"
+        c.screensChanged(asleep: true)
+        let small = NSRect(x: full.midX - full.width / 4, y: full.midY - full.height / 4, width: full.width / 2, height: full.height / 2).integral
+        window.setFrame(small, display: true)
+        // Off for longer than a screen change takes to settle.
+        DispatchQueue.main.asyncAfter(deadline: .now() + RemoteDisplay.screenSettle + 1.5) { [weak self] in
+            guard let self else { return }
+            // Off: the window keeps the placeholder's size and the remote its own.
+            let asleepFrame = window.frame
+            let asleepMode = c.requestedRemoteMode
+            self.fullScreenReport["whileOff"] = size(asleepFrame)
+            self.fullScreenReport["requestedWhileOff"] = asleepMode?.description ?? "none"
+            c.screensChanged(asleep: false)
+            // Past the settling time and the request's own delay.
+            DispatchQueue.main.asyncAfter(deadline: .now() + RemoteDisplay.screenSettle + 1.5) { [weak self] in
+                let after = c.requestedRemoteMode
+                self?.fullScreenReport["afterWake"] = size(window.frame)
+                self?.fullScreenReport["requestedAfterWake"] = after?.description ?? "none"
+                self?.fullScreenOK = asleepFrame == small && window.frame == full
+                    && before != nil && asleepMode == before && after == before
+            }
+        }
+    }
+
     private func windowReport(_ c: DeviceWindowController) -> [String: Any] {
         let content = c.window?.contentLayoutRect.size ?? .zero
         var r: [String: Any] = [
@@ -629,6 +678,7 @@ final class SelfTest {
         if hideAfter != nil { report["resumedAfterShowMs"] = resumed ?? -1 }
         report["stallOverlay"] = overlayEvents.map { ["at": ($0.0 * 10).rounded() / 10, "title": $0.1 ?? "hidden"] as [String: Any] }
         report.merge(windowReport(controller)) { $1 }
+        if shrinkFullScreenAfter != nil { report["fullScreen"] = fullScreenReport }
         if let beforeToggle { report["beforeStatusBarToggle"] = beforeToggle }
         let longestFreeze = freezes.max() ?? 0
         if let p50 = percentile(latencies, 0.5), let p95 = percentile(latencies, 0.95) {
@@ -710,6 +760,7 @@ final class SelfTest {
         if injectInput { ok = ok && doubleCommandCaptured }
         if setupAction != nil { ok = ok && setupOK }
         if typePauses { ok = ok && refreshProblems.isEmpty }
+        if shrinkFullScreenAfter != nil { ok = ok && fullScreenOK }
         ok = ok && audioOK
         if let maxFreezeMs {
             // Hidden time says nothing about freezes; too much makes the run

@@ -14,8 +14,9 @@ public struct Device: Codable, Equatable, Identifiable {
     /// (SHA-256 hex), learned on first connect.
     public var certificateSHA256: String?
     public var modifierProfile: String
-    /// ScalingMode; nil means the default. (Replaces the earlier
-    /// "scalingMode" key, whose default was a fit that made text small.)
+    /// ScalingMode; nil means the default, Match Window. (Replaces the
+    /// earlier "scalingMode" key, whose default was a fit that made text
+    /// small.)
     public var viewMode: String?
     /// Nearest-neighbor at whole-number scales instead of FSR upscaling.
     public var exactPixelScaling: Bool?
@@ -36,7 +37,7 @@ public struct Device: Codable, Equatable, Identifiable {
     public var clipboardSync: ClipboardSync?
 
     public init(id: String = UUID().uuidString, name: String, addresses: [String], deviceID: String? = nil,
-                modifierProfile: ModifierProfile = .mac, scaling: ScalingMode = .actualSize,
+                modifierProfile: ModifierProfile = .mac, scaling: ScalingMode = .matchWindow,
                 invertScroll: Bool = false, lastConnected: Date? = nil) {
         self.id = id
         self.name = name
@@ -51,7 +52,7 @@ public struct Device: Codable, Equatable, Identifiable {
     public var profile: ModifierProfile { ModifierProfile(rawValue: modifierProfile) ?? .mac }
 
     public var scaling: ScalingMode {
-        get { viewMode.flatMap(ScalingMode.init(rawValue:)) ?? .actualSize }
+        get { viewMode.flatMap(ScalingMode.init(rawValue:)) ?? .matchWindow }
         set { viewMode = newValue.rawValue }
     }
 

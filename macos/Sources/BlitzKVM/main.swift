@@ -35,6 +35,7 @@ struct Options {
     /// level for this window (self-tests and latency probes never save it).
     var quality: String?
     var toggleStatusBarAfter: Double?
+    var shrinkFullScreenAfter: Double?
     var windowSize: (Double, Double)?
     var fullScreen = false
     var matchScale: Double?
@@ -83,6 +84,7 @@ struct Options {
             case "--hide-after": o.hideAfter = next().flatMap(Double.init)
             case "--max-freeze-ms": o.maxFreezeMs = next().flatMap(Double.init)
             case "--toggle-status-bar-after": o.toggleStatusBarAfter = next().flatMap(Double.init)
+            case "--shrink-full-screen-after": o.shrinkFullScreenAfter = next().flatMap(Double.init)
             case "--set-quality-after":
                 // "4:balanced,9:maximum": seconds into the run, ladder level.
                 o.qualityChanges = (next() ?? "").split(separator: ",").compactMap { part in
@@ -242,7 +244,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let addresses = Device.parseAddresses(text)
         guard let address = addresses.first else { return fail("--device: no address") }
         let saved = store.device(matchingAddress: address)
-        var device = saved ?? Device(name: text, addresses: addresses)
+        // Self-tests keep the remote display as it is unless told otherwise.
+        var device = saved ?? Device(name: text, addresses: addresses, scaling: isSelfTest ? .actualSize : .matchWindow)
         if saved == nil { adHocDeviceIDs.insert(device.id) }
         if let scaling = options.scaling { device.scaling = scaling }
         if let scale = options.matchScale { device.matchScale = scale }
@@ -375,6 +378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             selfTest?.maxFreezeMs = options.maxFreezeMs
             selfTest?.qualityChanges = options.qualityChanges
             selfTest?.toggleStatusBarAfter = options.toggleStatusBarAfter
+            selfTest?.shrinkFullScreenAfter = options.shrinkFullScreenAfter
             selfTest?.exerciseExtras = options.exerciseExtras
             selfTest?.setupAction = options.setup
             selfTest?.setupSnapshotPath = options.setupSnapshot

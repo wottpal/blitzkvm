@@ -283,6 +283,16 @@ final class DeviceLibraryTests: XCTestCase {
         XCTAssertEqual(Device.parseAddresses(" 10.0.0.5, jetkvm.local  kvm.ts.net\n"), ["10.0.0.5", "jetkvm.local", "kvm.ts.net"])
     }
 
+    /// Match Window is the view mode of a new device and of a saved one that
+    /// never chose; a saved choice stays.
+    func testMatchWindowIsTheDefaultViewMode() throws {
+        XCTAssertEqual(Device(name: "New", addresses: ["192.168.1.40"]).scaling, .matchWindow)
+        let saved = #"[{"id":"a","name":"Never chose","addresses":["192.168.1.40"],"modifierProfile":"mac","invertScroll":false},"#
+            + #"{"id":"b","name":"Chose","addresses":["192.168.1.41"],"modifierProfile":"mac","invertScroll":false,"viewMode":"actualSize"}]"#
+        let devices = try JSONDecoder().decode([Device].self, from: Data(saved.utf8))
+        XCTAssertEqual(devices.map(\.scaling), [.matchWindow, .actualSize])
+    }
+
     func testProbePrefersEarlierAddressWithinWindow() async {
         // The VPN name answers first, the LAN IP (preferred) shortly after.
         // A window far wider than the gap: a loaded CI runner wakes sleepers late.
@@ -399,6 +409,35 @@ final class DeviceLibraryTests: XCTestCase {
 final class RemoteDisplayTests: XCTestCase {
     /// JetKVM 0.5.9's default EDID, as getEDID returns it.
     static let defaultEDID = "00FFFFFFFFFFFF0028B4010001EEFFC0302301038047287856EE91A3544C99260F5054000000D1C081C0318001010101010101010101023A801871382D40582C4500C48E2100001E773300A050D02B2030203500122C2100001A000000FD00174C0F5111000A202020202020000000FC004A65744B564D2076310A20202001D5020322D1431004012309070783010000E200CFE40D100401E305000065030C001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000CF"
+
+    /// The remote display follows the window only on screens someone looks
+    /// at: not while they are off, and only once they have settled.
+    func testRemoteWaitsForThisMacsScreens() {
+        // Screens that haven't changed: at once.
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: nil, screenIdentified: true), 0)
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: nil, screenIdentified: false), 0)
+        // Off (the window then has the placeholder's 1920×1080): never.
+        XCTAssertNil(RemoteDisplay.followDelay(screensAsleep: true, sinceScreenChange: nil, screenIdentified: true))
+        XCTAssertNil(RemoteDisplay.followDelay(screensAsleep: true, sinceScreenChange: 100, screenIdentified: true))
+        // A monitor came or went: once the change has settled.
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 1, screenIdentified: true), 2)
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 3, screenIdentified: true), 0)
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: -5, screenIdentified: true), 3)
+        // The placeholder between two monitors: much later, and then anyway
+        // (a monitor macOS can't name is still a monitor).
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 4, screenIdentified: false), 26)
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 31, screenIdentified: false), 0)
+    }
+
+    func testFullScreenFrameIsTheScreenBelowTheCameraHousing() {
+        // An external monitor; origin anywhere in the arrangement.
+        XCTAssertEqual(RemoteDisplay.fullScreenFrame(screen: CGRect(x: -3008, y: 120, width: 3008, height: 1269), safeAreaTop: 0),
+                       CGRect(x: -3008, y: 120, width: 3008, height: 1269))
+        // A MacBook Pro 14": 32 points of camera housing at the top (the
+        // window's origin is its bottom left).
+        XCTAssertEqual(RemoteDisplay.fullScreenFrame(screen: CGRect(x: 0, y: 0, width: 1512, height: 982), safeAreaTop: 32),
+                       CGRect(x: 0, y: 0, width: 1512, height: 950))
+    }
 
     func testSizeFollowsTheViewInWholeSteps() {
         typealias S = RemoteDisplay.Size

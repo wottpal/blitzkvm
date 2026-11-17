@@ -343,3 +343,33 @@ public enum RemoteDisplay {
         bytes.map { String(format: "%02X", $0) }.joined()
     }
 }
+
+// MARK: Following this Mac's screens
+
+extension RemoteDisplay {
+    /// After this Mac's screens change (a monitor comes or goes, wake), the
+    /// window settles this long before the remote display follows it.
+    public static let screenSettle: TimeInterval = 3
+    /// On a screen macOS can't name, the remote waits this long after the
+    /// last change: with no monitor (a closed lid whose monitor sleeps or
+    /// wakes) macOS shows a 1920×1080 placeholder for a few seconds.
+    public static let unidentifiedScreenHold: TimeInterval = 30
+
+    /// Seconds until the remote display may take the window's size: 0 for
+    /// now, nil while this Mac's screens are off (the size a window has then
+    /// is the placeholder's, and nobody sees it). `sinceScreenChange` is nil
+    /// when the screens haven't changed since the window opened.
+    public static func followDelay(screensAsleep: Bool, sinceScreenChange: TimeInterval?,
+                                   screenIdentified: Bool) -> TimeInterval? {
+        guard !screensAsleep else { return nil }
+        guard let since = sinceScreenChange else { return 0 }
+        let hold = screenIdentified ? screenSettle : unidentifiedScreenHold
+        return max(0, hold - max(0, since))
+    }
+
+    /// The frame of a full-screen window on a screen: all of it below the
+    /// camera housing (`safeAreaTop`, 0 on screens without one).
+    public static func fullScreenFrame(screen: CGRect, safeAreaTop: CGFloat) -> CGRect {
+        CGRect(x: screen.minX, y: screen.minY, width: screen.width, height: screen.height - safeAreaTop)
+    }
+}

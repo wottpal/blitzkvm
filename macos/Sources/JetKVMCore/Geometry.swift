@@ -17,8 +17,9 @@ public enum ScalingMode: String, CaseIterable {
     /// pixel per point like actualSize (or per `matchScale` points), filling
     /// the window. Scaled to fit until the remote has followed a resize, and
     /// beyond the device's limits.
-    /// Opt-in: every new size is a new display to a Mac target, which then
-    /// is no longer its main display (plan section 22).
+    /// The default. Every new size is a new display to a Mac target, which
+    /// then is no longer its main display if it has another monitor (plan
+    /// section 22).
     case matchWindow
 }
 

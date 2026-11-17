@@ -8,6 +8,7 @@
 #   make remote     build the remote side of approvals that JetKVM Setup installs
 #   make selftest   end-to-end run against the in-repo emulator
 #   make selftest-stalls   the picture survives link stalls and hidden windows
+#   make selftest-fullscreen  a full-screen window fills its screen again after the screens slept
 #   make selftest-refresh  still refreshes follow typing pauses (fork firmware D13)
 #   make selftest-audio    the device's audio plays (Opus, PCMU) and is turned on once
 #   make selftest-roaming  a window moves between a device's addresses as they answer
@@ -47,7 +48,7 @@ EMULATOR_ADDR ?= 127.0.0.1:18080
 # bin/jetkvm_app; JetKVM's own release is downloaded once at build time.
 FORK_BINARY ?= $(abspath ../../kvm/bin/jetkvm_app)
 
-.PHONY: app engine swift icon firmware licenses remote release test selftest selftest-extras selftest-stalls selftest-refresh selftest-audio selftest-roaming selftest-update run install notarize clean
+.PHONY: app engine swift icon firmware licenses remote release test selftest selftest-extras selftest-stalls selftest-fullscreen selftest-refresh selftest-audio selftest-roaming selftest-update run install notarize clean
 
 engine:
 	cd .. && GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o macos/build/blitzkvm-engine ./cmd/blitzkvm-engine
@@ -151,6 +152,21 @@ selftest-stalls: app
 		test $$status -eq 0 || { cat build/selftest-$$run.json; echo "selftest-stalls ($$run) failed"; exit 1; }; \
 	done
 	@echo "selftest-stalls passed: no freeze beyond a link stall, and the picture resumes when the window is shown"
+
+# A full-screen Match Window through a closed MacBook's night: the screens
+# go off, macOS shrinks the window onto its placeholder display, the screens
+# come back. The window must fill the screen again (it stayed small until
+# full screen was left and entered again), and the remote display must keep
+# its mode through all of it. Takes over the screen for about 20 s.
+selftest-fullscreen: app
+	cd .. && go build -o macos/build/emulator-serve ./test/emulator-serve
+	@./build/emulator-serve serve --listen $(EMULATOR_ADDR) --width 1920 --height 1080 --fps 30 > /dev/null 2>&1 & pid=$$!; \
+	sleep 1; \
+	"$(APP)/Contents/MacOS/BlitzKVM" --device $(EMULATOR_ADDR) --selftest 17 --h264 --scale matchWindow --full-screen \
+		--shrink-full-screen-after 6 > build/selftest-fullscreen.json; status=$$?; \
+	kill $$pid; \
+	test $$status -eq 0 || { cat build/selftest-fullscreen.json; echo "selftest-fullscreen failed"; exit 1; }
+	@echo "selftest-fullscreen passed: the window filled its screen again after the screens slept, and the remote display kept its mode"
 
 # Client-driven still refresh (fork firmware D13). Against an emulator that
 # offers refreshRegions and shows a still picture that typing changes, with
