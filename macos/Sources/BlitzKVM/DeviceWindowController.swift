@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import CoreVideo
+import IOKit
 import JetKVMCore
 import Network
 import SwiftUI
@@ -144,6 +145,11 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// The full-screen window had the whole screen when it entered full
     /// screen (not a Split View tile): the app keeps it that way.
     private var fillsScreen = false
+    private var fullScreenFill = FullScreenFill()
+    private var fillingFullScreen = false
+    /// Since when the full-screen window hasn't had its screen's size
+    /// (system uptime, seconds).
+    private var unfilledSince: TimeInterval?
 
     static let statusBarHeight: CGFloat = 22
 
@@ -461,13 +467,20 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         followTimer?.invalidate()
         let since = screensChangedAt.map { ProcessInfo.processInfo.systemUptime - $0 }
         guard let delay = RemoteDisplay.followDelay(screensAsleep: screensAsleep, sinceScreenChange: since,
-                                                    screenIdentified: screenIdentified) else {
+                                                    onMonitor: onMonitor) else {
             displayFollower.cancel() // the screens' waking asks again
             return
         }
         guard delay <= 0 else {
             displayFollower.cancel()
             followTimer = Timer.scheduledTimer(withTimeInterval: delay + 0.05, repeats: false) { [weak self] _ in
+                self?.matchRemoteToWindow()
+            }
+            return
+        }
+        guard !awaitsFullScreenFill() else {
+            displayFollower.cancel()
+            followTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: false) { [weak self] _ in
                 self?.matchRemoteToWindow()
             }
             return
@@ -492,20 +505,39 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
     }
 
-    /// Whether the window is on a monitor macOS can name: the built-in one,
-    /// or one with a vendor. The placeholder macOS shows while a closed
-    /// MacBook has no monitor (asleep, waking, unplugged) has none.
-    private var screenIdentified: Bool {
+    /// Whether the window is on a real monitor, not on the placeholder
+    /// macOS shows while a closed MacBook has none (asleep, waking,
+    /// unplugged).
+    private var onMonitor: Bool {
         guard let screen = window?.screen, let id = Self.displayID(of: screen) else { return false }
-        let vendor = CGDisplayVendorNumber(id)
-        // kDisplayVendorIDUnknown ('unkn'), and no monitor at all.
-        return CGDisplayIsBuiltin(id) != 0 || (vendor != 0x756E_6B6E && vendor != 0xFFFF_FFFF)
+        let builtin = CGDisplayIsBuiltin(id) != 0
+        return RemoteDisplay.isMonitor(builtin: builtin, vendor: CGDisplayVendorNumber(id), lidClosed: builtin && Self.lidClosed)
+    }
+
+    /// Whether this MacBook's lid is closed (false on a Mac without one).
+    private static var lidClosed: Bool {
+        let root = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard root != 0 else { return false }
+        defer { IOObjectRelease(root) }
+        let state = IORegistryEntryCreateCFProperty(root, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)
+        return state?.takeRetainedValue() as? Bool ?? false
     }
 
     private var screenDescription: String {
         guard let screen = window?.screen else { return "no screen" }
-        return "\(screen.localizedName) (\(Int(screen.frame.width))×\(Int(screen.frame.height))\(screenIdentified ? "" : ", unidentified"))"
+        let housing = screen.safeAreaInsets.top > 0 ? ", camera housing \(Self.points(screen.safeAreaInsets.top))" : ""
+        // A built-in display's vendor: what tells a MacBook's own screen
+        // from the placeholder, should the lid's state ever not.
+        let vendor = Self.displayID(of: screen).flatMap { CGDisplayIsBuiltin($0) != 0 ? String(format: ", vendor %x", CGDisplayVendorNumber($0)) : nil } ?? ""
+        return "\(screen.localizedName) (\(Int(screen.frame.width))×\(Int(screen.frame.height))\(housing)\(vendor)\(onMonitor ? "" : ", placeholder"))"
     }
+
+    /// A length in points for the log: whole, or with its fraction.
+    private static func points(_ value: CGFloat) -> String {
+        value == value.rounded() ? "\(Int(value))" : String(format: "%.2f", value)
+    }
+
+    private static func sizeText(_ rect: NSRect) -> String { "\(points(rect.width))×\(points(rect.height))" }
 
     private func observeScreens() {
         func observe(_ center: NotificationCenter, _ name: Notification.Name, asleep: Bool?) {
@@ -547,13 +579,40 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// to the monitor's size when it returns. The window stayed that small in
     /// the middle of the screen, and the remote display with it, until full
     /// screen was left and entered again. So the app sizes it to the screen.
+    /// macOS has the last word on the frame (below a camera housing it
+    /// keeps a point more than the housing): what it makes of it stands.
     private func fillFullScreen() {
-        guard fillsScreen, !screensAsleep, let window, window.styleMask.contains(.fullScreen),
+        // Setting the frame resizes the window, which asks again.
+        guard fillsScreen, !fillingFullScreen, !screensAsleep, let window, window.styleMask.contains(.fullScreen),
               !window.styleMask.contains(.resizable), let screen = window.screen else { return }
-        let frame = RemoteDisplay.fullScreenFrame(screen: screen.frame, safeAreaTop: screen.safeAreaInsets.top)
-        guard window.frame != frame else { return }
-        AppLog.log("\(device.name): full screen window was \(Int(window.frame.width))×\(Int(window.frame.height)) on \(screenDescription); filling the screen")
-        window.setFrame(frame, display: true)
+        let top = screen.safeAreaInsets.top
+        let now = ProcessInfo.processInfo.systemUptime
+        guard let attempt = fullScreenFill.attempt(window: window.frame, screen: screen.frame, safeAreaTop: top, now: now) else { return }
+        if !attempt.retry {
+            AppLog.log("\(device.name): full screen window was \(Self.sizeText(window.frame)) on \(screenDescription); filling the screen")
+        }
+        fillingFullScreen = true
+        window.setFrame(attempt.frame, display: true)
+        fillingFullScreen = false
+        if !fullScreenFill.applied(window: window.frame, screen: screen.frame, safeAreaTop: top), !attempt.retry {
+            AppLog.log("\(device.name): macOS keeps the full screen window at \(Self.sizeText(window.frame)), not \(Self.sizeText(attempt.frame)); asking again every \(Int(RemoteDisplay.fullScreenRetry)) s")
+        }
+    }
+
+    /// Whether the remote display should wait for the full-screen window
+    /// to get its screen's size (fillFullScreen asks macOS again every few
+    /// seconds): the size it has meanwhile is no size to follow. Not for
+    /// long: a size macOS insists on is the window's size.
+    private func awaitsFullScreenFill() -> Bool {
+        guard fillsScreen, let window, window.styleMask.contains(.fullScreen), let screen = window.screen,
+              !fullScreenFill.fills(window: window.frame, screen: screen.frame, safeAreaTop: screen.safeAreaInsets.top) else {
+            unfilledSince = nil
+            return false
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        let since = unfilledSince ?? now
+        unfilledSince = since
+        return now - since < RemoteDisplay.fullScreenFillHold
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -1496,16 +1555,19 @@ final class DeviceWindowController: NSWindowController, NSWindowDelegate, Engine
     /// there, a hot corner). The window is resizable only outside full screen.
     /// AppKit no longer grows a window that can't be resized when its screen
     /// does, so the app does (fillFullScreen), unless the window is a Split
-    /// View tile.
+    /// View tile: one that hasn't the screen's width. (Its height says
+    /// nothing. Compared with the height below the camera housing, a
+    /// MacBook's own screen, where macOS keeps a point more, made every
+    /// full-screen window a tile, and it stayed 1512×949 in the middle of
+    /// the monitor the MacBook was plugged into later.)
     func windowDidEnterFullScreen(_ notification: Notification) {
         guard let window else { return }
         window.styleMask.remove(.resizable)
-        fillsScreen = window.screen.map {
-            window.frame == RemoteDisplay.fullScreenFrame(screen: $0.frame, safeAreaTop: $0.safeAreaInsets.top)
-        } ?? false
-        if !fillsScreen {
-            AppLog.log("\(device.name): full screen at \(Int(window.frame.width))×\(Int(window.frame.height)) on \(screenDescription); its size is left to macOS")
-        }
+        fullScreenFill = FullScreenFill()
+        unfilledSince = nil
+        fillsScreen = window.screen.map { RemoteDisplay.hasWholeScreen(window: window.frame, screen: $0.frame) } ?? false
+        let left = window.screen == nil ? "" : "a Split View tile, "
+        AppLog.log("\(device.name): full screen at \(Self.sizeText(window.frame)) on \(screenDescription)\(fillsScreen ? "" : "; \(left)its size is left to macOS")")
     }
 
     func windowWillExitFullScreen(_ notification: Notification) {

@@ -414,19 +414,19 @@ final class RemoteDisplayTests: XCTestCase {
     /// at: not while they are off, and only once they have settled.
     func testRemoteWaitsForThisMacsScreens() {
         // Screens that haven't changed: at once.
-        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: nil, screenIdentified: true), 0)
-        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: nil, screenIdentified: false), 0)
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: nil, onMonitor: true), 0)
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: nil, onMonitor: false), 0)
         // Off (the window then has the placeholder's 1920×1080): never.
-        XCTAssertNil(RemoteDisplay.followDelay(screensAsleep: true, sinceScreenChange: nil, screenIdentified: true))
-        XCTAssertNil(RemoteDisplay.followDelay(screensAsleep: true, sinceScreenChange: 100, screenIdentified: true))
+        XCTAssertNil(RemoteDisplay.followDelay(screensAsleep: true, sinceScreenChange: nil, onMonitor: true))
+        XCTAssertNil(RemoteDisplay.followDelay(screensAsleep: true, sinceScreenChange: 100, onMonitor: true))
         // A monitor came or went: once the change has settled.
-        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 1, screenIdentified: true), 2)
-        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 3, screenIdentified: true), 0)
-        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: -5, screenIdentified: true), 3)
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 1, onMonitor: true), 2)
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 3, onMonitor: true), 0)
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: -5, onMonitor: true), 3)
         // The placeholder between two monitors: much later, and then anyway
         // (a monitor macOS can't name is still a monitor).
-        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 4, screenIdentified: false), 26)
-        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 31, screenIdentified: false), 0)
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 4, onMonitor: false), 26)
+        XCTAssertEqual(RemoteDisplay.followDelay(screensAsleep: false, sinceScreenChange: 31, onMonitor: false), 0)
     }
 
     func testFullScreenFrameIsTheScreenBelowTheCameraHousing() {
@@ -437,6 +437,158 @@ final class RemoteDisplayTests: XCTestCase {
         // window's origin is its bottom left).
         XCTAssertEqual(RemoteDisplay.fullScreenFrame(screen: CGRect(x: 0, y: 0, width: 1512, height: 982), safeAreaTop: 32),
                        CGRect(x: 0, y: 0, width: 1512, height: 950))
+    }
+
+    /// A MacBook's own screen: macOS makes a full-screen window 1512×949
+    /// below a 32-point camera housing, a point less than the screen has
+    /// there. That window has the whole screen and fills it (it once counted
+    /// as a Split View tile, and was never sized to another monitor).
+    func testFullScreenWindowBelowTheCameraHousingFillsItsScreen() {
+        let macBook = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let window = CGRect(x: 0, y: 0, width: 1512, height: 949)
+        XCTAssertTrue(RemoteDisplay.hasWholeScreen(window: window, screen: macBook))
+        XCTAssertTrue(RemoteDisplay.fillsFullScreen(window: window, screen: macBook, safeAreaTop: 32))
+        XCTAssertTrue(RemoteDisplay.fillsFullScreen(window: CGRect(x: 0, y: 0, width: 1512, height: 950), screen: macBook, safeAreaTop: 32))
+        // Up to the top edge too, should macOS ever give it that.
+        XCTAssertTrue(RemoteDisplay.fillsFullScreen(window: macBook, screen: macBook, safeAreaTop: 32))
+        // Not a window that is plainly shorter (the slack is 4 points), one
+        // that is taller than the screen, or one off the bottom edge.
+        XCTAssertTrue(RemoteDisplay.fillsFullScreen(window: CGRect(x: 0, y: 0, width: 1512, height: 946), screen: macBook, safeAreaTop: 32))
+        XCTAssertFalse(RemoteDisplay.fillsFullScreen(window: CGRect(x: 0, y: 0, width: 1512, height: 945), screen: macBook, safeAreaTop: 32))
+        XCTAssertFalse(RemoteDisplay.fillsFullScreen(window: CGRect(x: 0, y: 0, width: 1512, height: 983), screen: macBook, safeAreaTop: 32))
+        // A housing that is no whole number of points (a scaled resolution):
+        // the frame asked for is in whole points.
+        XCTAssertEqual(RemoteDisplay.fullScreenFrame(screen: CGRect(x: 0, y: 0, width: 1800, height: 1169), safeAreaTop: 38.5),
+                       CGRect(x: 0, y: 0, width: 1800, height: 1130))
+        XCTAssertTrue(RemoteDisplay.fillsFullScreen(window: CGRect(x: 0, y: 0, width: 1800, height: 1129), screen: CGRect(x: 0, y: 0, width: 1800, height: 1169), safeAreaTop: 38.5))
+        XCTAssertFalse(RemoteDisplay.fillsFullScreen(window: CGRect(x: 0, y: 16, width: 1512, height: 949), screen: macBook, safeAreaTop: 32))
+
+        // The same window the morning after, in the middle of the monitor
+        // the closed MacBook is plugged into: it has neither.
+        let monitor = CGRect(x: 0, y: 0, width: 3008, height: 1269)
+        let stranded = CGRect(x: 748, y: 160, width: 1512, height: 949)
+        XCTAssertFalse(RemoteDisplay.hasWholeScreen(window: stranded, screen: monitor))
+        XCTAssertFalse(RemoteDisplay.fillsFullScreen(window: stranded, screen: monitor, safeAreaTop: 0))
+        // A screen without a housing has no slack: a point short is short.
+        XCTAssertTrue(RemoteDisplay.fillsFullScreen(window: monitor, screen: monitor, safeAreaTop: 0))
+        XCTAssertFalse(RemoteDisplay.fillsFullScreen(window: CGRect(x: 0, y: 0, width: 3008, height: 1267), screen: monitor, safeAreaTop: 0))
+        // Split View tiles: the left and the right half.
+        XCTAssertFalse(RemoteDisplay.hasWholeScreen(window: CGRect(x: 0, y: 0, width: 1501, height: 1269), screen: monitor))
+        XCTAssertFalse(RemoteDisplay.hasWholeScreen(window: CGRect(x: 1507, y: 0, width: 1501, height: 1269), screen: monitor))
+        // A monitor elsewhere in the arrangement.
+        let left = CGRect(x: -3008, y: 120, width: 3008, height: 1269)
+        XCTAssertTrue(RemoteDisplay.hasWholeScreen(window: left, screen: left))
+        XCTAssertFalse(RemoteDisplay.hasWholeScreen(window: monitor, screen: left))
+    }
+
+    func testFullScreenFillAsksSeldomForAFrameMacOSDoesNotTake() {
+        let monitor = CGRect(x: 0, y: 0, width: 3008, height: 1269)
+        let placeholder = CGRect(x: 544, y: 94, width: 1920, height: 1080)
+        var fill = FullScreenFill()
+        // The monitor is back and the window still has the placeholder's size.
+        XCTAssertFalse(fill.fills(window: placeholder, screen: monitor, safeAreaTop: 0))
+        XCTAssertEqual(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: 100),
+                       FullScreenFill.Attempt(frame: monitor, retry: false))
+        XCTAssertTrue(fill.applied(window: monitor, screen: monitor, safeAreaTop: 0))
+        XCTAssertNil(fill.attempt(window: monitor, screen: monitor, safeAreaTop: 0, now: 101))
+        // The next morning it is a new attempt, not a retry.
+        XCTAssertEqual(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: 100 + 86400),
+                       FullScreenFill.Attempt(frame: monitor, retry: false))
+        XCTAssertTrue(fill.applied(window: monitor, screen: monitor, safeAreaTop: 0))
+
+        // macOS leaves the window as it is: no more attempts for a while
+        // (the app asks every second, and on every resize), then again, and
+        // at once when the window or the screen changes.
+        fill = FullScreenFill()
+        XCTAssertNotNil(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: 200))
+        XCTAssertFalse(fill.applied(window: placeholder, screen: monitor, safeAreaTop: 0))
+        XCTAssertNil(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: 201))
+        XCTAssertNil(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: 202.9))
+        XCTAssertEqual(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: 203),
+                       FullScreenFill.Attempt(frame: monitor, retry: true))
+        XCTAssertFalse(fill.applied(window: placeholder, screen: monitor, safeAreaTop: 0))
+        XCTAssertNil(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: 204))
+        let moved = placeholder.offsetBy(dx: 10, dy: 0)
+        XCTAssertEqual(fill.attempt(window: moved, screen: monitor, safeAreaTop: 0, now: 204),
+                       FullScreenFill.Attempt(frame: monitor, retry: false))
+        XCTAssertFalse(fill.applied(window: moved, screen: monitor, safeAreaTop: 0))
+        // The same monitor at another place in the arrangement, and a larger one.
+        let rearranged = monitor.offsetBy(dx: -3008, dy: 0)
+        XCTAssertEqual(fill.attempt(window: moved, screen: rearranged, safeAreaTop: 0, now: 204.5),
+                       FullScreenFill.Attempt(frame: rearranged, retry: false))
+        let larger = CGRect(x: 0, y: 0, width: 3840, height: 1620)
+        XCTAssertEqual(fill.attempt(window: moved, screen: larger, safeAreaTop: 0, now: 204.6),
+                       FullScreenFill.Attempt(frame: larger, retry: false))
+
+        // macOS cuts the frame to another size than the one it had: the
+        // window is as the attempt left it, so that waits as well.
+        fill = FullScreenFill()
+        let cut = CGRect(x: 0, y: 0, width: 2560, height: 1269)
+        XCTAssertNotNil(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: 300))
+        XCTAssertFalse(fill.applied(window: cut, screen: monitor, safeAreaTop: 0))
+        XCTAssertNil(fill.attempt(window: cut, screen: monitor, safeAreaTop: 0, now: 301))
+        XCTAssertEqual(fill.attempt(window: cut, screen: monitor, safeAreaTop: 0, now: 303)?.retry, true)
+
+        // macOS takes the frame and puts the window back a moment later:
+        // not asked again at once either, and the retries stay retries.
+        fill = FullScreenFill()
+        XCTAssertNotNil(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: 400))
+        XCTAssertTrue(fill.applied(window: monitor, screen: monitor, safeAreaTop: 0))
+        XCTAssertNil(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: 401))
+        for retry in 1...30 {
+            let now = 400 + Double(retry) * 3
+            XCTAssertEqual(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: now)?.retry, true)
+            XCTAssertTrue(fill.applied(window: monitor, screen: monitor, safeAreaTop: 0))
+            XCTAssertNil(fill.attempt(window: placeholder, screen: monitor, safeAreaTop: 0, now: now + 1))
+        }
+    }
+
+    func testFullScreenFillLeavesTheHeightToMacOS() {
+        // A MacBook's own screen, where macOS cuts 950 points back to 949:
+        // that fills it, and nothing is asked again.
+        let macBook = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let window = CGRect(x: 0, y: 0, width: 1512, height: 949)
+        var own = FullScreenFill()
+        XCTAssertEqual(own.attempt(window: CGRect(x: 116, y: 131, width: 1280, height: 720), screen: macBook, safeAreaTop: 32, now: 0)?.frame,
+                       CGRect(x: 0, y: 0, width: 1512, height: 950))
+        XCTAssertTrue(own.applied(window: window, screen: macBook, safeAreaTop: 32))
+        for second in 1...10 {
+            XCTAssertNil(own.attempt(window: window, screen: macBook, safeAreaTop: 32, now: Double(second)))
+        }
+
+        // A screen where macOS keeps more below the housing than the slack
+        // allows for: what it makes of the frame stands, on that screen.
+        let other = CGRect(x: 0, y: 0, width: 1728, height: 1117)
+        let kept = CGRect(x: 0, y: 0, width: 1728, height: 1070)
+        var fill = FullScreenFill()
+        XCTAssertFalse(fill.fills(window: kept, screen: other, safeAreaTop: 37))
+        XCTAssertEqual(fill.attempt(window: kept, screen: other, safeAreaTop: 37, now: 0)?.frame, CGRect(x: 0, y: 0, width: 1728, height: 1080))
+        XCTAssertTrue(fill.applied(window: kept, screen: other, safeAreaTop: 37))
+        XCTAssertTrue(fill.fills(window: kept, screen: other, safeAreaTop: 37))
+        for second in 1...10 {
+            XCTAssertNil(fill.attempt(window: kept, screen: other, safeAreaTop: 37, now: Double(second)))
+        }
+        // Not on the monitor it is plugged into later, and not for a window
+        // that is narrower than the screen or off its bottom edge.
+        let monitor = CGRect(x: 0, y: 0, width: 3008, height: 1269)
+        XCTAssertEqual(fill.attempt(window: kept, screen: monitor, safeAreaTop: 0, now: 20)?.frame, monitor)
+        XCTAssertFalse(fill.applied(window: kept, screen: monitor, safeAreaTop: 0))
+        XCTAssertFalse(fill.fills(window: kept, screen: monitor, safeAreaTop: 0))
+        XCTAssertFalse(fill.applied(window: CGRect(x: 0, y: 100, width: 3008, height: 1000), screen: monitor, safeAreaTop: 0))
+    }
+
+    /// The placeholder of a closed MacBook is a "built-in display" to macOS.
+    func testThePlaceholderOfAClosedMacBookIsNoMonitor() {
+        let apple: UInt32 = 0x610, dell: UInt32 = 0x10AC, unknown: UInt32 = 0x756E_6B6E
+        XCTAssertTrue(RemoteDisplay.isMonitor(builtin: true, vendor: apple, lidClosed: false))
+        XCTAssertFalse(RemoteDisplay.isMonitor(builtin: true, vendor: apple, lidClosed: true))
+        XCTAssertFalse(RemoteDisplay.isMonitor(builtin: true, vendor: unknown, lidClosed: true))
+        // A Mac without a lid: its own screen counts, whatever its vendor.
+        XCTAssertTrue(RemoteDisplay.isMonitor(builtin: true, vendor: unknown, lidClosed: false))
+        XCTAssertTrue(RemoteDisplay.isMonitor(builtin: false, vendor: dell, lidClosed: true))
+        XCTAssertTrue(RemoteDisplay.isMonitor(builtin: false, vendor: dell, lidClosed: false))
+        XCTAssertFalse(RemoteDisplay.isMonitor(builtin: false, vendor: unknown, lidClosed: false))
+        XCTAssertFalse(RemoteDisplay.isMonitor(builtin: false, vendor: 0xFFFF_FFFF, lidClosed: true))
     }
 
     func testSizeFollowsTheViewInWholeSteps() {

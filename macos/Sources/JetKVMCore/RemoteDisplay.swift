@@ -350,26 +350,124 @@ extension RemoteDisplay {
     /// After this Mac's screens change (a monitor comes or goes, wake), the
     /// window settles this long before the remote display follows it.
     public static let screenSettle: TimeInterval = 3
-    /// On a screen macOS can't name, the remote waits this long after the
-    /// last change: with no monitor (a closed lid whose monitor sleeps or
-    /// wakes) macOS shows a 1920×1080 placeholder for a few seconds.
-    public static let unidentifiedScreenHold: TimeInterval = 30
+    /// On a screen that is no monitor (isMonitor), the remote waits this
+    /// long after the last change: with no monitor (a closed lid whose
+    /// monitor sleeps or wakes) macOS shows a 1920×1080 placeholder for a
+    /// few seconds.
+    public static let placeholderHold: TimeInterval = 30
 
     /// Seconds until the remote display may take the window's size: 0 for
     /// now, nil while this Mac's screens are off (the size a window has then
     /// is the placeholder's, and nobody sees it). `sinceScreenChange` is nil
     /// when the screens haven't changed since the window opened.
     public static func followDelay(screensAsleep: Bool, sinceScreenChange: TimeInterval?,
-                                   screenIdentified: Bool) -> TimeInterval? {
+                                   onMonitor: Bool) -> TimeInterval? {
         guard !screensAsleep else { return nil }
         guard let since = sinceScreenChange else { return 0 }
-        let hold = screenIdentified ? screenSettle : unidentifiedScreenHold
+        let hold = onMonitor ? screenSettle : placeholderHold
         return max(0, hold - max(0, since))
     }
 
+    /// Whether a screen is a real monitor, not the placeholder macOS shows
+    /// while a closed MacBook has none. macOS calls the placeholder a
+    /// built-in display (Built-in Display, 1920×1080), but a closed
+    /// MacBook's own panel is off; other screens count unless they have no
+    /// vendor (kDisplayVendorIDUnknown, 'unkn', or none at all).
+    public static func isMonitor(builtin: Bool, vendor: UInt32, lidClosed: Bool) -> Bool {
+        builtin ? !lidClosed : vendor != 0x756E_6B6E && vendor != 0xFFFF_FFFF
+    }
+
     /// The frame of a full-screen window on a screen: all of it below the
-    /// camera housing (`safeAreaTop`, 0 on screens without one).
+    /// camera housing (`safeAreaTop`, 0 on screens without one), in whole
+    /// points.
     public static func fullScreenFrame(screen: CGRect, safeAreaTop: CGFloat) -> CGRect {
-        CGRect(x: screen.minX, y: screen.minY, width: screen.width, height: screen.height - safeAreaTop)
+        CGRect(x: screen.minX, y: screen.minY, width: screen.width, height: (screen.height - safeAreaTop).rounded(.down))
+    }
+
+    /// Below a camera housing macOS keeps a little more than the housing's
+    /// height: a full-screen window is 1512×949 on a 1512×982 screen whose
+    /// housing is 32 points, and a taller frame is cut back to that. A
+    /// window this much shorter than fullScreenFrame still fills such a
+    /// screen.
+    public static let cameraHousingSlack: CGFloat = 4
+    /// A frame macOS didn't take, or didn't keep, is asked for again this
+    /// often while nothing else changes.
+    public static let fullScreenRetry: TimeInterval = 3
+    /// An attempt older than this is forgotten: the same frame is a new
+    /// attempt then, not a retry.
+    public static let fullScreenForget: TimeInterval = 60
+    /// The remote display waits this long for a full-screen window to get
+    /// its screen's size before it takes the size the window has.
+    public static let fullScreenFillHold: TimeInterval = 15
+
+    /// Whether a full-screen window has its screen to itself: it has the
+    /// screen's width. A Split View tile is narrower. (The height says
+    /// nothing: it depends on the camera housing.)
+    public static func hasWholeScreen(window: CGRect, screen: CGRect) -> Bool {
+        abs(window.minX - screen.minX) < 1 && abs(window.width - screen.width) < 1
+    }
+
+    /// Whether a full-screen window fills its screen: it reaches from the
+    /// screen's bottom edge to the camera housing, or to the top.
+    public static func fillsFullScreen(window: CGRect, screen: CGRect, safeAreaTop: CGFloat) -> Bool {
+        let full = fullScreenFrame(screen: screen, safeAreaTop: safeAreaTop)
+        let slack = safeAreaTop > 0 ? cameraHousingSlack : 0
+        return hasWholeScreen(window: window, screen: screen) && abs(window.minY - full.minY) < 1
+            && window.height >= full.height - slack && window.height <= screen.height
+    }
+}
+
+/// Keeps a full-screen window at its screen's size: says which frame to give
+/// it, and asks only every few seconds for a frame macOS doesn't take or
+/// doesn't keep (asked every second, a frame one point too tall once wrote
+/// 12,920 log lines in an evening).
+public struct FullScreenFill {
+    /// The frame to give the window. `retry`: asked for before, in vain.
+    public struct Attempt: Equatable {
+        public let frame: CGRect
+        public let retry: Bool
+    }
+
+    /// The last attempt: the window before it and, if macOS didn't take the
+    /// frame, after it, its screen, and when.
+    private var last: (before: CGRect, after: CGRect?, screen: CGRect, at: TimeInterval)?
+    /// What macOS made of an attempt, where that has the screen's width and
+    /// starts at its bottom edge: macOS has the last word on the height.
+    private var settled: (window: CGRect, screen: CGRect)?
+
+    public init() {}
+
+    /// Whether the window fills its screen, also at the height macOS chose.
+    public func fills(window: CGRect, screen: CGRect, safeAreaTop: CGFloat) -> Bool {
+        if let settled, settled.window == window, settled.screen == screen { return true }
+        return RemoteDisplay.fillsFullScreen(window: window, screen: screen, safeAreaTop: safeAreaTop)
+    }
+
+    /// The frame to give a full-screen window now, or nil: it fills its
+    /// screen, or the frame was asked for a moment ago and the window is as
+    /// it was then (before the attempt, or after one macOS didn't take).
+    /// `now` is in seconds, on any clock that only goes up.
+    public mutating func attempt(window: CGRect, screen: CGRect, safeAreaTop: CGFloat, now: TimeInterval) -> Attempt? {
+        guard !fills(window: window, screen: screen, safeAreaTop: safeAreaTop) else { return nil }
+        var retry = false
+        if let last, last.screen == screen, window == last.before || window == last.after,
+           now - last.at < RemoteDisplay.fullScreenForget {
+            guard now - last.at >= RemoteDisplay.fullScreenRetry else { return nil }
+            retry = true
+        }
+        last = (window, nil, screen, now)
+        return Attempt(frame: RemoteDisplay.fullScreenFrame(screen: screen, safeAreaTop: safeAreaTop), retry: retry)
+    }
+
+    /// The window's frame right after an attempt. False when macOS didn't
+    /// take the frame.
+    public mutating func applied(window: CGRect, screen: CGRect, safeAreaTop: CGFloat) -> Bool {
+        if RemoteDisplay.fillsFullScreen(window: window, screen: screen, safeAreaTop: safeAreaTop) { return true }
+        if RemoteDisplay.hasWholeScreen(window: window, screen: screen), abs(window.minY - screen.minY) < 1 {
+            settled = (window, screen)
+            return true
+        }
+        last?.after = window
+        return false
     }
 }
